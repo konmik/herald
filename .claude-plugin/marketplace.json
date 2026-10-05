@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "civilized-agent",
-      "source": "./claude",
+      "source": "./claude-plugin",
       "description": "Animated spoken task-completion summaries on Windows, macOS and Linux.",
       "version": "0.3.0"
     }

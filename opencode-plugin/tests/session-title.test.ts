@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const { sessionTitle } = await import("../claude/scripts/session-title.mjs")
+const { sessionTitle } = await import("../../claude-plugin/scripts/session-title.mjs")
 
 test("reads the latest renamed Claude session title", async () => {
   const directory = await mkdtemp(join(tmpdir(), "civilized-title-"))

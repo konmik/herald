@@ -4,15 +4,15 @@
   "type": "module",
   "private": true,
   "exports": {
-    ".": "./src/index.ts",
-    "./tui": "./src/tui.ts"
+    ".": "./opencode-plugin/index.ts",
+    "./tui": "./opencode-plugin/tui.ts"
   },
   "scripts": {
-    "test": "bun test ./tests",
-    "build:announcer": "node scripts/build-announcer.mjs",
-    "test:companion": "cargo test --locked --manifest-path announcer/Cargo.toml",
-    "test:windows": "pwsh -NoProfile -File scripts/verify-announcer.ps1",
-    "profile:plugin": "bun scripts/profile-plugin.ts"
+    "test": "bun test ./opencode-plugin/tests",
+    "build:announcer": "node development_tools/build-announcer.mjs",
+    "test:companion": "cargo test --locked --manifest-path native-announcer/Cargo.toml",
+    "test:windows": "pwsh -NoProfile -File development_tools/verify-announcer.ps1",
+    "profile:plugin": "bun development_tools/profile-plugin.ts"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.23",

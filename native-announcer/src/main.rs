@@ -3,6 +3,7 @@
 mod platform;
 mod render;
 mod state;
+mod video;
 mod window;
 
 use chrono::Timelike;
@@ -28,8 +29,7 @@ struct Active {
     speaking: bool,
     speech_finished: bool,
     silent: bool,
-    frames: Vec<PathBuf>,
-    portrait: PathBuf,
+    video: Option<video::Video>,
 }
 
 impl Active {
@@ -52,7 +52,7 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .parent()
         .unwrap()
-        .join("../assets");
+        .join("../resources");
     let mut demo = None;
     let mut test_seconds = None;
     let mut report = None;
@@ -163,9 +163,11 @@ fn run() -> Result<(), String> {
     let mut muted_announcements = 0;
     let mut static_frames = 0;
     let mut animation_frames = 0;
+    let mut decoded_video_frames = 0;
+    let mut video_loops = 0;
     let mut passive_window_ok = true;
-    let mut window_fade_frames = 0;
-    let mut window_fade_ok = true;
+    let mut window_opacity_updates = 0;
+    let mut abrupt_window_ok = true;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_frame);
         match event {
@@ -216,10 +218,14 @@ fn run() -> Result<(), String> {
                             window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
                         }
                         let directory = assets.join(notification.character());
-                        let frames = frames_in(directory.join("neutral"));
+                        let video = match video::Video::open(&directory.join("neutral.mp4")) {
+                            Ok(video) => Some(video),
+                            Err(error) => { state::log(&data, format!("Video: {error}")); None }
+                        };
                         let expires = now + state::display_duration(&notification.text);
-                        current = Some(Active { notification, started: now, expires, end: None, speaking: false, speech_finished: muted, silent: muted, frames, portrait: directory.join("portrait.png") });
-                        window_fade_ok &= platform::opacity(&window, 0.0);
+                        current = Some(Active { notification, started: Instant::now(), expires, end: None, speaking: false, speech_finished: muted, silent: muted, video });
+                        abrupt_window_ok &= platform::opacity(&window, 1.0);
+                        window_opacity_updates += 1;
                         let previous_focus = platform::foreground();
                         platform::show(&window);
                         if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
@@ -234,9 +240,6 @@ fn run() -> Result<(), String> {
                 }
                 let mut dismiss = false;
                 if let Some(active) = current.as_mut() {
-                    let progress = active.end.map(|end| 1.0 - end.elapsed().as_secs_f32() / state::TRANSITION_DURATION.as_secs_f32()).unwrap_or_else(|| active.started.elapsed().as_secs_f32() / state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-                    window_fade_ok &= platform::opacity(&window, progress * progress * (3.0 - 2.0 * progress));
-                    if progress > 0.0 && progress < 1.0 { window_fade_frames += 1; }
                     if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking && (active.silent || detection_ready.load(Ordering::Relaxed)) {
                         active.speaking = true;
                         if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), &settings); speech_started += 1; }
@@ -260,17 +263,24 @@ fn run() -> Result<(), String> {
                 *control_flow = ControlFlow::WaitUntil(next_frame);
             }
             Event::RedrawRequested(_) => {
-                if let Some(active) = &current {
+                if let Some(active) = &mut current {
                     let size = window.inner_size();
                     if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
                         let result = (|| -> Result<(), String> {
                             surface.resize(width, height).map_err(|e| e.to_string())?;
                             let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
                             let transition_time = active.end.map(|end| end.elapsed()).unwrap_or_else(|| active.started.elapsed());
-                            let interference = state::interference_amount(transition_time, active.notification.completed as u32);
+                            let interference = state::visual_interference_amount(transition_time, active.notification.completed as u32);
                             if interference > 0.0 { static_frames += 1; } else { animation_frames += 1; }
-                            let image = if active.frames.is_empty() { &active.portrait } else { &active.frames[state::video_frame_index(active.started.elapsed(), active.frames.len())] };
-                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, Some(image), interference);
+                            if let Some(video) = &mut active.video {
+                                let previous_frames = video.decoded_frames;
+                                let previous_loops = video.loops;
+                                video.advance(active.started.elapsed())?;
+                                decoded_video_frames += video.decoded_frames - previous_frames;
+                                video_loops += video.loops - previous_loops;
+                            }
+                            renderer.text_interference = if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
+                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, active.video.as_ref().map(video::Video::frame), interference);
                             if active.started.elapsed() > state::TRANSITION_DURATION && active.end.is_none() {
                                 if let Some(path) = snapshot.take() {
                                     let preview = image::RgbaImage::from_fn(size.width, size.height, |x, y| {
@@ -291,29 +301,13 @@ fn run() -> Result<(), String> {
                 if let Some(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
                 inbox.save(current.as_ref().map(|a| &a.notification));
                 if let Some(path) = &report {
-                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowFadeFrames": window_fade_frames, "windowFadeSucceeded": window_fade_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": state::VIDEO_FPS, "frameCacheLimit": 12});
+                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": state::VIDEO_FPS, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
                     let _ = std::fs::write(path, report.to_string());
                 }
             }
             _ => {}
         }
     });
-}
-
-fn frames_in(directory: PathBuf) -> Vec<PathBuf> {
-    let mut frames: Vec<_> = std::fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|s| s.to_string_lossy().starts_with("frame-"))
-                && p.extension().is_some_and(|s| s == "png")
-        })
-        .collect();
-    frames.sort();
-    frames
 }
 
 #[cfg(test)]
@@ -339,8 +333,7 @@ mod tests {
             speaking: true,
             speech_finished: false,
             silent: false,
-            frames: vec![],
-            portrait: PathBuf::new(),
+            video: None,
         };
         assert!(!active.ready_to_end(started + Duration::from_secs(20)));
         active.speech_finished = true;

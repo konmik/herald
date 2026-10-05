@@ -14,5 +14,5 @@
       "solid-js": ["C:/third-party/opencode/packages/plugin/node_modules/solid-js"]
     }
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["opencode-plugin/**/*.ts"]
 }

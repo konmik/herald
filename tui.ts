@@ -1,1 +1,1 @@
-export { default } from "./src/tui"
+export { default } from "./opencode-plugin/tui"

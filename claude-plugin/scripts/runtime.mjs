@@ -14,7 +14,7 @@ export function boot() {
   const suffix = process.platform === 'win32' ? '.exe' : ''
   const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
   if (!existsSync(binary)) throw new Error('Civilized Agent native announcer is missing. Run npm run build:announcer on this platform.')
-  const assets = fileURLToPath(new URL('../assets', import.meta.url))
+    const assets = fileURLToPath(new URL('../resources', import.meta.url))
   const child = spawn(binary, ['--assets', assets], { detached: true, stdio: 'ignore', windowsHide: true })
   child.on('error', console.error)
   child.unref()

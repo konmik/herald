@@ -1,4 +1,4 @@
-param([string]$Output = "$PSScriptRoot\..\assets\recordings")
+param([string]$Output = "$PSScriptRoot\..\generated-assets\recordings")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
 Add-Type -ReferencedAssemblies System.Speech -TypeDefinition @'

@@ -24,7 +24,9 @@ fn neutral() -> String {
 
 impl Notification {
     pub fn character(&self) -> &str {
-        if self.character == "claude"
+        if self.character == "monty" {
+            "monty"
+        } else if self.character == "claude"
             || (self.character.is_empty() && self.session_id.starts_with("claude:"))
         {
             "claude"
@@ -93,11 +95,20 @@ pub fn noise_hash(mut value: u32) -> u32 {
     value ^ (value >> 16)
 }
 
-pub fn video_frame_index(elapsed: Duration, count: usize) -> usize {
-    if count == 0 {
-        return 0;
+pub fn visual_interference_amount(elapsed: Duration, seed: u32) -> f32 {
+    let tick = (elapsed.as_millis() / 42) as u32;
+    let random = noise_hash(tick ^ seed);
+    if elapsed < TRANSITION_DURATION {
+        match random & 7 {
+            0..=3 => 0.0,
+            4 | 5 => 0.32,
+            _ => 0.62,
+        }
+    } else if random.is_multiple_of(71) {
+        0.28
+    } else {
+        0.0
     }
-    (elapsed.as_secs_f64() * VIDEO_FPS as f64) as usize % count
 }
 
 pub fn timestamp() -> u64 {
@@ -220,7 +231,6 @@ impl Inbox {
             match command {
                 Command::Notify(mut n) => {
                     if !self.received.contains(&n.id)
-                        && !self.presence.values().any(|(s, _)| s == &n.session_id)
                         && !self
                             .discarded
                             .iter()
@@ -248,9 +258,6 @@ impl Inbox {
                     at,
                 } => {
                     let session_id = session_id.unwrap_or_default();
-                    if !session_id.is_empty() && timestamp().saturating_sub(at) < 6000 {
-                        self.discard(session_id.clone(), at);
-                    }
                     if self.presence.len() >= 2048 {
                         self.presence.clear();
                     }
@@ -318,12 +325,15 @@ mod tests {
                 .count()
                 >= 4
         );
-        assert_eq!(video_frame_index(Duration::from_millis(124), 39), 0);
-        assert_eq!(video_frame_index(Duration::from_millis(125), 39), 1);
-        assert_eq!(video_frame_index(Duration::from_millis(249), 39), 1);
-        assert_eq!(video_frame_index(Duration::from_millis(250), 39), 2);
-        assert_eq!(video_frame_index(Duration::from_millis(4750), 39), 38);
-        assert_eq!(video_frame_index(Duration::from_millis(4875), 39), 0);
+        assert_eq!(VIDEO_FPS, 8);
+        let bursts: Vec<_> = (0..15)
+            .map(|index| visual_interference_amount(Duration::from_millis(index * 42), 1))
+            .collect();
+        assert!(bursts.contains(&0.0));
+        assert!(bursts.contains(&0.62));
+        assert!(bursts
+            .windows(2)
+            .any(|pair| (pair[0] - pair[1]).abs() > 0.5));
     }
 
     #[test]
@@ -397,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn active_presence_suppresses_notifications_but_stale_presence_does_not() {
+    fn viewing_a_session_does_not_suppress_its_notification() {
         let data = test_directory();
         let mut inbox = Inbox::new(data.clone());
         let now = timestamp();
@@ -422,8 +432,16 @@ mod tests {
             serde_json::json!({"type":"notify","id":"unseen","sessionID":"stale","completed":now,"text":"Done."}),
         );
         inbox.read(None);
-        assert_eq!(inbox.queue.len(), 1);
-        assert_eq!(inbox.queue.front().unwrap().id, "unseen");
+        assert_eq!(inbox.queue.len(), 2);
+        assert_eq!(inbox.queue.front().unwrap().id, "seen");
+        write_command(
+            &data,
+            "4",
+            serde_json::json!({"type":"presence","clientID":"client","sessionID":"viewed","at":now+2}),
+        );
+        let active = inbox.queue.front().unwrap().clone();
+        assert!(!inbox.read(Some(&active)));
+        assert_eq!(inbox.queue.len(), 2);
         std::fs::remove_dir_all(data).unwrap();
     }
 

@@ -1,15 +1,14 @@
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 use fontdue::Font;
 use image::RgbaImage;
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct Renderer {
     font: Font,
-    cache: VecDeque<(PathBuf, RgbaImage)>,
     pub text: String,
     pub title: String,
     pub color: u32,
+    pub text_interference: f32,
     seed: u32,
 }
 
@@ -49,10 +48,10 @@ impl Renderer {
             Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(str::to_owned)?;
         Ok(Self {
             font,
-            cache: VecDeque::new(),
             text: String::new(),
             title: String::new(),
             color: 0x3080e0,
+            text_interference: 0.0,
             seed: 567891,
         })
     }
@@ -93,8 +92,16 @@ impl Renderer {
             let (_, pixels) = self.font.rasterize_config(glyph.key);
             for row in 0..glyph.height {
                 for column in 0..glyph.width {
-                    let x = glyph.x as i32 + column as i32;
+                    let mut x = glyph.x as i32 + column as i32;
                     let y = glyph.y as i32 + row as i32;
+                    if self.text_interference > 0.0 {
+                        let band = (y as f32 / (3.0 * scale)).floor() as u32;
+                        let random = crate::state::noise_hash(band ^ self.seed);
+                        if random.is_multiple_of(3) {
+                            let offset = ((3 + (random >> 8) % 7) as f32 * scale).round() as i32;
+                            x += if random & 1 == 0 { offset } else { -offset };
+                        }
+                    }
                     if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
                         let index = y as usize * width + x as usize;
                         buffer[index] = blend(
@@ -114,7 +121,7 @@ impl Renderer {
         width: usize,
         height: usize,
         scale: f32,
-        image: Option<&Path>,
+        image: Option<&RgbaImage>,
         interference: f32,
     ) {
         buffer.fill(if cfg!(target_os = "windows") {
@@ -177,42 +184,40 @@ impl Renderer {
         let face_x = (188.0 * scale) as usize;
         let face_y = ((logical_height - 140.0) * scale) as usize;
         let face_size = (128.0 * scale) as usize;
-        if let Some(path) = image {
-            if let Some(index) = self.cache.iter().position(|(p, _)| p == path) {
-                let entry = self.cache.remove(index).unwrap();
-                self.cache.push_back(entry);
-            } else if let Ok(image) = image::open(path) {
-                let image = image
-                    .resize_exact(128, 128, image::imageops::FilterType::Triangle)
-                    .to_rgba8();
-                self.cache.push_back((path.to_owned(), image));
-                if self.cache.len() > 12 {
-                    self.cache.pop_front();
-                }
-            }
-        }
         let flicker = 0.85 + (self.random() % 16) as f32 / 100.0;
         let picture_flicker = 0.98 + (self.random() % 5) as f32 / 200.0;
-        let vertical_offset = if self.random().is_multiple_of(7) {
-            ((self.random() % 7) as i32 - 3) as f32 * interference
+        let vertical_offset = if interference > 0.0 {
+            let jump = 2 + self.random() % 5;
+            if self.random().is_multiple_of(2) {
+                jump as f32
+            } else {
+                -(jump as f32)
+            }
         } else {
             0.0
         };
-        let mut row_displacement = [0.0_f32; 128];
+        let mut row_displacement = [0_i32; 128];
         let mut row_snow = [false; 128];
-        for _ in 0..3 {
-            let start = self.random() as usize % 128;
-            let length = 1 + self.random() as usize % 8;
-            let shift = ((self.random() % 13) as i32 - 6) as f32 * interference;
-            for row in start..(start + length).min(128) {
-                row_displacement[row] += shift;
-                row_snow[row] = true;
+        if interference > 0.0 {
+            for _ in 0..4 {
+                let start = self.random() as usize % 128;
+                let length = 6 + self.random() as usize % 18;
+                let displacement = 5 + self.random() % 15;
+                let shift = if self.random().is_multiple_of(2) {
+                    displacement as i32
+                } else {
+                    -(displacement as i32)
+                };
+                for row in start..(start + length).min(128) {
+                    row_displacement[row] = shift;
+                    row_snow[row] = true;
+                }
             }
         }
         let scanline_phase = self.random() as usize % 3;
         for y in 0..face_size {
             let source_y = y * 128 / face_size;
-            let row_offset = row_displacement[source_y].round() as i32;
+            let row_offset = row_displacement[source_y];
             for x in 0..face_size {
                 if face_x + x >= width || face_y + y >= height {
                     continue;
@@ -223,19 +228,23 @@ impl Renderer {
                 let vertical = (y as f32 / face_size as f32 - 0.5) * 2.0;
                 let radius = horizontal * horizontal + vertical * vertical;
                 let curvature = 1.0 + radius * 0.065;
-                let warped_x = (horizontal * curvature + 1.0) * 63.5 + row_offset as f32;
-                let warped_y = (vertical * curvature + 1.0) * 63.5 + vertical_offset;
+                let warped_x = (horizontal * curvature + 1.0) * 63.5;
+                let warped_y = (vertical * curvature + 1.0) * 63.5;
                 if !(0.0..128.0).contains(&warped_x) || !(0.0..128.0).contains(&warped_y) {
                     buffer[index] = 0x080908;
                     continue;
                 }
-                if let Some((path, frame)) = self.cache.back() {
-                    if image.is_some_and(|p| p == path) {
-                        let pixel = frame.get_pixel(warped_x as u32, warped_y as u32).0;
-                        let color =
-                            ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32;
-                        buffer[index] = blend(buffer[index], color, pixel[3] as u32);
+                if let Some(frame) = image {
+                    let sample_x = (warped_x + row_offset as f32).rem_euclid(128.0) as u32;
+                    let sample_y = (warped_y + vertical_offset).rem_euclid(128.0) as u32;
+                    let mut pixel = frame.get_pixel(sample_x, sample_y).0;
+                    if row_snow[source_y] {
+                        pixel[0] = frame.get_pixel((sample_x + 126) % 128, sample_y).0[0];
+                        pixel[2] = frame.get_pixel((sample_x + 2) % 128, sample_y).0[2];
                     }
+                    let color =
+                        ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32;
+                    buffer[index] = blend(buffer[index], color, pixel[3] as u32);
                 }
                 let background = buffer[index];
                 let luminance = (((background >> 16) & 255) * 77
@@ -258,12 +267,15 @@ impl Renderer {
                     let mut grain =
                         ((random & 255) + ((random >> 8) & 255) + ((random >> 16) & 255)) / 3;
                     if row_snow[source_y] && random & 3 == 0 {
-                        grain = if random & 4 == 0 { 0 } else { 255 };
+                        grain = if random & 4 == 0 { 0 } else { 180 };
                     }
                     if (source_y + scanline_phase).is_multiple_of(3) {
                         grain = grain * 2 / 3;
                     }
-                    let alpha = (interference.clamp(0.0, 1.0) * flicker * 255.0) as u32;
+                    grain = grain.min(180);
+                    let strength =
+                        interference.clamp(0.0, 1.0) * if row_snow[source_y] { 1.0 } else { 0.12 };
+                    let alpha = (strength * flicker * 180.0) as u32;
                     let monochrome = grain * 0x010101;
                     let background = buffer[index];
                     let luminance = (((background >> 16) & 255) * 77
@@ -392,23 +404,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_cache_stays_at_twelve_images() {
-        let directory = std::env::temp_dir()
-            .join("opencode")
-            .join(format!("civilized-render-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+    fn text_tearing_leaves_bubble_and_picture_unchanged() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = "The task is complete.".into();
+        renderer.title = "My session".into();
+        let mut clean = vec![0; 320 * 240];
+        renderer.draw(&mut clean, 320, 240, 1.0, None, 0.0);
+        renderer.seed = 567891;
+        renderer.text_interference = 0.62;
+        let mut distorted = vec![0; 320 * 240];
+        renderer.draw(&mut distorted, 320, 240, 1.0, None, 0.0);
+        assert_ne!(clean, distorted);
+        for y in 0..240 {
+            for x in 0..320 {
+                if !(26..75).contains(&y) || !(14..306).contains(&x) {
+                    assert_eq!(clean[y * 320 + x], distorted[y * 320 + x]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn renders_decoded_video_frames_without_a_file_cache() {
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 240];
-        for index in 0..15 {
-            let path = directory.join(format!("frame-{index}.png"));
-            RgbaImage::from_pixel(128, 128, image::Rgba([20, 40, 80, 255]))
-                .save(&path)
-                .unwrap();
-            renderer.draw(&mut buffer, 320, 240, 1.0, Some(&path), 0.0);
+        for _ in 0..15 {
+            let frame = RgbaImage::from_pixel(128, 128, image::Rgba([20, 40, 80, 255]));
+            renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0);
         }
-        assert_eq!(renderer.cache.len(), 12);
-        assert_eq!(renderer.cache.back().unwrap().1.dimensions(), (128, 128));
-        std::fs::remove_dir_all(directory).unwrap();
+        let center = buffer[164 * 320 + 252];
+        assert!(center & 255 > (center >> 16) & 255);
     }
 
     #[test]
@@ -422,12 +447,12 @@ mod tests {
             .flat_map(|y| (188..316).map(move |x| y * 320 + x))
             .map(|i| buffer[i])
             .collect();
-        assert!(face.iter().any(|p| *p > 0x808080));
+        assert!(face.iter().any(|p| *p > 0x606060));
         assert!(face.iter().any(|p| *p < 0x404040));
         assert!(
             face.iter()
-                .filter(|p| (**p & 255).abs_diff((**p >> 8) & 255) <= 1
-                    && (**p & 255).abs_diff((**p >> 16) & 255) <= 1)
+                .filter(|p| (**p & 255).abs_diff((**p >> 8) & 255) <= 2
+                    && (**p & 255).abs_diff((**p >> 16) & 255) <= 2)
                 .count()
                 > face.len() * 9 / 10
         );
@@ -438,18 +463,33 @@ mod tests {
 
     #[test]
     fn interference_overlays_the_picture_instead_of_replacing_it() {
-        let path = std::env::temp_dir()
-            .join("opencode")
-            .join(format!("civilized-overlay-{}.png", std::process::id()));
-        RgbaImage::from_pixel(128, 128, image::Rgba([220, 60, 20, 255]))
-            .save(&path)
-            .unwrap();
+        let frame = RgbaImage::from_pixel(128, 128, image::Rgba([220, 60, 20, 255]));
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 240];
-        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&path), 0.82);
+        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.82);
         let center = buffer[164 * 320 + 252];
         assert!((center >> 16) & 255 > center & 255);
         assert_eq!(buffer[100 * 320 + 188], 0x080908);
-        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn interference_displaces_picture_features_before_adding_noise() {
+        let frame = RgbaImage::from_fn(128, 128, |x, _| {
+            image::Rgba([if (60..64).contains(&x) { 255 } else { 0 }, 0, 0, 255])
+        });
+        let mut clean = vec![0; 320 * 240];
+        let mut distorted = vec![0; 320 * 240];
+        Renderer::new()
+            .unwrap()
+            .draw(&mut clean, 320, 240, 1.0, Some(&frame), 0.0);
+        Renderer::new()
+            .unwrap()
+            .draw(&mut distorted, 320, 240, 1.0, Some(&frame), 0.62);
+        let peak = |buffer: &[u32], y: usize| {
+            (210..290)
+                .max_by_key(|x| (buffer[y * 320 + x] >> 16) & 255)
+                .unwrap()
+        };
+        assert!((120..210).any(|y| peak(&clean, y).abs_diff(peak(&distorted, y)) >= 5));
     }
 }

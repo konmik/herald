@@ -1,4 +1,4 @@
-import { Completions } from "../src/completions"
+import { Completions } from "../opencode-plugin/completions"
 
 const baseline = process.memoryUsage().rss
 const completions = new Completions(async () => "The task completed.", async () => {})

@@ -1,7 +1,7 @@
 param([switch]$Speech, [switch]$Meeting)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$binary = Join-Path $root 'claude/bin/civilized-announcer-win32-x64.exe'
+$binary = Join-Path $root 'claude-plugin/bin/civilized-announcer-win32-x64.exe'
 $temporary = Join-Path $env:LOCALAPPDATA "Temp/opencode/civilized-native-$([guid]::NewGuid())"
 $data = Join-Path $temporary 'data'
 $inbox = Join-Path $data 'inbox'
@@ -23,7 +23,7 @@ $info = [System.Diagnostics.ProcessStartInfo]::new($binary)
 $info.UseShellExecute = $false
 $info.Environment['CIVILIZED_AGENT_DATA'] = $data
 $info.ArgumentList.Add('--assets')
-$info.ArgumentList.Add((Join-Path $root 'claude/assets'))
+$info.ArgumentList.Add((Join-Path $root 'claude-plugin/resources'))
 $info.ArgumentList.Add('--test-seconds')
 $info.ArgumentList.Add('40')
 $info.ArgumentList.Add('--report')
@@ -44,7 +44,8 @@ $report | Add-Member -NotePropertyName binaryMB -NotePropertyValue ([Math]::Roun
 $report | ConvertTo-Json -Depth 5
 if (-not $report.focusChecked -or -not $report.focusUnchanged) { throw 'Foreground focus changed.' }
 if (-not $report.passiveWindow) { throw 'Window must stay topmost, refuse activation, and hide between notifications.' }
-if (-not $report.windowFadeSucceeded -or $report.windowFadeFrames -lt 4) { throw 'Window did not fade in and out.' }
+if (-not $report.abruptWindowSucceeded -or $report.windowOpacityUpdates -ne $report.shown) { throw 'Window visibility must change abruptly, without opacity animation.' }
+if ($report.decodedVideoFrames -lt 100 -or $report.videoLoops -lt 2) { throw 'MP4 videos did not decode and loop.' }
 if ($report.shown -ne 2 -or $report.finished -ne 2) { throw 'Both notifications must complete.' }
 if ($report.durations[0] -lt 10 -or $report.durations[1] -lt 15) { throw 'Notification duration is too short.' }
 if ($report.sessionTitles[0] -ne $messages[0].title -or $report.sessionTitles[1] -ne $messages[1].title) { throw 'Session titles were not displayed.' }
