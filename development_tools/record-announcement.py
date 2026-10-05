@@ -208,7 +208,7 @@ def main():
             frames = [json.loads(line) for line in (frames_directory / "timeline.jsonl").read_text().splitlines()]
             timeline, speech_delay, duration = video_timeline(frames, speech_seconds, report["durations"][0])
             opening_delay, closing_delay = interference_timing(frames)
-            interference = data / "interference-v3.wav"
+            interference = data / "interference-v4.wav"
             if not interference.exists():
                 raise RuntimeError("The announcer did not generate its interference sound")
             (frames_directory / "frames.ffconcat").write_text(timeline, encoding="utf-8")
@@ -218,10 +218,10 @@ def main():
                 Image.new("RGB", image.size, "#202020").save(frames_directory / "background.png")
             subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(frames_directory / "frames.ffconcat"), "-i", str(temporary / "speech.wav"), "-i", str(interference),
-                "-filter_complex", f"[0:v]fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2[v];[1:a]adelay={round(speech_delay*1000)}:all=1,apad[speech];[2:a]volume=4,asplit=2[opening][closing];[opening]adelay={round(opening_delay*1000)}:all=1[start];[closing]adelay={round(closing_delay*1000)}:all=1[end];[speech][start][end]amix=inputs=3:normalize=0[a]",
+                "-filter_complex", f"[0:v]fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2[v];[1:a]adelay={round(speech_delay*1000)}:all=1,apad[speech];[2:a]asplit=2[opening][closing];[opening]adelay={round(opening_delay*1000)}:all=1[start];[closing]adelay={round(closing_delay*1000)}:all=1[end];[speech][start][end]amix=inputs=3:normalize=0[a]",
                 "-map", "[v]", "-map", "[a]", "-t", f"{duration:.9f}", "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(args.output)
             ], check=True, timeout=120)
-            report.update({"narrationGenerated": True, "speechDelaySeconds": speech_delay, "speechDurationSeconds": speech_seconds, "durationSeconds": duration, "beforeSeconds": 0.5, "afterSeconds": 0.5, "announcementDisappearsSeconds": duration - 0.5, "background": "#202020", "interferenceIncluded": True, "closingInterferenceSeconds": closing_delay, "interferenceGain": 4})
+            report.update({"narrationGenerated": True, "speechDelaySeconds": speech_delay, "speechDurationSeconds": speech_seconds, "durationSeconds": duration, "beforeSeconds": 0.5, "afterSeconds": 0.5, "announcementDisappearsSeconds": duration - 0.5, "background": "#202020", "interferenceIncluded": True, "closingInterferenceSeconds": closing_delay, "interferenceGain": 1})
             args.output.with_suffix(".json").write_text(json.dumps({"original": message, "recording": last_message(data / "history.jsonl"), "verification": report}, indent=2), encoding="utf-8")
             print(args.output, flush=True)
         finally:

@@ -366,7 +366,7 @@ pub struct Signal {
 
 impl Signal {
     pub fn new(data: &Path) -> Self {
-        let path = data.join("interference-v3.wav");
+        let path = data.join("interference-v4.wav");
         if !path.exists() {
             let samples = (crate::state::TRANSITION_DURATION.as_secs_f32() * 16000.0) as u32;
             let sample_bytes = samples * 2;
@@ -401,10 +401,10 @@ impl Signal {
                     0.0
                 };
                 let envelope = crate::state::interference_amount(
-                    Duration::from_secs_f32(index as f32 / 16000.0),
+                    Duration::from_secs_f32(crate::state::TRANSITION_DURATION.as_secs_f32() * index as f32 / (samples - 1) as f32),
                     734971,
                 );
-                let value = ((white * 0.7 + filtered * 0.3 + crackle) * envelope) as i16;
+                let value = ((white * 0.7 + filtered * 0.3 + crackle) * envelope * 24.0) as i16;
                 wav.extend(value.to_le_bytes());
             }
             let _ = std::fs::write(&path, wav);
@@ -632,6 +632,10 @@ mod tests {
             .map(|v| i32::from(*v).abs())
             .sum();
         assert!(middle > edge * 20);
+        let peak = samples.iter().map(|value| i32::from(*value).abs()).max().unwrap();
+        let rms = (samples.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>() / samples.len() as f64).sqrt();
+        assert!(peak > 8000 && peak < 16000, "Static should be audible without clipping: {peak}");
+        assert!(rms > 2000.0, "Static should have audible average volume: {rms}");
         drop(signal);
         std::fs::remove_dir_all(data).unwrap();
     }
