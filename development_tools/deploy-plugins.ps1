@@ -22,6 +22,13 @@ function Get-ClaudeInstallations {
     return @($installed.plugins[$PluginId] | Where-Object { $_.scope -eq 'user' })
 }
 
+function Enable-ClaudePlugin {
+    $plugins = (& claude plugin list --json) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect enabled Claude plugins' }
+    if (@($plugins | Where-Object { $_.id -eq $PluginId -and $_.scope -eq 'user' -and $_.enabled }).Count) { return }
+    Invoke-Checked 'claude' @('plugin', 'enable', $PluginId, '--scope', 'user')
+}
+
 function Remove-DeploymentDirectory {
     param([string]$Directory)
     $shared = Join-Path $Directory 'native-announcer'
@@ -133,7 +140,7 @@ try {
     foreach ($installation in $installed) {
         Deploy-ClaudeFiles $source $installation.installPath $ClaudeConfigDirectory $announcer
     }
-    Invoke-Checked 'claude' @('plugin', 'enable', $PluginId, '--scope', 'user')
+    Enable-ClaudePlugin
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Built announcer binary is missing' }
     Start-Process -FilePath $binary -ArgumentList @('--assets', ('"' + (Join-Path $announcer 'resources') + '"')) -WindowStyle Hidden | Out-Null
     $restartAnnouncer = $false

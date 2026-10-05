@@ -50,7 +50,22 @@ try {
     Assert-True (Test-Path "$shared/resources/keep.txt") 'Redeployment removed shared resources through a junction'
     Remove-DeploymentDirectory $cache
     Assert-True (Test-Path "$shared/resources/keep.txt") 'Deployment cleanup removed the shared announcer'
-    Write-Output '5 deployment checks passed.'
+    $script:enableCalls = 0
+    $script:pluginEnabled = $true
+    function claude {
+        if ($args[1] -eq 'list') {
+            @(@{ id = $PluginId; scope = 'user'; enabled = $script:pluginEnabled }) | ConvertTo-Json -AsArray
+        } elseif ($args[1] -eq 'enable') {
+            $script:enableCalls++
+        } else { throw 'Unexpected Claude command in deployment test' }
+        $global:LASTEXITCODE = 0
+    }
+    Enable-ClaudePlugin
+    Assert-True ($script:enableCalls -eq 0) 'Deployment tried to enable an already enabled plugin'
+    $script:pluginEnabled = $false
+    Enable-ClaudePlugin
+    Assert-True ($script:enableCalls -eq 1) 'Deployment did not enable a disabled plugin'
+    Write-Output '7 deployment checks passed.'
 } finally {
     $junction = Join-Path $temporary 'profile/plugins/cache/civilized-agent-local/civilized-agent/0.3.0/native-announcer'
     if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }

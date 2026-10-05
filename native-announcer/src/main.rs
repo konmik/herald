@@ -60,9 +60,11 @@ fn run() -> Result<(), String> {
     let mut test_seconds = None;
     let mut report = None;
     let mut snapshot = None;
+    let mut isolated = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--isolated" => isolated = true,
             "--assets" => assets = arguments.next().ok_or("Missing assets path")?.into(),
             "--demo" => demo = Some(arguments.next().ok_or("Missing character")?),
             "--test-seconds" => {
@@ -88,8 +90,11 @@ fn run() -> Result<(), String> {
         }
     }
     let data = platform::data_directory();
+    if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
+        return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
+    }
     std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
-    let _lock = match std::net::TcpListener::bind("127.0.0.1:47863") {
+    let _lock = match std::net::TcpListener::bind(("127.0.0.1", if isolated { 0 } else { 47863 })) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
         Err(error) => return Err(error.to_string()),
