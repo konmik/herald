@@ -139,7 +139,7 @@ def node(kind, **inputs):
     return {"class_type": kind, "inputs": inputs}
 
 
-def portrait(character=None, size=512, steps=20):
+def portrait(character=None, size=512, steps=20, prompt_override=None, seed=None, retain_native=False):
     prompt = "An original fictional adult male royal adviser, clean shaven, short brown hair, friendly expressive face, wearing a simple dark green Renaissance velvet tunic with a gold collar, realistic photographed actor with a 1990s strategy-game adviser aesthetic, warm muted colors, even studio lighting, tightly framed head and shoulders, perfectly front facing, looking directly into the camera, eyes open, mouth closed, head upright and still, plain dark charcoal background, no props, no text, no watermark. Square composition with the entire head visible and the face large and centered."
     if character:
         identity = "a young adult man with curly dark hair, clean shaven, wearing a charcoal Renaissance tunic with prominent burnt-orange collar and orange shoulder panels" if character == "claude" else "an older man with short silver hair, clean shaven, wearing a charcoal Renaissance tunic with prominent royal-blue collar and blue shoulder panels"
@@ -149,6 +149,7 @@ def portrait(character=None, size=512, steps=20):
     if character in MEDIEVAL_IDENTITIES:
         prompt = f"An original fictional medieval announcer from a low-budget 1970s British absurdist comedy, Monty Python and the Holy Grail atmosphere: {MEDIEVAL_IDENTITIES[character]}. Realistic photographed actor, faintly ridiculous practical theatrical costume, earthy muted colors, old film aesthetic. Very tight head and shoulders portrait, entire hat visible, face large and centered, perfectly front facing, direct eye contact, eyes open, mouth closed. Fixed soft even studio lighting, plain dark charcoal background, crisp recognizable facial features. No modern objects, no props, no text, no watermark."
     collection = character in MEDIEVAL_IDENTITIES
+    prompt = prompt_override or prompt
     destination = ASSETS / "character-portraits"
     destination.mkdir(parents=True, exist_ok=True)
     graph = {
@@ -159,23 +160,24 @@ def portrait(character=None, size=512, steps=20):
         "5": node("ConditioningZeroOut", conditioning=["4", 0]),
         "6": node("EmptySD3LatentImage", width=size, height=size, batch_size=1),
         "7": node("FluxGuidance", conditioning=["4", 0], guidance=3.5),
-        "8": node("KSampler", model=["1", 0], positive=["7", 0], negative=["5", 0], latent_image=["6", 0], seed=478324 + list(MEDIEVAL_IDENTITIES).index(character) if character in MEDIEVAL_IDENTITIES else 478323 if character == "monty" else 478322 if character == "claude" else 478321, steps=steps, cfg=1.0, sampler_name="euler", scheduler="simple", denoise=1.0),
+        "8": node("KSampler", model=["1", 0], positive=["7", 0], negative=["5", 0], latent_image=["6", 0], seed=seed if seed is not None else 478324 + list(MEDIEVAL_IDENTITIES).index(character) if character in MEDIEVAL_IDENTITIES else 478323 if character == "monty" else 478322 if character == "claude" else 478321, steps=steps, cfg=1.0, sampler_name="euler", scheduler="simple", denoise=1.0),
         "9": node("VAEDecode", samples=["8", 0], vae=["3", 0]),
         "10": node("SaveImage", images=["9", 0], filename_prefix=f"civilized/{character or 'original'}/portrait"),
     }
     source = run_graph(graph, f"{character}-portrait" if character else "portrait")[0]
-    image = Image.open(source)
-    if image.size != (size, size):
-        raise RuntimeError(f"Unexpected portrait dimensions: {image.size}")
     output = destination / f"{character or 'original'}.png"
-    image.resize((128, 128), Image.Resampling.LANCZOS).save(output)
+    with Image.open(source) as image:
+        if image.size != (size, size):
+            raise RuntimeError(f"Unexpected portrait dimensions: {image.size}")
+        image.resize((size, size) if retain_native else (128, 128), Image.Resampling.LANCZOS).save(output)
     print(output, flush=True)
-    if not collection:
+    if not collection and not retain_native:
         source_output = destination / f"{character or 'original'}-source.png"
         shutil.copyfile(source, source_output)
+    return output, source
 
 
-def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=6.0, prompt=None, negative_prompt=None, audio_path=None, output_frames=None, seed=478321):
+def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=6.0, prompt=None, negative_prompt=None, audio_path=None, output_frames=None, seed=478321, publish=True):
     destination = ASSETS / character if character else ASSETS
     recordings = ASSETS / "recordings"
     audio_path = Path(audio_path) if audio_path else recordings / f"{emotion}.wav"
@@ -220,9 +222,10 @@ def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=
     }
     source = run_graph(graph, f"{character}-{emotion}" if character else emotion)[0]
     shutil.copyfile(source, destination / f"{emotion}.mp4")
-    if character:
+    if character and publish:
         publish_video(emotion, character, size, fps)
     print(destination / f"{emotion}.mp4", flush=True)
+    return destination / f"{emotion}.mp4", source
 
 
 def publish_video(emotion, character, size=384, fps=16):

@@ -40,15 +40,20 @@ test('short tasks and interrupted tasks make no summary request', async ($, on) 
   expect(requests).toBe(0)
 })
 
-test('subagents summarize their own report with their own model', async ($, on) => {
+test('subagent announcements fork the conversation with their final report once', async ($, on) => {
   const clock = mock.clock(on)
-  let model = ''
+  let forks = 0
+  let completions = 0
   let prompt = ''
   let command: unknown
   on('session.id', () => ({ value: 'main' }))
   on('turn.complete', () => ({ text: '' }))
-  on('model.complete', (_, e) => {
-    model = e.model
+  on('model.complete', () => {
+    completions++
+    return { value: { isAnswered: true, text: 'Unexpected standalone completion.', usage } }
+  })
+  on('model.fork', (_, e) => {
+    forks++
     prompt = e.prompt
     return { value: { isAnswered: true, text: 'The review is complete.', usage } }
   })
@@ -56,9 +61,13 @@ test('subagents summarize their own report with their own model', async ($, on) 
     command = JSON.parse(e.init?.stdin ?? '{}')
     return { value: processResult }
   })
-  await $.turn.complete({ turnId: 'review', agentId: 'child', answer: 'Reviewed the implementation.', durationMs: 70000, isAborted: false, reason: 'answer', usage: { ...usage, model: 'claude-sonnet-4-6' } })
+  const event = { turnId: 'review', agentId: 'child', answer: 'Reviewed the implementation.', durationMs: 70000, isAborted: false, reason: 'answer' as const }
+  await $.turn.complete(event)
   await clock.settle()
-  expect(model).toBe('claude-sonnet-4-6')
+  await $.turn.complete(event)
+  await clock.settle()
+  expect(forks).toBe(1)
+  expect(completions).toBe(0)
   expect(prompt).toContain('Reviewed the implementation.')
   expect(command).toMatchObject({ type: 'notify', sessionID: 'claude:main:child' })
 })

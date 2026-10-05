@@ -12,9 +12,11 @@ export const dataDirectory = process.env.CIVILIZED_AGENT_DATA ?? (process.platfo
 
 export function boot() {
   const suffix = process.platform === 'win32' ? '.exe' : ''
-  const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
+  const packaged = new URL('../native-announcer/', import.meta.url)
+  const announcer = existsSync(fileURLToPath(packaged)) ? packaged : new URL('../../native-announcer/', import.meta.url)
+  const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, announcer))
   if (!existsSync(binary)) throw new Error('Civilized Agent native announcer is missing. Run npm run build:announcer on this platform.')
-  const assets = fileURLToPath(new URL('../../native-announcer/resources', import.meta.url))
+  const assets = fileURLToPath(new URL('resources', announcer))
   const child = spawn(binary, ['--assets', assets], { detached: true, stdio: 'ignore', windowsHide: true })
   child.on('error', console.error)
   child.unref()

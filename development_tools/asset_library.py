@@ -5,11 +5,11 @@ def clean_assets(assets, runtime_assets):
     assets = Path(assets)
     runtime_assets = Path(runtime_assets)
     files = [path for root in (assets, runtime_assets) for path in root.rglob("*") if path.is_file()]
-    resources = [path for path in files if path.suffix == ".png" or path.name == "neutral.mp4"]
+    resources = [path for path in files if path.suffix == ".png" or path.name == "neutral.mp4" or (path.parent == runtime_assets / "videos" and path.suffix == ".mp4")]
     targets = {}
     for resource in resources:
         target = resource
-        if resource.suffix == ".png" and resource.parent != assets / "character-portraits":
+        if resource.suffix == ".png" and resource.parent not in (assets / "character-portraits", runtime_assets / "portraits"):
             character = "original" if resource.parent == assets else resource.parent.name
             suffix = "-source" if resource.stem == "portrait-source" else ""
             target = assets / "character-portraits" / f"{character}{suffix}.png"

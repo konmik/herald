@@ -1,6 +1,23 @@
 use image::RgbaImage;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+pub fn select_path(assets: &Path, character: &str) -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    let paths: Vec<_> = std::fs::read_dir(assets.join("videos"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")))
+        .collect();
+    if paths.is_empty() {
+        assets.join(character).join("neutral.mp4")
+    } else {
+        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        paths[random as usize % paths.len()].clone()
+    }
+}
 
 pub struct Video {
     decoder: Decoder,
@@ -12,9 +29,11 @@ pub struct Video {
 
 impl Video {
     pub fn open(path: &Path) -> Result<Self, String> {
+        let decoder = Decoder::open(path)?;
+        let (width, height) = decoder.dimensions();
         Ok(Self {
-            decoder: Decoder::open(path)?,
-            frame: RgbaImage::new(128, 128),
+            decoder,
+            frame: RgbaImage::new(width, height),
             tick: None,
             decoded_frames: 0,
             loops: 0,
@@ -22,7 +41,7 @@ impl Video {
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Result<(), String> {
-        let tick = (elapsed.as_secs_f64() * crate::state::VIDEO_FPS as f64) as u64;
+        let tick = (elapsed.as_secs_f64() * self.fps()) as u64;
         if self.tick == Some(tick) {
             return Ok(());
         }
@@ -34,6 +53,10 @@ impl Video {
 
     pub fn frame(&self) -> &RgbaImage {
         &self.frame
+    }
+
+    pub fn fps(&self) -> f64 {
+        self.decoder.fps()
     }
 }
 
@@ -69,6 +92,9 @@ mod native {
     pub struct Decoder {
         reader: IMFSourceReader,
         stride: i32,
+        width: u32,
+        height: u32,
+        fps: f64,
         _runtime: Runtime,
     }
 
@@ -117,19 +143,37 @@ mod native {
                 let dimensions = actual
                     .GetUINT64(&MF_MT_FRAME_SIZE)
                     .map_err(|e| e.to_string())?;
-                if dimensions >> 32 != 128 || dimensions as u32 != 128 {
-                    return Err("Announcer videos must be 128 by 128 pixels".into());
+                let width = (dimensions >> 32) as u32;
+                let height = dimensions as u32;
+                if width == 0 || height == 0 || width > 4096 || height > 4096 {
+                    return Err("Unsupported video dimensions".into());
                 }
-                let stride = actual.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(512) as i32;
-                if stride.unsigned_abs() != 512 {
+                let stride = actual.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(width * 4) as i32;
+                if stride.unsigned_abs() < width * 4 {
                     return Err("Unexpected video stride".into());
+                }
+                let rate = actual.GetUINT64(&MF_MT_FRAME_RATE).map_err(|e| e.to_string())?;
+                let fps = (rate >> 32) as f64 / (rate as u32) as f64;
+                if !fps.is_finite() || fps < 1.0 || fps > 240.0 {
+                    return Err("Unsupported video frame rate".into());
                 }
                 Ok(Self {
                     reader,
                     stride,
+                    width,
+                    height,
+                    fps,
                     _runtime: runtime,
                 })
             }
+        }
+
+        pub fn dimensions(&self) -> (u32, u32) {
+            (self.width, self.height)
+        }
+
+        pub fn fps(&self) -> f64 {
+            self.fps
         }
 
         pub fn read(&mut self, frame: &mut RgbaImage) -> Result<bool, String> {
@@ -169,12 +213,12 @@ mod native {
                     buffer
                         .Lock(&mut bytes, None, Some(&mut length))
                         .map_err(|e| e.to_string())?;
-                    let result = if length >= 128 * 128 * 4 {
+                    let result = if length >= self.stride.unsigned_abs() * self.height {
                         let input = std::slice::from_raw_parts(bytes, length as usize);
-                        for y in 0..128 {
-                            let source_y = if self.stride < 0 { 127 - y } else { y };
-                            for x in 0..128 {
-                                let index = (source_y * 128 + x) * 4;
+                        for y in 0..self.height {
+                            let source_y = if self.stride < 0 { self.height - 1 - y } else { y };
+                            for x in 0..self.width {
+                                let index = (source_y * self.stride.unsigned_abs() + x * 4) as usize;
                                 frame.put_pixel(
                                     x as u32,
                                     y as u32,
@@ -208,6 +252,14 @@ struct Decoder {
 
 #[cfg(not(target_os = "windows"))]
 impl Decoder {
+    fn dimensions(&self) -> (u32, u32) {
+        (128, 128)
+    }
+
+    fn fps(&self) -> f64 {
+        crate::state::VIDEO_FPS as f64
+    }
+
     fn open(path: &Path) -> Result<Self, String> {
         use std::process::{Command, Stdio};
         let mut child = Command::new("ffmpeg")
@@ -254,5 +306,32 @@ impl Drop for Decoder {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_the_integration_video_without_a_shared_library() {
+        let assets = Path::new("missing-announcer-test-assets");
+        assert_eq!(select_path(assets, "claude"), assets.join("claude/neutral.mp4"));
+    }
+
+    #[test]
+    fn selects_only_videos_from_the_shared_library() {
+        let directory = std::env::temp_dir().join(format!("civilized-video-selection-{}-{}", std::process::id(), crate::state::timestamp()));
+        let library = directory.join("videos");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(library.join("first.mp4"), []).unwrap();
+        std::fs::write(library.join("second.MP4"), []).unwrap();
+        std::fs::write(library.join("portrait.png"), []).unwrap();
+        std::fs::create_dir(library.join("directory.mp4")).unwrap();
+        for _ in 0..100 {
+            let selected = select_path(&directory, "opencode");
+            assert!(selected == library.join("first.mp4") || selected == library.join("second.MP4"));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

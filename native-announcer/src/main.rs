@@ -165,6 +165,8 @@ fn run() -> Result<(), String> {
     let mut animation_frames = 0;
     let mut decoded_video_frames = 0;
     let mut video_loops = 0;
+    let mut selected_videos = Vec::new();
+    let mut video_frame_rates = Vec::new();
     let mut passive_window_ok = true;
     let mut window_opacity_updates = 0;
     let mut abrupt_window_ok = true;
@@ -207,7 +209,6 @@ fn run() -> Result<(), String> {
                     if let Some(notification) = inbox.queue.pop_front() {
                         renderer.text = notification.text.clone();
                         renderer.title = if notification.title.trim().is_empty() { "Untitled session".into() } else { notification.title.clone() };
-                        renderer.color = if notification.character() == "claude" { 0xe08030 } else { 0x3080e0 };
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
                         let height = (renderer.message_height() + 238).min(max_height).max(240);
@@ -217,11 +218,15 @@ fn run() -> Result<(), String> {
                             let position = monitor.position();
                             window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
                         }
-                        let directory = assets.join(notification.character());
-                        let video = match video::Video::open(&directory.join("neutral.mp4")) {
+                        let path = video::select_path(&assets, notification.character());
+                        let video = match video::Video::open(&path) {
                             Ok(video) => Some(video),
                             Err(error) => { state::log(&data, format!("Video: {error}")); None }
                         };
+                        if let Some(video) = &video {
+                            selected_videos.push(path.to_string_lossy().into_owned());
+                            video_frame_rates.push(video.fps());
+                        }
                         let expires = now + state::display_duration(&notification.text);
                         current = Some(Active { notification, started: Instant::now(), expires, end: None, speaking: false, speech_finished: muted, silent: muted, video });
                         abrupt_window_ok &= platform::opacity(&window, 1.0);
@@ -258,7 +263,7 @@ fn run() -> Result<(), String> {
                     current = None; signal.stop(); platform::hide(&window); finished += 1; inbox.save(None);
                     passive_window_ok &= platform::passive_window(&window, false);
                 }
-                let interval = current.as_ref().map(|active| if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { 42 } else { 1000 / state::VIDEO_FPS as u64 }).unwrap_or(250);
+                let interval = current.as_ref().map(|active| if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { 42 } else { (1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64 }).unwrap_or(250);
                 next_frame = now + Duration::from_millis(interval);
                 *control_flow = ControlFlow::WaitUntil(next_frame);
             }
@@ -301,7 +306,7 @@ fn run() -> Result<(), String> {
                 if let Some(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
                 inbox.save(current.as_ref().map(|a| &a.notification));
                 if let Some(path) = &report {
-                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": state::VIDEO_FPS, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
+                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": video_frame_rates.first().copied().unwrap_or(state::VIDEO_FPS as f64), "selectedVideos": selected_videos, "videoFrameRates": video_frame_rates, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
                     let _ = std::fs::write(path, report.to_string());
                 }
             }

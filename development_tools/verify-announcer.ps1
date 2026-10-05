@@ -25,7 +25,7 @@ $info.Environment['CIVILIZED_AGENT_DATA'] = $data
 $info.ArgumentList.Add('--assets')
 $info.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
 $info.ArgumentList.Add('--test-seconds')
-$info.ArgumentList.Add('40')
+$info.ArgumentList.Add('75')
 $info.ArgumentList.Add('--report')
 $info.ArgumentList.Add($reportPath)
 $info.ArgumentList.Add('--snapshot')
@@ -50,7 +50,13 @@ if ($report.shown -ne 2 -or $report.finished -ne 2) { throw 'Both notifications 
 if ($report.durations[0] -lt 10 -or $report.durations[1] -lt 15) { throw 'Notification duration is too short.' }
 if ($report.sessionTitles[0] -ne $messages[0].title -or $report.sessionTitles[1] -ne $messages[1].title) { throw 'Session titles were not displayed.' }
 if ($report.animationFrames -lt 2 -or $report.staticFrames -lt 2) { throw 'Animation or static transitions did not render.' }
-if ($report.videoFPS -ne 8) { throw 'Character playback must use eight frames per second.' }
+$library = Get-ChildItem (Join-Path $root 'native-announcer/resources/videos') -Filter '*.mp4' -ErrorAction SilentlyContinue
+$expectedFPS = if ($library) { 16 } else { 8 }
+if ($report.videoFPS -ne $expectedFPS) { throw "Character playback must use $expectedFPS frames per second." }
+if ($library) {
+    $libraryPath = (Resolve-Path (Join-Path $root 'native-announcer/resources/videos')).Path
+    if ($report.selectedVideos.Count -ne 2 -or @($report.selectedVideos | Where-Object { (Resolve-Path (Split-Path $_ -Parent)).Path -ne $libraryPath }).Count -ne 0) { throw 'Notifications must select videos from the shared library.' }
+}
 if ($peak -ge 100MB) { throw 'Announcer exceeded 100 MB.' }
 if ($Speech -and $report.speechStarted -ne 2) { throw 'Both characters must speak.' }
 if (-not $Speech -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 2)) { throw 'Quiet hours must suppress speech only.' }

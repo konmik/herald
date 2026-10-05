@@ -7,7 +7,6 @@ pub struct Renderer {
     font: Font,
     pub text: String,
     pub title: String,
-    pub color: u32,
     pub text_interference: f32,
     seed: u32,
 }
@@ -50,7 +49,6 @@ impl Renderer {
             font,
             text: String::new(),
             title: String::new(),
-            color: 0x3080e0,
             text_interference: 0.0,
             seed: 567891,
         })
@@ -124,6 +122,10 @@ impl Renderer {
         image: Option<&RgbaImage>,
         interference: f32,
     ) {
+        let resized = image.filter(|frame| frame.dimensions() != (128, 128)).map(|frame| {
+            image::imageops::resize(frame, 128, 128, image::imageops::FilterType::Triangle)
+        });
+        let image = resized.as_ref().or(image);
         buffer.fill(if cfg!(target_os = "windows") {
             0xff00ff
         } else {
@@ -136,7 +138,6 @@ impl Renderer {
             height,
             scale,
             logical_height - 152.0,
-            self.color,
             video_background(image),
         );
         let title_y = logical_height - 188.0;
@@ -323,7 +324,6 @@ fn draw_bubble(
     height: usize,
     scale: f32,
     bottom: f32,
-    accent: u32,
     fill: u32,
 ) {
     for y in 0..height {
@@ -352,9 +352,6 @@ fn draw_bubble(
             }
             if rounded_contains(x_position, y_position, [6.0, 6.0, 314.0, bottom], 20.0) {
                 buffer[y * width + x] = fill;
-                if rounded_contains(x_position, y_position, [26.0, 16.0, 58.0, 19.0], 1.5) {
-                    buffer[y * width + x] = accent;
-                }
                 if (26.0..294.0).contains(&x_position)
                     && (bottom - 46.0..bottom - 45.0).contains(&y_position)
                 {
@@ -422,10 +419,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bubble_has_accent_footer_and_a_tail_pointing_to_the_portrait() {
+    fn bubble_has_no_accent_and_keeps_the_footer_and_tail() {
         let mut buffer = vec![0xff00ff; 320 * 260];
-        draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x3080e0, 0x191f2a);
-        assert_eq!(buffer[17 * 320 + 40], 0x3080e0);
+        draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x191f2a);
+        assert_eq!(buffer[17 * 320 + 40], 0x191f2a);
         assert_eq!(buffer[62 * 320 + 40], blend(0x191f2a, 0xffffff, 30));
         assert_eq!(buffer[122 * 320 + 252], 0x191f2a);
         assert_eq!(buffer[30 * 320 + 6], 0x191f2a);
@@ -437,8 +434,8 @@ mod tests {
     fn bubble_scales_without_changing_its_layout() {
         let mut normal = vec![0xff00ff; 320 * 260];
         let mut doubled = vec![0xff00ff; 640 * 520];
-        draw_bubble(&mut normal, 320, 260, 1.0, 108.0, 0xe08030, 0x191f2a);
-        draw_bubble(&mut doubled, 640, 520, 2.0, 108.0, 0xe08030, 0x191f2a);
+        draw_bubble(&mut normal, 320, 260, 1.0, 108.0, 0x191f2a);
+        draw_bubble(&mut doubled, 640, 520, 2.0, 108.0, 0x191f2a);
         for y in 0..260 {
             for x in 0..320 {
                 assert_eq!(normal[y * 320 + x], doubled[y * 2 * 640 + x * 2]);
@@ -497,6 +494,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scales_the_whole_large_video_into_the_portrait_frame() {
+        let frame = RgbaImage::from_fn(256, 256, |x, y| {
+            if x >= 128 && y >= 128 {
+                image::Rgba([20, 40, 220, 255])
+            } else {
+                image::Rgba([220, 40, 20, 255])
+            }
+        });
+        let mut renderer = Renderer::new().unwrap();
+        let mut buffer = vec![0; 320 * 240];
+        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0);
+        let bottom_right = buffer[196 * 320 + 284];
+        assert!(bottom_right & 255 > (bottom_right >> 16) & 255);
     }
 
     #[test]
