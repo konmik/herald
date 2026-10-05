@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Notification {
     pub id: String,
     #[serde(rename = "sessionID", alias = "SessionID")]
     pub session_id: String,
+    #[serde(default, rename = "presenceSessionID")]
+    pub presence_session_id: String,
     pub completed: u64,
     pub text: String,
     #[serde(default)]
@@ -60,6 +63,31 @@ pub fn is_night(hour: u32, start: u32, end: u32) -> bool {
         hour >= start || hour < end
     } else {
         hour >= start && hour < end
+    }
+}
+
+pub struct MeetingStatus {
+    checked: Mutex<(Option<bool>, Instant)>,
+}
+
+impl MeetingStatus {
+    pub fn new() -> Self {
+        Self {
+            checked: Mutex::new((None, Instant::now())),
+        }
+    }
+
+    pub fn update(&self, active: Option<bool>, now: Instant) {
+        if let Ok(mut checked) = self.checked.lock() {
+            *checked = (active, now);
+        }
+    }
+
+    pub fn muted(&self, now: Instant) -> bool {
+        self.checked.lock().map_or(true, |checked| {
+            checked.0 != Some(false)
+                || now.saturating_duration_since(checked.1) >= Duration::from_secs(15)
+        })
     }
 }
 
@@ -147,6 +175,10 @@ enum Command {
         client_id: String,
         #[serde(rename = "sessionID")]
         session_id: Option<String>,
+        #[serde(default, rename = "sessionIDs")]
+        session_ids: Vec<String>,
+        #[serde(default)]
+        sequence: u64,
         at: u64,
     },
 }
@@ -156,7 +188,7 @@ pub struct Inbox {
     pub queue: VecDeque<Notification>,
     received: VecDeque<String>,
     discarded: VecDeque<(String, u64)>,
-    presence: HashMap<String, (String, u64)>,
+    presence: HashMap<String, (Vec<String>, u64, u64)>,
 }
 
 impl Inbox {
@@ -199,9 +231,29 @@ impl Inbox {
             .retain(|n| n.session_id != session_id || n.completed > at.max(previous));
     }
 
+    pub fn is_open(&self, notification: &Notification, now: u64) -> bool {
+        let owner = if notification.presence_session_id.is_empty() {
+            &notification.session_id
+        } else {
+            &notification.presence_session_id
+        };
+        self.presence.values().any(|(sessions, at, _)| {
+            now.saturating_sub(*at) < 6000
+                && (sessions.contains(owner) || sessions.contains(&notification.session_id))
+        })
+    }
+
+    pub fn next(&mut self, now: u64) -> Option<Notification> {
+        let index = self
+            .queue
+            .iter()
+            .position(|notification| self.is_open(notification, now))?;
+        self.queue.remove(index)
+    }
+
     pub fn read(&mut self, current: Option<&Notification>) -> bool {
         self.presence
-            .retain(|_, (_, at)| timestamp().saturating_sub(*at) < 6000);
+            .retain(|_, (_, at, _)| timestamp().saturating_sub(*at) < 6000);
         let mut paths: Vec<_> = std::fs::read_dir(self.data.join("inbox"))
             .into_iter()
             .flatten()
@@ -255,16 +307,23 @@ impl Inbox {
                 Command::Presence {
                     client_id,
                     session_id,
+                    mut session_ids,
+                    sequence,
                     at,
                 } => {
-                    let session_id = session_id.unwrap_or_default();
-                    if self.presence.len() >= 2048 {
-                        self.presence.clear();
+                    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+                        session_ids.push(session_id);
                     }
-                    if timestamp().saturating_sub(at) < 6000 {
-                        self.presence.insert(client_id, (session_id, at));
-                    } else {
-                        self.presence.remove(&client_id);
+                    session_ids.truncate(2048);
+                    if !self.presence.get(&client_id).is_some_and(
+                        |(_, previous_at, previous_sequence)| {
+                            (*previous_at, *previous_sequence) > (at, sequence)
+                        },
+                    )
+                        && timestamp().saturating_sub(at) < 6000
+                        && (self.presence.len() < 2048 || self.presence.contains_key(&client_id))
+                    {
+                        self.presence.insert(client_id, (session_ids, at, sequence));
                     }
                 }
             }
@@ -277,9 +336,11 @@ impl Inbox {
             self.save(current);
         }
         current.is_some_and(|n| {
-            self.discarded
-                .iter()
-                .any(|(s, at)| s == &n.session_id && *at >= n.completed)
+            !self.is_open(n, timestamp())
+                || self
+                    .discarded
+                    .iter()
+                    .any(|(s, at)| s == &n.session_id && *at >= n.completed)
         })
     }
 
@@ -299,6 +360,73 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_requires_a_live_owner_and_stops_when_the_last_client_closes() {
+        let data = test_directory();
+        let mut inbox = Inbox::new(data.clone());
+        let now = timestamp();
+        let notification: Notification = serde_json::from_value(serde_json::json!({
+            "id":"child", "sessionID":"child", "presenceSessionID":"parent", "completed":now, "text":"Done."
+        })).unwrap();
+        assert!(!inbox.is_open(&notification, now));
+        write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"first","sessionIDs":["parent","other"],"at":now}));
+        write_command(&data, "1", serde_json::json!({"type":"presence","clientID":"second","sessionIDs":["parent"],"at":now}));
+        assert!(!inbox.read(Some(&notification)));
+        assert!(inbox.is_open(&notification, now));
+        assert!(!inbox.is_open(&notification, now + 6000));
+        write_command(&data, "2", serde_json::json!({"type":"presence","clientID":"first","sessionIDs":[],"at":now}));
+        assert!(!inbox.read(Some(&notification)));
+        write_command(&data, "3", serde_json::json!({"type":"presence","clientID":"second","sessionIDs":[],"at":now}));
+        assert!(inbox.read(Some(&notification)));
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn closed_sessions_do_not_block_playback_for_open_sessions() {
+        let data = test_directory();
+        let mut inbox = Inbox::new(data.clone());
+        let now = timestamp();
+        for session in ["closed", "open"] {
+            inbox.queue.push_back(serde_json::from_value(serde_json::json!({"id":session,"sessionID":session,"completed":now,"text":"Done."})).unwrap());
+        }
+        write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":["open"],"at":now}));
+        inbox.read(None);
+        assert_eq!(inbox.next(now).unwrap().session_id, "open");
+        assert!(inbox.next(now).is_none());
+        assert_eq!(inbox.queue.front().unwrap().session_id, "closed");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn meeting_audio_requires_a_recent_successful_check() {
+        let meeting = MeetingStatus::new();
+        let now = std::time::Instant::now();
+        assert!(meeting.muted(now));
+        meeting.update(Some(false), now);
+        assert!(!meeting.muted(now));
+        assert!(meeting.muted(now + Duration::from_secs(15)));
+        meeting.update(None, now);
+        assert!(meeting.muted(now));
+        meeting.update(Some(true), now);
+        assert!(meeting.muted(now));
+        meeting.update(Some(false), now);
+        assert!(!meeting.muted(now));
+    }
+
+    #[test]
+    fn late_heartbeats_cannot_reopen_a_closed_client() {
+        let data = test_directory();
+        let mut inbox = Inbox::new(data.clone());
+        let now = timestamp();
+        let notification: Notification = serde_json::from_value(serde_json::json!({"id":"notification","sessionID":"session","completed":now,"text":"Done."})).unwrap();
+        write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":[],"at":now,"sequence":2}));
+        write_command(&data, "1", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":["session"],"at":now,"sequence":1}));
+        inbox.read(None);
+        assert!(!inbox.is_open(&notification, now));
+        assert!(!data.join("inbox/1.json").exists());
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn duration_scales_and_never_under_ten_seconds() {

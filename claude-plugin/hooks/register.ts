@@ -7,6 +7,24 @@ const completed = new Set<string>()
 let editTimer: Timer | undefined
 let sessionTitle = ''
 let transcriptPath = ''
+const clientID = crypto.randomUUID()
+let presenceTimer: Timer | undefined
+let presenceWrites = Promise.resolve()
+let presenceSequence = 0
+
+function reportPresence($: EngineInterface, sessionIDs: string[]) {
+  presenceWrites = presenceWrites.then(async () => {
+    await bridge($, { type: 'presence', clientID, sessionIDs, sequence: ++presenceSequence, at: await $.clock.now() })
+  }).catch(async (error) => { await $.ui.log('Voice presence failed: ' + String(error)) })
+  return presenceWrites
+}
+
+async function startPresence($: EngineInterface) {
+  presenceTimer?.cancel()
+  const sessionID = await keyFor($)
+  await reportPresence($, [sessionID])
+  presenceTimer = $.clock.every(2000, async () => { await reportPresence($, [sessionID]) })
+}
 
 async function bridge($: EngineInterface, command: object) {
   const result = await $.process.run(['node', $.plugin.root + '/scripts/bridge.mjs'], { stdin: JSON.stringify(command), timeoutMs: 10000 })
@@ -40,12 +58,13 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
   }
   const text = reply.text.replace(/\s+/g, ' ').trim()
   if (!text || (viewed.get(key) ?? -1) >= at) return
-  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', emotion: 'neutral' })
+  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', emotion: 'neutral' })
 }
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bridge($, { type: 'boot' })
+    await startPresence($)
     await $.command.register({ name: 'civilized-status', description: 'Check the voice adviser installation', immediate: true })
     await $.command.register({ name: 'voice-dismiss', description: 'Dismiss queued voice messages for this session or a subagent', argumentHint: '[agent-id]', immediate: true })
     return next(e)
@@ -54,6 +73,7 @@ export const register: Register = (on) => {
   on('classic.SessionStart', async ($, e, next) => {
     sessionTitle = e.session_title ?? ''
     transcriptPath = e.transcript_path ?? ''
+    await startPresence($)
     await discard($)
     const agents = await $.agent.list()
     for (const agent of agents) await discard($, agent.id)
@@ -106,7 +126,11 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
+    presenceTimer?.cancel()
+    presenceTimer = undefined
+    editTimer?.cancel()
     pending.clear()
+    await reportPresence($, [])
     if (e.reason === 'clear' || e.reason === 'resume' || e.reason === 'logout') {
       await discard($)
       const agents = await $.agent.list()

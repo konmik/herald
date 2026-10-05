@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod history;
 mod platform;
 mod render;
 mod state;
@@ -9,7 +10,7 @@ mod window;
 use chrono::Timelike;
 use platform::{Signal, Speech};
 use render::Renderer;
-use state::{Inbox, Notification, Settings};
+use state::{Inbox, MeetingStatus, Notification, Settings};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -30,6 +31,8 @@ struct Active {
     speech_finished: bool,
     silent: bool,
     video: Option<video::Video>,
+    video_path: PathBuf,
+    history_recorded: bool,
 }
 
 impl Active {
@@ -102,8 +105,9 @@ fn run() -> Result<(), String> {
         settings
     };
     let mut inbox = Inbox::new(data.clone());
+    let demo_mode = demo.is_some();
     if let Some(character) = demo {
-        inbox.queue.push_back(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, emotion: "neutral".into() });
+        inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, emotion: "neutral".into() });
     }
     let before = platform::foreground();
     let event_loop = EventLoop::new();
@@ -139,13 +143,11 @@ fn run() -> Result<(), String> {
     let mut renderer = Renderer::new()?;
     let mut speech = Speech::new();
     let mut signal = Signal::new(&data);
-    let meeting = Arc::new(AtomicBool::new(false));
-    let detection_ready = Arc::new(AtomicBool::new(false));
+    let meeting = Arc::new(MeetingStatus::new());
     let stop = Arc::new(AtomicBool::new(false));
     platform::detect_meetings(
         data.clone(),
         meeting.clone(),
-        detection_ready.clone(),
         stop.clone(),
     );
     let mut current: Option<Active> = None;
@@ -189,12 +191,12 @@ fn run() -> Result<(), String> {
                 if platform::is_foreground(&window) { focus_unchanged = false; }
                 else if before != 0 && platform::foreground() != before { external_focus_changed = true; }
                 if now.duration_since(last_inbox) >= Duration::from_millis(250) {
-                    if inbox.read(current.as_ref().map(|a| &a.notification)) {
+                    if inbox.read(current.as_ref().filter(|a| !demo_mode || a.notification.session_id != "demo").map(|a| &a.notification)) {
                         speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
                     }
                     last_inbox = now;
                 }
-                let muted = meeting.load(Ordering::Relaxed) || platform::meeting_override(&data) || state::is_night(chrono::Local::now().hour(), settings.night_start, settings.night_end);
+                let muted = meeting.muted(now) || platform::meeting_override(&data) || state::is_night(chrono::Local::now().hour(), settings.night_start, settings.night_end);
                 for (id, result) in speech.events.try_iter() {
                     if let Some(active) = current.as_mut().filter(|a| a.notification.id == id) {
                         active.speech_finished = true;
@@ -202,11 +204,11 @@ fn run() -> Result<(), String> {
                     }
                 }
                 if let Some(active) = current.as_mut() {
-                    if !detection_ready.load(Ordering::Relaxed) && now.duration_since(active.started) >= Duration::from_secs(5) { active.silent = true; }
                     if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
                 }
                 if current.is_none() {
-                    if let Some(notification) = inbox.queue.pop_front() {
+                    let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
+                    if let Some(notification) = notification {
                         renderer.text = notification.text.clone();
                         renderer.title = if notification.title.trim().is_empty() { "Untitled session".into() } else { notification.title.clone() };
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
@@ -228,7 +230,7 @@ fn run() -> Result<(), String> {
                             video_frame_rates.push(video.fps());
                         }
                         let expires = now + state::display_duration(&notification.text);
-                        current = Some(Active { notification, started: Instant::now(), expires, end: None, speaking: false, speech_finished: muted, silent: muted, video });
+                        current = Some(Active { notification, started: Instant::now(), expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
                         abrupt_window_ok &= platform::opacity(&window, 1.0);
                         window_opacity_updates += 1;
                         let previous_focus = platform::foreground();
@@ -245,7 +247,7 @@ fn run() -> Result<(), String> {
                 }
                 let mut dismiss = false;
                 if let Some(active) = current.as_mut() {
-                    if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking && (active.silent || detection_ready.load(Ordering::Relaxed)) {
+                    if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
                         if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), &settings); speech_started += 1; }
                     }
@@ -295,7 +297,14 @@ fn run() -> Result<(), String> {
                                     preview.save(path).map_err(|e| e.to_string())?;
                                 }
                             }
-                            buffer.present().map_err(|e| e.to_string())
+                            buffer.present().map_err(|e| e.to_string())?;
+                            if !active.history_recorded {
+                                match history::record(&data, &active.notification, &active.video_path, chrono::Utc::now()) {
+                                    Ok(()) => active.history_recorded = true,
+                                    Err(error) => state::log(&data, format!("History: {error}")),
+                                }
+                            }
+                            Ok(())
                         })();
                         if let Err(error) = result { state::log(&data, error); *control_flow = ControlFlow::Exit; }
                     }
@@ -326,6 +335,7 @@ mod tests {
             notification: Notification {
                 id: "test".into(),
                 session_id: "test".into(),
+                presence_session_id: String::new(),
                 completed: 1,
                 text: "Done.".into(),
                 title: "Test".into(),
@@ -339,6 +349,8 @@ mod tests {
             speech_finished: false,
             silent: false,
             video: None,
+            video_path: PathBuf::new(),
+            history_recorded: false,
         };
         assert!(!active.ready_to_end(started + Duration::from_secs(20)));
         active.speech_finished = true;

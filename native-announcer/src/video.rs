@@ -154,7 +154,7 @@ mod native {
                 }
                 let rate = actual.GetUINT64(&MF_MT_FRAME_RATE).map_err(|e| e.to_string())?;
                 let fps = (rate >> 32) as f64 / (rate as u32) as f64;
-                if !fps.is_finite() || fps < 1.0 || fps > 240.0 {
+                if !fps.is_finite() || !(1.0..=240.0).contains(&fps) {
                     return Err("Unsupported video frame rate".into());
                 }
                 Ok(Self {
@@ -220,8 +220,8 @@ mod native {
                             for x in 0..self.width {
                                 let index = (source_y * self.stride.unsigned_abs() + x * 4) as usize;
                                 frame.put_pixel(
-                                    x as u32,
-                                    y as u32,
+                                    x,
+                                    y,
                                     image::Rgba([
                                         input[index + 2],
                                         input[index + 1],

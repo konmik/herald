@@ -116,7 +116,8 @@ test('resuming a session drops its main and child announcements', async ($, on) 
   on('agent.list', () => ({ value: [{ id: 'child', description: 'Review', type: 'general-purpose', status: 'completed' }] }))
   on('classic.SessionStart', () => ({}))
   on('process.run', (_, e) => {
-    ids.push(JSON.parse(e.init?.stdin ?? '{}').sessionID)
+    const command = JSON.parse(e.init?.stdin ?? '{}')
+    if (command.type === 'discard') ids.push(command.sessionID)
     return { value: processResult }
   })
   await $.classic.SessionStart({ source: 'resume' })
@@ -135,4 +136,48 @@ test('completion includes the session title from the current prompt', async ($, 
   await $.turn.complete({ turnId: 'titled', answer: 'Passed.', durationMs: 70000, isAborted: false, reason: 'answer', usage })
   await clock.settle()
   expect(command).toMatchObject({ type: 'notify', title: 'Native announcer' })
+})
+
+test('session presence is renewed and removed on exit', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  const commands: Array<{ type: string; sessionIDs?: string[] }> = []
+  on('session.id', () => ({ value: 'presence-test' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', () => ({ sessionId: 'presence-test' }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('process.run', (_, e) => {
+    commands.push(JSON.parse(e.init?.stdin ?? '{}'))
+    return { value: processResult }
+  })
+  await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
+  expect(commands.filter((command) => command.type === 'presence')).toMatchObject([{ sessionIDs: ['claude:presence-test'] }])
+  await clock.advance(2000)
+  expect(commands.filter((command) => command.type === 'presence')).toHaveLength(2)
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'presence-test', resume: { id: 'presence-test' } })
+  expect(commands.at(-1)).toMatchObject({ type: 'presence', sessionIDs: [] })
+  const count = commands.length
+  await clock.advance(10000)
+  expect(commands).toHaveLength(count)
+})
+
+test('clearing a conversation renews presence for the replacement session', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  let sessionID = 'before-clear'
+  const commands: Array<{ type: string; sessionIDs?: string[] }> = []
+  on('session.id', () => ({ value: sessionID }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', (_, e) => {
+    commands.push(JSON.parse(e.init?.stdin ?? '{}'))
+    return { value: processResult }
+  })
+  await $.classic.SessionStart({ source: 'startup' })
+  await $.session.end({ reason: 'clear', sessionId: sessionID, resume: { id: sessionID } })
+  sessionID = 'after-clear'
+  await $.classic.SessionStart({ source: 'clear' })
+  await clock.advance(2000)
+  expect(commands.filter((command) => command.type === 'presence').map((command) => command.sessionIDs)).toEqual([
+    ['claude:before-clear'], [], ['claude:after-clear'], ['claude:after-clear'],
+  ])
 })

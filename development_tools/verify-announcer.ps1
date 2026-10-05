@@ -32,7 +32,16 @@ $info.ArgumentList.Add('--snapshot')
 $info.ArgumentList.Add((Join-Path $temporary 'preview.png'))
 $process = [System.Diagnostics.Process]::Start($info)
 $peak = 0
+$lastPresence = [DateTimeOffset]::MinValue
 while (-not $process.WaitForExit(50)) {
+    $now = [DateTimeOffset]::UtcNow
+    if (($now - $lastPresence).TotalSeconds -ge 2) {
+        $presence = @{ type = 'presence'; clientID = 'verification'; sessionIDs = @('verify-claude', 'verify-opencode'); at = $now.ToUnixTimeMilliseconds() }
+        $path = Join-Path $inbox ("presence-$([guid]::NewGuid())")
+        $presence | ConvertTo-Json | Set-Content "$path.tmp" -Encoding utf8NoBOM
+        Move-Item "$path.tmp" "$path.json"
+        $lastPresence = $now
+    }
     $process.Refresh()
     $peak = [Math]::Max($peak, $process.PeakWorkingSet64)
 }

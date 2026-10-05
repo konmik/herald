@@ -4,6 +4,7 @@ import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { Completions } from "./completions"
 import { send } from "./bridge"
+import { consumeEvents } from "./events"
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -25,7 +26,13 @@ export default Plugin.define({
       },
       async (completion) => {
         const session = await ctx.session.get({ sessionID: completion.sessionID })
-        await send({ type: "notify", ...completion, character: "opencode", title: session.title })
+        let root = session
+        const visited = new Set([root.id])
+        while (root.parentID && !visited.has(root.parentID)) {
+          visited.add(root.parentID)
+          root = await ctx.session.get({ sessionID: root.parentID })
+        }
+        await send({ type: "notify", ...completion, presenceSessionID: root.id, character: "opencode", title: session.title })
       },
       typeof ctx.options.minimumSeconds === "number" ? ctx.options.minimumSeconds * 1000 : 60_000,
       (sessionID, reason) => console.info(JSON.stringify({ plugin: "civilized-agent", sessionID, reason })),
@@ -46,30 +53,31 @@ export default Plugin.define({
       owned.add(sessionID)
       return true
     }
-    void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+    const subscription = consumeEvents(
+      (signal) => ctx.event.subscribe({ signal }),
+      async (event) => {
         if (event.type === "shell.created") {
           const info = event.data.info
           const sessionID = info.metadata.sessionID
-          if (typeof sessionID !== "string" || !(await owns(sessionID))) continue
+          if (typeof sessionID !== "string" || !(await owns(sessionID))) return
           completions.jobStarted(info.id, sessionID, info.time.started)
           await persist()
-          continue
+          return
         }
         if (event.type === "shell.exited" || event.type === "shell.deleted") {
           completions.jobFinished(event.data.id)
           await persist()
-          continue
+          return
         }
-        if (!["session.created", "session.inbox.enqueued", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)) continue
-        if (!("sessionID" in event.data)) continue
+        if (!["session.created", "session.inbox.enqueued", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)) return
+        if (!("sessionID" in event.data)) return
         const sessionID = event.data.sessionID
-        if (typeof sessionID !== "string") continue
+        if (typeof sessionID !== "string") return
         if (event.type === "session.created" && event.data.parentID && await owns(event.data.parentID)) {
           completions.jobStarted(sessionID, event.data.parentID, event.created)
         }
-        if (event.type === "session.deleted" && !owned.has(sessionID)) continue
-        if (!(await owns(sessionID))) continue
+        if (event.type === "session.deleted" && !owned.has(sessionID)) return
+        if (!(await owns(sessionID))) return
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "user") {
           completions.start(sessionID, event.created)
           await send({ type: "discard", sessionID, at: event.created })
@@ -97,19 +105,20 @@ export default Plugin.define({
           if (!completions.hasJobs(sessionID)) completions.jobFinished(sessionID)
         }
         await persist()
-        if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") continue
+        if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") return
         const task = completions.finish(event.id, sessionID, event.created, event.type === "session.execution.failed")
           .catch(console.error)
           .then(persist)
           .finally(() => tasks.delete(task))
         tasks.add(task)
-      }
-    })().catch((error) => {
-      if (!controller.signal.aborted) console.error(error)
-    })
+      },
+      controller.signal,
+      console.error,
+    )
     return async () => {
       controller.abort()
       owned.forEach((sessionID) => completions.view(sessionID))
+      await subscription
       await Promise.allSettled(tasks)
       await persist()
     }

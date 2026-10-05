@@ -1,4 +1,4 @@
-use crate::state::{log, Settings};
+use crate::state::{log, MeetingStatus, Settings};
 use crate::window::Window;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -464,19 +464,18 @@ impl Drop for Signal {
 
 pub fn detect_meetings(
     data: PathBuf,
-    active: Arc<AtomicBool>,
-    ready: Arc<AtomicBool>,
+    status: Arc<MeetingStatus>,
     stop: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match meeting_active() {
-                Ok(value) => active.store(value, Ordering::Relaxed),
+                Ok(value) => status.update(Some(value), std::time::Instant::now()),
                 Err(error) => {
+                    status.update(None, std::time::Instant::now());
                     log(&data, format!("Meeting detection: {error}"));
                 }
             }
-            ready.store(true, Ordering::Relaxed);
             for _ in 0..50 {
                 if stop.load(Ordering::Relaxed) {
                     return;

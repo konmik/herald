@@ -48,6 +48,19 @@ def main():
         video = None
         audio_thread = None
         try:
+            last_presence = 0
+
+            def report_presence():
+                nonlocal last_presence
+                now = time.monotonic()
+                if now - last_presence < 2:
+                    return
+                last_presence = now
+                message = {"type": "presence", "clientID": "recording", "sessionIDs": ["screen-recording"], "at": int(time.time() * 1000)}
+                path = inbox / f"presence-{time.time_ns()}.tmp"
+                path.write_text(json.dumps(message), encoding="utf-8")
+                path.rename(path.with_suffix(".json"))
+
             def record_audio():
                 try:
                     speaker = soundcard.default_speaker()
@@ -66,12 +79,14 @@ def main():
             if not ready.wait(15) or audio_errors:
                 raise RuntimeError(f"System audio capture failed: {audio_errors}")
             time.sleep(1)
+            report_presence()
             notification = {"type": "notify", "id": "screen-recording", "sessionID": "screen-recording",
                             "completed": 1, "text": args.text, "title": "Herald videos", "character": "opencode", "emotion": "neutral"}
             (inbox / "message.json").write_text(json.dumps(notification), encoding="utf-8")
             deadline = time.monotonic() + 45
             handle = None
             while time.monotonic() < deadline:
+                report_presence()
                 handle = user32.FindWindowW(None, "Civilized Agent")
                 if handle and user32.IsWindowVisible(handle):
                     break
@@ -94,6 +109,7 @@ def main():
                 str(temporary / "screen.mkv")], stdin=subprocess.PIPE)
             preview_saved = False
             while user32.IsWindowVisible(handle) and time.monotonic() < deadline:
+                report_presence()
                 if video.poll() is not None:
                     raise RuntimeError("Screen recording stopped early")
                 if not preview_saved and time.perf_counter() - video_started > 2:
