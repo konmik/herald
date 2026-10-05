@@ -17,7 +17,7 @@ Done when the exact text, session and saved video are identified, or the user ha
 
 ## 2. Prepare recording
 
-Use `development_tools/record-announcement.py --help` for its current arguments. The helper requires Windows SAPI, FFmpeg, Rust and a Python environment containing `pillow`. It builds a separate release binary outside the repository; `--binary` can select an existing binary with `--isolated` and `--capture-frames`.
+Use `development_tools/record-announcement.py --help` for its current arguments. The helper requires Windows SAPI, FFmpeg, Rust and a Python environment containing `pillow`. It builds a separate release binary outside the repository; `--binary` can select an existing binary with `--isolated`, `--capture-frames` and `--capture-speech-seconds`. Capture duration follows the complete speech file, including slower configured voices.
 
 This machine's recording environment is `%LOCALAPPDATA%/Temp/opencode/civilized-recording-venv/Scripts/python.exe`. If absent, create that virtual environment with Python 3.13 and install `pillow` into it. Keep dependencies and temporary frames outside the repository.
 

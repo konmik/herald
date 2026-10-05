@@ -76,8 +76,9 @@ export default Plugin.define({
         if (event.type === "session.created" && event.data.parentID && await owns(event.data.parentID)) {
           completions.jobStarted(sessionID, event.data.parentID, event.created)
         }
-        if (event.type === "session.deleted" && !owned.has(sessionID)) return
-        if (!(await owns(sessionID))) return
+        if (event.type === "session.deleted") {
+          if (!owned.has(sessionID) && !completions.tracks(sessionID)) return
+        } else if (!(await owns(sessionID))) return
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "user") {
           completions.start(sessionID, event.created)
           await send({ type: "discard", sessionID, at: event.created })

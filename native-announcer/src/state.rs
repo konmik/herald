@@ -152,11 +152,7 @@ pub fn log(data: &Path, message: impl std::fmt::Display) {
     if path.metadata().is_ok_and(|m| m.len() > 65536) {
         let _ = std::fs::rename(&path, data.join("errors.previous.log"));
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut file) = crate::private::file(&path, true) {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -193,7 +189,7 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn new(data: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(data.join("inbox"));
+        if let Err(error) = crate::private::directory(&data.join("inbox")) { log(&data, error); }
         let queue: VecDeque<Notification> = std::fs::read(data.join("queue.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -348,7 +344,7 @@ impl Inbox {
         let values: Vec<_> = current.into_iter().chain(self.queue.iter()).collect();
         if let Ok(bytes) = serde_json::to_vec(&values) {
             let temp = self.data.join("queue.tmp");
-            if let Err(error) = std::fs::write(&temp, bytes)
+            if let Err(error) = crate::private::write(&temp, &bytes)
                 .and_then(|_| std::fs::rename(temp, self.data.join("queue.json")))
             {
                 log(&self.data, error);

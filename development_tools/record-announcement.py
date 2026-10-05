@@ -2,6 +2,7 @@ import argparse
 import base64
 import ctypes
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -109,6 +110,10 @@ def interference_timing(frames, padding_seconds=0.5):
     return padding_seconds, padding_seconds + closing_start
 
 
+def playback_seconds(text, speech_seconds):
+    return max(10, 3 + len(text.split()) * 0.4, speech_seconds + 0.65) + 0.65
+
+
 def main():
     parser = argparse.ArgumentParser()
     messages = parser.add_mutually_exclusive_group(required=True)
@@ -154,9 +159,10 @@ def main():
             (assets / "videos").mkdir(parents=True)
             shutil.copyfile(source_video, assets / "videos" / source_video.name)
         speech_seconds = synthesize(message, temporary / "speech.wav", settings)
+        playback = playback_seconds(message["text"], speech_seconds)
         frames_directory = temporary / "frames"
         environment = dict(os.environ, CIVILIZED_AGENT_DATA=str(data))
-        app = subprocess.Popen([str(binary), "--isolated", "--assets", str(assets), "--capture-frames", str(frames_directory), "--test-seconds", "90", "--report", str(temporary / "report.json")], env=environment)
+        app = subprocess.Popen([str(binary), "--isolated", "--assets", str(assets), "--capture-frames", str(frames_directory), "--capture-speech-seconds", str(speech_seconds), "--test-seconds", str(math.ceil(playback + 15)), "--report", str(temporary / "report.json")], env=environment)
         try:
             last_presence = 0
 
@@ -176,7 +182,7 @@ def main():
             command = inbox / "message.tmp"
             command.write_text(json.dumps(notification), encoding="utf-8")
             command.rename(command.with_suffix(".json"))
-            deadline = time.monotonic() + 45
+            deadline = time.monotonic() + playback + 15
             handle = None
             while time.monotonic() < deadline:
                 report_presence()

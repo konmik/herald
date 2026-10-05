@@ -20,19 +20,32 @@ pub fn select_path(assets: &Path, character: &str) -> PathBuf {
 }
 
 pub struct Video {
-    decoder: Decoder,
+    decoder: Option<Box<dyn FrameSource>>,
+    fps: f64,
     frame: RgbaImage,
     tick: Option<u64>,
     pub decoded_frames: u64,
     pub loops: u64,
 }
 
+trait FrameSource {
+    fn read(&mut self, frame: &mut RgbaImage) -> Result<bool, String>;
+}
+
+impl FrameSource for Decoder {
+    fn read(&mut self, frame: &mut RgbaImage) -> Result<bool, String> {
+        Decoder::read(self, frame)
+    }
+}
+
 impl Video {
     pub fn open(path: &Path) -> Result<Self, String> {
         let decoder = Decoder::open(path)?;
         let (width, height) = decoder.dimensions();
+        let fps = decoder.fps();
         Ok(Self {
-            decoder,
+            decoder: Some(Box::new(decoder)),
+            fps,
             frame: RgbaImage::new(width, height),
             tick: None,
             decoded_frames: 0,
@@ -45,7 +58,14 @@ impl Video {
         if self.tick == Some(tick) {
             return Ok(());
         }
-        self.loops += self.decoder.read(&mut self.frame)? as u64;
+        let Some(decoder) = self.decoder.as_mut() else { return Ok(()); };
+        match decoder.read(&mut self.frame) {
+            Ok(looped) => self.loops += looped as u64,
+            Err(error) => {
+                self.decoder = None;
+                return Err(error);
+            }
+        }
         self.decoded_frames += 1;
         self.tick = Some(tick);
         Ok(())
@@ -56,7 +76,7 @@ impl Video {
     }
 
     pub fn fps(&self) -> f64 {
-        self.decoder.fps()
+        self.fps
     }
 }
 
@@ -312,6 +332,26 @@ impl Drop for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_failure_preserves_the_last_frame_and_stops_retrying() {
+        struct FailingSource(bool);
+        impl FrameSource for FailingSource {
+            fn read(&mut self, frame: &mut RgbaImage) -> Result<bool, String> {
+                if self.0 { return Err("Damaged video frame".into()); }
+                self.0 = true;
+                frame.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+                Ok(false)
+            }
+        }
+        let mut video = Video { decoder: Some(Box::new(FailingSource(false))), fps: 16.0, frame: RgbaImage::new(1, 1), tick: None, decoded_frames: 0, loops: 0 };
+        video.advance(Duration::ZERO).unwrap();
+        assert!(video.advance(Duration::from_millis(100)).is_err());
+        assert!(video.decoder.is_none());
+        video.advance(Duration::from_millis(200)).unwrap();
+        assert_eq!(video.frame().get_pixel(0, 0).0, [1, 2, 3, 255]);
+        assert_eq!(video.decoded_frames, 1);
+    }
 
     #[test]
     fn falls_back_to_the_integration_video_without_a_shared_library() {

@@ -43,6 +43,10 @@ export class Completions {
     return this.jobs.get(id)
   }
 
+  tracks(sessionID: string) {
+    return this.runs.has(sessionID) || this.jobs.has(sessionID)
+  }
+
   hasJobs(sessionID: string) {
     return [...this.jobs.values()].includes(sessionID)
   }

@@ -3,6 +3,7 @@
 mod capture;
 mod history;
 mod platform;
+mod private;
 mod render;
 mod state;
 mod video;
@@ -63,11 +64,17 @@ fn run() -> Result<(), String> {
     let mut snapshot = None;
     let mut isolated = false;
     let mut capture_directory = None;
+    let mut capture_speech_seconds = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--isolated" => isolated = true,
             "--capture-frames" => capture_directory = Some(PathBuf::from(arguments.next().ok_or("Missing capture directory")?)),
+            "--capture-speech-seconds" => {
+                let seconds = arguments.next().ok_or("Missing speech duration")?.parse::<f64>().map_err(|error| error.to_string())?;
+                if !seconds.is_finite() || !(0.0..=3600.0).contains(&seconds) { return Err("Invalid capture speech duration".into()); }
+                capture_speech_seconds = Some(Duration::from_secs_f64(seconds));
+            }
             "--assets" => assets = arguments.next().ok_or("Missing assets path")?.into(),
             "--demo" => demo = Some(arguments.next().ok_or("Missing character")?),
             "--test-seconds" => {
@@ -99,8 +106,14 @@ fn run() -> Result<(), String> {
     if capture_directory.is_some() && !isolated {
         return Err("Frame capture requires isolated playback".into());
     }
+    if capture_speech_seconds.is_some() && capture_directory.is_none() {
+        return Err("Capture speech duration requires frame capture".into());
+    }
     let mut frames = capture_directory.as_deref().map(capture::Frames::new).transpose()?;
-    std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+    private::directory(&data).map_err(|e| e.to_string())?;
+    for name in ["queue.json", "queue.tmp", "history.jsonl", "settings.json", "errors.log", "errors.previous.log"] {
+        private::harden(&data.join(name)).map_err(|error| error.to_string())?;
+    }
     let _lock = match std::net::TcpListener::bind(("127.0.0.1", if isolated { 0 } else { 47863 })) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
@@ -112,7 +125,7 @@ fn run() -> Result<(), String> {
             .map_err(|e| e.to_string())?
     } else {
         let settings = Settings::default();
-        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap())
+        private::write(&settings_path, &serde_json::to_vec(&settings).unwrap())
             .map_err(|e| e.to_string())?;
         settings
     };
@@ -241,8 +254,10 @@ fn run() -> Result<(), String> {
                             selected_videos.push(path.to_string_lossy().into_owned());
                             video_frame_rates.push(video.fps());
                         }
-                        let expires = now + state::display_duration(&notification.text);
-                        current = Some(Active { notification, started: Instant::now(), expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
+                        let started = Instant::now();
+                        let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
+                        let expires = started + duration;
+                        current = Some(Active { notification, started, expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
                         abrupt_window_ok &= platform::opacity(&window, 1.0);
                         window_opacity_updates += 1;
                         let previous_focus = platform::foreground();
@@ -294,7 +309,9 @@ fn run() -> Result<(), String> {
                             if let Some(video) = &mut active.video {
                                 let previous_frames = video.decoded_frames;
                                 let previous_loops = video.loops;
-                                video.advance(active.started.elapsed())?;
+                                if let Err(error) = video.advance(active.started.elapsed()) {
+                                    state::log(&data, format!("Video playback: {error}"));
+                                }
                                 decoded_video_frames += video.decoded_frames - previous_frames;
                                 video_loops += video.loops - previous_loops;
                             }

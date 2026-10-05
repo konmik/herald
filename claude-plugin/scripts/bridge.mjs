@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rename, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -14,7 +14,11 @@ if (command.type === 'boot') {
     delete command.transcriptPath
   }
   const inbox = join(dataDirectory, 'inbox')
-  await mkdir(inbox, { recursive: true })
+  await mkdir(inbox, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32') {
+    await chmod(dataDirectory, 0o700)
+    await chmod(inbox, 0o700)
+  }
   const path = join(inbox, `${Date.now()}-${randomUUID()}`)
   await writeFile(`${path}.tmp`, JSON.stringify(command), { mode: 0o600 })
   await rename(`${path}.tmp`, `${path}.json`)

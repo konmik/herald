@@ -22,6 +22,7 @@ for ($i = 0; $i -lt $messages.Count; $i++) {
 $info = [System.Diagnostics.ProcessStartInfo]::new($binary)
 $info.UseShellExecute = $false
 $info.Environment['CIVILIZED_AGENT_DATA'] = $data
+$info.ArgumentList.Add('--isolated')
 $info.ArgumentList.Add('--assets')
 $info.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
 $info.ArgumentList.Add('--test-seconds')

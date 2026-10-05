@@ -11,6 +11,11 @@ spec.loader.exec_module(recorder)
 
 
 class RecordingTests(unittest.TestCase):
+    def test_slow_narration_extends_animation_and_capture_deadline(self):
+        text = ' '.join(['internationalization'] * 30)
+        self.assertAlmostEqual(recorder.playback_seconds(text, 40), 41.3)
+        self.assertAlmostEqual(recorder.playback_seconds('Done.', 1), 10.65)
+
     def test_interference_uses_the_actual_transition_time_on_the_render_clock(self):
         frames = [{"elapsed": 0.02, "closingStart": None}, {"elapsed": 10.05, "closingStart": 10.01}]
         opening, delay = recorder.interference_timing(frames)

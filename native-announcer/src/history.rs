@@ -43,16 +43,7 @@ pub fn record(
     };
     let mut bytes = serde_json::to_vec(&entry).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(data.join("history.jsonl"))
-        .map_err(|error| error.to_string())?;
+    let mut file = crate::private::file(&data.join("history.jsonl"), true).map_err(|error| error.to_string())?;
     file.write_all(&bytes).map_err(|error| error.to_string())?;
     file.sync_data().map_err(|error| error.to_string())
 }

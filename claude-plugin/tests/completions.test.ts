@@ -181,3 +181,46 @@ test('clearing a conversation renews presence for the replacement session', asyn
     ['claude:before-clear'], [], ['claude:after-clear'], ['claude:after-clear'],
   ])
 })
+
+test('a new user turn cancels pending child summaries', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  const commands: Array<{ type: string; sessionID: string }> = []
+  let forks = 0
+  on('session.id', () => ({ value: 'child-reset' }))
+  on('turn.complete', () => ({ text: '' }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('agent.list', () => ({ value: [{ id: 'child', description: 'Review', type: 'general-purpose', status: 'completed' }] }))
+  on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'Old result.', usage } } })
+  on('process.run', (_, e) => { commands.push(JSON.parse(e.init?.stdin ?? '{}')); return { value: processResult } })
+  await $.turn.complete({ turnId: 'old-child', agentId: 'child', answer: 'Done.', durationMs: 70000, isAborted: false, reason: 'answer' })
+  await $.turn.start({ turnId: 'new-user', text: 'Continue.' })
+  await clock.settle()
+  expect(forks).toBe(0)
+  expect(commands.filter((command) => command.type === 'notify')).toEqual([])
+  expect(commands.some((command) => command.type === 'discard' && command.sessionID === 'claude:child-reset:child')).toBe(true)
+})
+
+test('background shell work defers announcement and counts the whole task', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  const commands: Array<{ type: string }> = []
+  on('session.id', () => ({ value: 'background-shell' }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Stop', () => ({}))
+  on('agent.list', () => ({ value: [] }))
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'The background work finished.', usage } }))
+  on('process.run', (_, e) => { commands.push(JSON.parse(e.init?.stdin ?? '{}')); return { value: processResult } })
+  await $.turn.start({ turnId: 'launch', text: 'Run it.' })
+  await clock.advance(70000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'shell', type: 'shell', status: 'running', description: 'Build' }] })
+  await $.turn.complete({ turnId: 'launch', answer: 'Still running.', durationMs: 70000, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'notify')).toEqual([])
+  await clock.advance(30000)
+  await $.turn.start({ turnId: 'result', text: '' })
+  await clock.advance(1000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  await $.turn.complete({ turnId: 'result', answer: 'Finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
+})

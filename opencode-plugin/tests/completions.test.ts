@@ -167,3 +167,15 @@ test("a durable completion notice recovers a shell exit missed during reload", a
   await completions.finish("result", "session", 158_000)
   expect(results).toHaveLength(1)
 })
+
+test("a restored child can be deleted before ownership is looked up", async () => {
+  const results: Completion[] = []
+  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
+  completions.restore({ runs: [{ sessionID: "parent", started: 0 }], jobs: [{ id: "child", sessionID: "parent" }] })
+  expect(completions.tracks("child")).toBe(true)
+  completions.jobFinished("child")
+  completions.cancel("child")
+  expect(completions.tracks("child")).toBe(false)
+  await completions.finish("parent-result", "parent", 80000)
+  expect(results).toHaveLength(1)
+})

@@ -503,6 +503,32 @@ pub fn meeting_override(data: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn microphone_active() -> windows::core::Result<bool> {
+    use windows::Win32::Media::Audio::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let devices = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        for index in 0..devices.GetCount()? {
+            let manager: IAudioSessionManager2 = devices.Item(index)?.Activate(CLSCTX_ALL, None)?;
+            let sessions = manager.GetSessionEnumerator()?;
+            for index in 0..sessions.GetCount()? {
+                if sessions.GetSession(index)?.GetState()? == AudioSessionStateActive {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn meeting_evidence(capture: Result<bool, String>, controls: Result<bool, String>) -> Result<bool, String> {
+    if matches!(capture, Ok(true)) || matches!(controls, Ok(true)) { return Ok(true); }
+    capture.and(controls)
+}
+
+#[cfg(target_os = "windows")]
 fn meeting_active() -> Result<bool, String> {
     use windows::core::BSTR;
     use windows::Win32::Foundation::HWND;
@@ -513,18 +539,16 @@ fn meeting_active() -> Result<bool, String> {
         hwnd: windows_sys::Win32::Foundation::HWND,
         value: isize,
     ) -> i32 {
-        if unsafe { IsWindowVisible(hwnd) != 0 } {
-            let mut title = [0u16; 512];
-            let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
-            let title = String::from_utf16_lossy(&title[..length as usize]).to_lowercase();
-            if [
-                "teams", "zoom", "slack", "webex", "discord", "chrome", "edge", "firefox",
-            ]
-            .iter()
-            .any(|app| title.contains(app))
-            {
-                unsafe { &mut *(value as *mut Vec<(HWND, String)>) }.push((HWND(hwnd), title));
-            }
+        let mut title = [0u16; 512];
+        let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+        let title = String::from_utf16_lossy(&title[..length as usize]).to_lowercase();
+        if [
+            "teams", "zoom", "slack", "webex", "discord", "chrome", "edge", "firefox",
+        ]
+        .iter()
+        .any(|app| title.contains(app))
+        {
+            unsafe { &mut *(value as *mut Vec<(HWND, String)>) }.push((HWND(hwnd), title));
         }
         1
     }
@@ -532,7 +556,9 @@ fn meeting_active() -> Result<bool, String> {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .map_err(|e| e.to_string())?;
+        let capture = microphone_active().map_err(|error| error.to_string());
         let result = (|| -> windows::core::Result<bool> {
+            if matches!(capture, Ok(true)) { return Ok(true); }
             let mut windows = Vec::<(HWND, String)>::new();
             if EnumWindows(Some(inspect), &mut windows as *mut _ as isize) == 0 {
                 return Err(windows::core::Error::from_thread());
@@ -561,25 +587,29 @@ fn meeting_active() -> Result<bool, String> {
                 let Ok(element) = automation.ElementFromHandle(hwnd) else {
                     continue;
                 };
-                if let Ok(button) = element.FindFirst(TreeScope_Descendants, &condition) {
-                    if button
-                        .CurrentIsOffscreen()
-                        .is_ok_and(|offscreen| !offscreen.as_bool())
-                    {
-                        return Ok(true);
-                    }
+                if element.FindFirst(TreeScope_Descendants, &condition).is_ok() {
+                    return Ok(true);
                 }
             }
             Ok(false)
         })();
         CoUninitialize();
-        result.map_err(|e| e.to_string())
+        meeting_evidence(capture, result.map_err(|e| e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_activity_keeps_hidden_meetings_muted_and_probe_failures_fail_closed() {
+        assert_eq!(meeting_evidence(Ok(true), Ok(false)), Ok(true));
+        assert_eq!(meeting_evidence(Ok(false), Ok(true)), Ok(true));
+        assert_eq!(meeting_evidence(Ok(false), Ok(false)), Ok(false));
+        assert!(meeting_evidence(Err("Capture unavailable".into()), Ok(false)).is_err());
+        assert!(meeting_evidence(Ok(false), Err("Controls unavailable".into())).is_err());
+    }
 
     #[test]
     fn interference_audio_has_silent_edges_and_a_faded_envelope() {
@@ -674,10 +704,6 @@ fn meeting_active() -> Result<bool, String> {
                         .get_role()
                         .await
                         .is_ok_and(|role| role == atspi::Role::Button)
-                    && proxy
-                        .get_state()
-                        .await
-                        .is_ok_and(|states| states.contains(atspi::State::Showing))
                 {
                     return Ok(true);
                 }
