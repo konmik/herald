@@ -5,8 +5,8 @@ Thumbs.db
 *.log
 node_modules/
 /generated-assets/
-/claude-plugin/resources/
-/claude-plugin/bin/
+/native-announcer/resources/
+/native-announcer/bin/
 claude-plugin/.claude-plugin/types/
 native-announcer/target/
 __pycache__/

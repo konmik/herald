@@ -20,7 +20,7 @@ const code = await new Promise((resolve, reject) => {
 }).finally(() => clearTimeout(timeout))
 if (timedOut) throw new Error('Native build exceeded two minutes; its process tree was stopped.')
 if (code !== 0) process.exit(code ?? 1)
-const directory = join(root, 'claude-plugin', 'bin')
+const directory = join(root, 'native-announcer', 'bin')
 await mkdir(directory, { recursive: true })
 const suffix = process.platform === 'win32' ? '.exe' : ''
 const binary = join(directory, `civilized-announcer-${process.platform}-${process.arch}${suffix}`)

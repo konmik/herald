@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMFY = Path(r"C:\ComfyUI")
 API = "http://127.0.0.1:8188"
 ASSETS = ROOT / "generated-assets"
-RUNTIME_ASSETS = ROOT / "claude-plugin" / "resources"
+RUNTIME_ASSETS = ROOT / "native-announcer" / "resources"
 MONITOR = False
 MEDIEVAL_IDENTITIES = {
     "crier": "a thin elderly town crier with a huge drooping grey moustache, a crooked felt cap, faded rust-red tabard and a deeply solemn expression",

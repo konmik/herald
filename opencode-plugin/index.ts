@@ -9,9 +9,9 @@ export default Plugin.define({
   id: "civilized-agent",
   async setup(ctx) {
     const suffix = process.platform === "win32" ? ".exe" : ""
-    const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../claude-plugin/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
+    const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
     if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Run npm run build:announcer on this platform.`)
-    const assets = fileURLToPath(new URL("../claude-plugin/resources", import.meta.url))
+    const assets = fileURLToPath(new URL("../native-announcer/resources", import.meta.url))
     const child = spawn(binary, ["--assets", assets], { detached: true, stdio: "ignore", windowsHide: true })
     child.on("error", console.error)
     child.unref()

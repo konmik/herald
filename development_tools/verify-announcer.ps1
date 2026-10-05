@@ -1,7 +1,7 @@
 param([switch]$Speech, [switch]$Meeting)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$binary = Join-Path $root 'claude-plugin/bin/civilized-announcer-win32-x64.exe'
+$binary = Join-Path $root 'native-announcer/bin/civilized-announcer-win32-x64.exe'
 $temporary = Join-Path $env:LOCALAPPDATA "Temp/opencode/civilized-native-$([guid]::NewGuid())"
 $data = Join-Path $temporary 'data'
 $inbox = Join-Path $data 'inbox'
@@ -23,7 +23,7 @@ $info = [System.Diagnostics.ProcessStartInfo]::new($binary)
 $info.UseShellExecute = $false
 $info.Environment['CIVILIZED_AGENT_DATA'] = $data
 $info.ArgumentList.Add('--assets')
-$info.ArgumentList.Add((Join-Path $root 'claude-plugin/resources'))
+$info.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
 $info.ArgumentList.Add('--test-seconds')
 $info.ArgumentList.Add('40')
 $info.ArgumentList.Add('--report')

@@ -25,24 +25,24 @@ impl Renderer {
         let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
             let directory = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
             vec![
-                PathBuf::from(&directory).join("Fonts/arial.ttf"),
+                PathBuf::from(&directory).join("Fonts/GOTHIC.TTF"),
                 PathBuf::from(directory).join("Fonts/segoeui.ttf"),
             ]
         } else if cfg!(target_os = "macos") {
             vec![
+                "/Library/Fonts/Century Gothic.ttf".into(),
                 "/System/Library/Fonts/Supplemental/Arial.ttf".into(),
-                "/Library/Fonts/Arial.ttf".into(),
             ]
         } else {
             vec![
+                "/usr/share/fonts/truetype/msttcorefonts/Century_Gothic.ttf".into(),
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into(),
                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf".into(),
-                "/usr/share/fonts/TTF/DejaVuSans.ttf".into(),
             ]
         };
         let bytes = candidates
             .into_iter()
-            .find_map(|p| std::fs::read(p).ok())
+            .find_map(|path| std::fs::read(path).ok())
             .ok_or("No system font found")?;
         let font =
             Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(str::to_owned)?;
@@ -62,7 +62,7 @@ impl Renderer {
             max_width: Some(268.0),
             ..LayoutSettings::default()
         });
-        layout.append(&[&self.font], &TextStyle::new(&self.text, 15.0, 0));
+        layout.append(&[&self.font], &TextStyle::new(&self.text, 18.0, 0));
         layout.height().ceil() as u32
     }
 
@@ -137,6 +137,7 @@ impl Renderer {
             scale,
             logical_height - 152.0,
             self.color,
+            video_background(image),
         );
         let title_y = logical_height - 188.0;
         self.text(
@@ -147,15 +148,15 @@ impl Renderer {
             TextBlock {
                 text: &self.text,
                 y: 26.0,
-                size: 15.0,
-                color: 0xe8e4d8,
+                size: 18.0,
+                color: 0xeef2f7,
                 max_height: title_y - 10.0,
             },
         );
         let mut title = self.title.clone();
         while title
             .chars()
-            .map(|c| self.font.metrics(c, 12.0).advance_width)
+            .map(|c| self.font.metrics(c, 14.0).advance_width)
             .sum::<f32>()
             > 268.0
         {
@@ -176,8 +177,8 @@ impl Renderer {
             TextBlock {
                 text: &title,
                 y: title_y,
-                size: 12.0,
-                color: 0xa8ac9c,
+                size: 14.0,
+                color: 0x9daabd,
                 max_height: title_y + 22.0,
             },
         );
@@ -322,58 +323,75 @@ fn draw_bubble(
     height: usize,
     scale: f32,
     bottom: f32,
-    border: u32,
+    accent: u32,
+    fill: u32,
 ) {
-    let border = blend(border, 0x45463b, 200);
     for y in 0..height {
         for x in 0..width {
             let x_position = x as f32 / scale;
             let y_position = y as f32 / scale;
-            let texture = crate::state::noise_hash(
-                (x_position as u32).wrapping_mul(16807) ^ y_position as u32,
-            ) & 3;
-            let scanline = if (y_position as u32).is_multiple_of(2) {
-                0.95
-            } else {
-                1.0
-            };
-            let shading = (1.0 - y_position / bottom * 0.12) * scanline;
-            let fill = blend(multiply_color(0x282a25, shading), 0x808080, texture * 2);
+            if rounded_contains(
+                x_position,
+                y_position,
+                [8.0, 10.0, 316.0, bottom + 4.0],
+                20.0,
+            ) {
+                buffer[y * width + x] = 0x0d1119;
+            }
             let outer_tail = triangle_contains(
                 x_position,
                 y_position,
                 [
-                    [150.0, bottom - 6.0],
-                    [186.0, bottom - 6.0],
-                    [179.0, bottom + 18.0],
-                ],
-            );
-            let inner_tail = triangle_contains(
-                x_position,
-                y_position,
-                [
-                    [154.0, bottom - 6.0],
-                    [182.0, bottom - 6.0],
-                    [179.0, bottom + 13.0],
+                    [236.0, bottom - 4.0],
+                    [268.0, bottom - 4.0],
+                    [252.0, bottom + 18.0],
                 ],
             );
             if outer_tail {
-                buffer[y * width + x] = if inner_tail { fill } else { border };
+                buffer[y * width + x] = fill;
             }
-            if rounded_contains(x_position, y_position, [6.0, 6.0, 314.0, bottom], 16.0) {
-                buffer[y * width + x] = if rounded_contains(
-                    x_position,
-                    y_position,
-                    [8.0, 8.0, 312.0, bottom - 2.0],
-                    14.0,
-                ) {
-                    fill
-                } else {
-                    border
-                };
+            if rounded_contains(x_position, y_position, [6.0, 6.0, 314.0, bottom], 20.0) {
+                buffer[y * width + x] = fill;
+                if rounded_contains(x_position, y_position, [26.0, 16.0, 58.0, 19.0], 1.5) {
+                    buffer[y * width + x] = accent;
+                }
+                if (26.0..294.0).contains(&x_position)
+                    && (bottom - 46.0..bottom - 45.0).contains(&y_position)
+                {
+                    buffer[y * width + x] = blend(fill, 0xffffff, 30);
+                }
             }
         }
     }
+}
+
+fn video_background(image: Option<&RgbaImage>) -> u32 {
+    let Some(image) = image.filter(|image| image.width() > 0 && image.height() > 0) else {
+        return 0x191f2a;
+    };
+    let right = image.width() - 1;
+    let bottom = image.height() - 1;
+    let mut channels = [0_u32; 3];
+    let mut weight = 0;
+    for x in [
+        right / 32,
+        right / 16,
+        right - right / 16,
+        right - right / 32,
+    ] {
+        for y in [bottom / 32, bottom / 16] {
+            let pixel = image.get_pixel(x, y).0;
+            let alpha = pixel[3] as u32;
+            weight += alpha;
+            for index in 0..3 {
+                channels[index] += pixel[index] as u32 * alpha;
+            }
+        }
+    }
+    if weight == 0 {
+        return 0x191f2a;
+    }
+    ((channels[0] / weight) << 16) | ((channels[1] / weight) << 8) | (channels[2] / weight)
 }
 
 fn rounded_contains(x: f32, y: f32, rectangle: [f32; 4], radius: f32) -> bool {
@@ -402,6 +420,63 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bubble_has_accent_footer_and_a_tail_pointing_to_the_portrait() {
+        let mut buffer = vec![0xff00ff; 320 * 260];
+        draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x3080e0, 0x191f2a);
+        assert_eq!(buffer[17 * 320 + 40], 0x3080e0);
+        assert_eq!(buffer[62 * 320 + 40], blend(0x191f2a, 0xffffff, 30));
+        assert_eq!(buffer[122 * 320 + 252], 0x191f2a);
+        assert_eq!(buffer[30 * 320 + 6], 0x191f2a);
+        assert_eq!(buffer[6 * 320 + 6], 0xff00ff);
+        assert_eq!(buffer[30 * 320 + 315], 0x0d1119);
+    }
+
+    #[test]
+    fn bubble_scales_without_changing_its_layout() {
+        let mut normal = vec![0xff00ff; 320 * 260];
+        let mut doubled = vec![0xff00ff; 640 * 520];
+        draw_bubble(&mut normal, 320, 260, 1.0, 108.0, 0xe08030, 0x191f2a);
+        draw_bubble(&mut doubled, 640, 520, 2.0, 108.0, 0xe08030, 0x191f2a);
+        for y in 0..260 {
+            for x in 0..320 {
+                assert_eq!(normal[y * 320 + x], doubled[y * 2 * 640 + x * 2]);
+            }
+        }
+    }
+
+    #[test]
+    fn bubble_uses_the_average_of_both_video_top_corners() {
+        let frame = RgbaImage::from_fn(128, 128, |x, y| {
+            if y < 10 && x < 10 {
+                image::Rgba([20, 30, 40, 255])
+            } else if y < 10 && x > 117 {
+                image::Rgba([40, 50, 60, 255])
+            } else {
+                image::Rgba([220, 180, 140, 255])
+            }
+        });
+        assert_eq!(video_background(Some(&frame)), 0x1e2832);
+        let mut renderer = Renderer::new().unwrap();
+        let mut buffer = vec![0; 320 * 260];
+        renderer.draw(&mut buffer, 320, 260, 1.0, Some(&frame), 0.0);
+        assert_eq!(buffer[30 * 320 + 150], 0x1e2832);
+    }
+
+    #[test]
+    fn video_background_ignores_transparent_samples_and_handles_missing_frames() {
+        let frame = RgbaImage::from_fn(128, 128, |x, _| {
+            if x < 64 {
+                image::Rgba([255, 0, 255, 0])
+            } else {
+                image::Rgba([20, 30, 40, 255])
+            }
+        });
+        assert_eq!(video_background(Some(&frame)), 0x141e28);
+        assert_eq!(video_background(None), 0x191f2a);
+        assert_eq!(video_background(Some(&RgbaImage::new(0, 0))), 0x191f2a);
+    }
 
     #[test]
     fn text_tearing_leaves_bubble_and_picture_unchanged() {

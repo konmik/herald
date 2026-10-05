@@ -210,7 +210,7 @@ fn run() -> Result<(), String> {
                         renderer.color = if notification.character() == "claude" { 0xe08030 } else { 0x3080e0 };
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
-                        let height = (renderer.message_height() + 226).min(max_height).max(240);
+                        let height = (renderer.message_height() + 238).min(max_height).max(240);
                         window.set_inner_size(LogicalSize::new(320.0, height as f64));
                         if let Some(monitor) = monitor {
                             let scale = monitor.scale_factor();
