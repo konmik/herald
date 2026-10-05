@@ -27,10 +27,10 @@ Done when Pillow imports, FFmpeg works and the recording binary builds.
 
 ## 3. Capture
 
-Save the deliverables under `./temp` with a descriptive, unused filename. In PowerShell, for the current session:
+Save the deliverables under `./temp` with a descriptive, versioned filename, such as `last-announcement-v1.mp4`. For another recording of the same message, increment the highest existing version and keep the earlier videos. In PowerShell, for the current session (replace `v1` with the next unused version):
 
 ```powershell
-& "$env:LOCALAPPDATA/Temp/opencode/civilized-recording-venv/Scripts/python.exe" development_tools/record-announcement.py --last --session $env:OPENCODE_SESSION_ID --output ./temp/last-announcement.mp4
+& "$env:LOCALAPPDATA/Temp/opencode/civilized-recording-venv/Scripts/python.exe" development_tools/record-announcement.py --last --session $env:OPENCODE_SESSION_ID --output ./temp/last-announcement-v1.mp4
 ```
 
 For supplied text, replace `--last --session ...` with `--text 'The exact message.'`. For a particular saved history, use `--history`.
