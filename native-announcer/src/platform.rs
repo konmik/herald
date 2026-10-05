@@ -232,17 +232,7 @@ impl Drop for Speech {
 }
 
 #[cfg(target_os = "windows")]
-fn speak(
-    text: &str,
-    character: &str,
-    preferred: Option<&str>,
-    output_device: Option<&str>,
-    volume: &AtomicU16,
-    cancelled: &Arc<AtomicBool>,
-    use_gpu: bool,
-) -> Result<(), String> {
-    crate::tts::speak(text, character, preferred, output_device, volume, cancelled, use_gpu)
-}
+use crate::tts::speak;
 
 #[cfg(not(target_os = "windows"))]
 fn speak(
@@ -441,7 +431,7 @@ impl Preview {
             let signal = Signal::new(&data);
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
             if stop.load(Ordering::Relaxed) { return Ok(()); }
-            let mut speech = Speech::new(true, settings.use_gpu);
+            let mut speech = Speech::new(false, settings.use_gpu);
             speech.start("This is an announcement", "settings-preview", "opencode", &settings);
             let started = std::time::Instant::now();
             loop {

@@ -1,7 +1,7 @@
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKittenModelConfig, OfflineTtsModelConfig};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex};
 #[cfg(test)]
 use std::time::Instant;
 
@@ -9,18 +9,14 @@ use std::time::Instant;
 const MODEL: &str = "KittenML/kitten-tts-nano-0.8-int8";
 const THREADS: i32 = 4;
 const VOICES: [&str; 8] = ["Jasper", "Bella", "Bruno", "Luna", "Hugo", "Rosie", "Leo", "Kiki"];
-static ENGINE: OnceLock<Mutex<Option<OfflineTts>>> = OnceLock::new();
+static ENGINE: Mutex<Option<OfflineTts>> = Mutex::new(None);
 
 pub(crate) fn model_directory() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("CIVILIZED_AGENT_TTS") { return Ok(path.into()); }
     Ok(std::env::current_exe().map_err(|error| error.to_string())?.parent().ok_or("Missing executable directory")?.join("../resources/tts/kitten-nano-en-v0_8-int8"))
 }
 
-fn create(directory: &Path, threads: i32) -> Result<OfflineTts, String> {
-    create_provider(directory, threads, "cpu")
-}
-
-fn create_provider(directory: &Path, threads: i32, provider: &str) -> Result<OfflineTts, String> {
+fn create(directory: &Path, threads: i32, provider: &str) -> Result<OfflineTts, String> {
     if !(1..=32).contains(&threads) { return Err("TTS thread count must be between 1 and 32".into()); }
     for file in ["model.int8.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/en_dict"] {
         if !directory.join(file).is_file() { return Err(format!("Missing Kitten TTS asset: {}. Run node development_tools/prepare-tts.mjs", directory.join(file).display())); }
@@ -49,8 +45,8 @@ fn create_provider(directory: &Path, threads: i32, provider: &str) -> Result<Off
 }
 
 fn with_engine<T>(action: impl FnOnce(&OfflineTts) -> Result<T, String>) -> Result<T, String> {
-    let mut engine = ENGINE.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Kitten TTS worker failed")?;
-    if engine.is_none() { *engine = Some(create(&model_directory()?, THREADS)?); }
+    let mut engine = ENGINE.lock().map_err(|_| "Kitten TTS worker failed")?;
+    if engine.is_none() { *engine = Some(create(&model_directory()?, THREADS, "cpu")?); }
     action(engine.as_ref().unwrap())
 }
 
@@ -74,7 +70,7 @@ fn pcm(samples: &[f32]) -> Vec<i16> {
 pub fn gpu_worker() -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use crate::gpu::{Request, Response, respond};
-    let engine = create_provider(&model_directory()?, THREADS, "cuda")?;
+    let engine = create(&model_directory()?, THREADS, "cuda")?;
     respond(&Response::Ready)?;
     for line in BufReader::new(std::io::stdin().lock()).lines() {
         let request: Request = serde_json::from_str(&line.map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
@@ -130,7 +126,7 @@ pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device
 #[cfg(test)]
 fn benchmark(output: &Path, threads: i32) -> Result<(), String> {
     let started = Instant::now();
-    let engine = create(&model_directory()?, threads)?;
+    let engine = create(&model_directory()?, threads, "cpu")?;
     let loading_ms = started.elapsed().as_secs_f64() * 1000.0;
     let config = GenerationConfig { sid: 0, ..Default::default() };
     let first = Instant::now();
@@ -170,7 +166,7 @@ mod tests {
     #[test]
     #[ignore = "Requires installed Kitten model assets"]
     fn native_synthesis_streams_each_sentence_once_and_can_stop_early() {
-        let engine = create(&model_directory().unwrap(), THREADS).unwrap();
+        let engine = create(&model_directory().unwrap(), THREADS, "cpu").unwrap();
         let config = GenerationConfig::default();
         let sizes = Arc::new(Mutex::new(Vec::new()));
         let chunks = sizes.clone();
@@ -215,7 +211,7 @@ mod tests {
 
     #[test]
     fn missing_assets_and_invalid_thread_counts_return_errors() {
-        assert!(create(Path::new("missing-kitten-model"), 4).is_err());
-        assert!(create(Path::new("."), 0).is_err());
+        assert!(create(Path::new("missing-kitten-model"), 4, "cpu").is_err());
+        assert!(create(Path::new("."), 0, "cpu").is_err());
     }
 }

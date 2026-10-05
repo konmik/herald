@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize)]
@@ -75,15 +75,12 @@ impl Drop for Worker {
     fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
 }
 
-#[derive(Default)]
 struct State {
     worker: Option<Worker>,
     retry_after: Option<Instant>,
 }
 
-static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-
-fn state() -> &'static Mutex<State> { STATE.get_or_init(|| Mutex::new(State::default())) }
+static STATE: Mutex<State> = Mutex::new(State { worker: None, retry_after: None });
 
 fn ensure_worker(state: &mut State) -> Result<&mut Worker, String> {
     if state.retry_after.is_some_and(|time| time > Instant::now()) { return Err("GPU initialization is temporarily unavailable".into()); }
@@ -97,16 +94,16 @@ fn ensure_worker(state: &mut State) -> Result<&mut Worker, String> {
 }
 
 pub fn prepare() -> Result<(), String> {
-    let mut state = state().lock().map_err(|_| "GPU worker failed")?;
+    let mut state = STATE.lock().map_err(|_| "GPU worker failed")?;
     ensure_worker(&mut state).map(|_| ())
 }
 
 pub fn release() {
-    if let Ok(mut state) = state().lock() { state.worker = None; state.retry_after = None; }
+    if let Ok(mut state) = STATE.lock() { state.worker = None; state.retry_after = None; }
 }
 
 pub fn generate(text: &str, sid: i32, cancelled: &AtomicBool, sender: &mpsc::SyncSender<Vec<i16>>) -> Result<(), (String, bool)> {
-    let mut state = state().lock().map_err(|_| ("GPU worker failed".into(), false))?;
+    let mut state = STATE.lock().map_err(|_| ("GPU worker failed".into(), false))?;
     let mut sent = false;
     let result = (|| -> Result<(), String> {
         let worker = ensure_worker(&mut state)?;
