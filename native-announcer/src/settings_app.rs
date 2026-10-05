@@ -29,6 +29,7 @@ mod native {
     const VOLUME_LABEL: i32 = 110;
     const REFRESH: i32 = 111;
     const PREVIEW: i32 = 112;
+    const GPU: i32 = 113;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
 
     #[repr(C)]
@@ -133,6 +134,7 @@ mod native {
         let mut settings = form.settings.clone();
         settings.volume = SendMessageW(GetDlgItem(window, VOLUME), TBM_GETPOS, 0, 0) as u16;
         settings.output_device = selected_output(window, form);
+        settings.use_gpu = checked(window, GPU);
         settings
     }
 
@@ -144,7 +146,7 @@ mod native {
         settings.quiet_end = parse_time(&text(window, END), true)?;
         settings.save(&form.data)?;
         form.settings = settings;
-        label(window, STATUS, "Saved. Output changes apply to the next announcement.");
+        label(window, STATUS, "Saved. Changes apply to the next announcement.");
         Ok(())
     }
 
@@ -162,11 +164,11 @@ mod native {
             }
             WM_COMMAND if !form.is_null() => {
                 match (wparam & 0xffff) as i32 {
-                    APPLY | CLOSE => match save(window, &mut *form) {
-                        Ok(()) if (wparam & 0xffff) as i32 == CLOSE => { DestroyWindow(window); }
+                    APPLY => match save(window, &mut *form) {
                         Ok(()) => {}
                         Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Civilized Agent settings").as_ptr(), MB_OK | MB_ICONERROR); }
                     },
+                    CLOSE => { DestroyWindow(window); }
                     REFRESH => {
                         let selected = selected_output(window, &*form);
                         populate_outputs(window, &mut *form, selected.as_deref());
@@ -248,7 +250,7 @@ mod native {
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: (COLOR_BTNFACE + 1) as usize as HBRUSH, ..WNDCLASSW::default() };
             if RegisterClassW(&window_class) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
             let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Civilized Agent settings").as_ptr(),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 520, 510,
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 520, 566,
                 std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null());
             if window.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
             SetWindowLongPtrW(window, GWLP_USERDATA, &mut *form as *mut Form as isize);
@@ -267,18 +269,26 @@ mod native {
             control(window, "STATIC", "Audio output (speech and static)", 0, 0, (24, 250, 460, 24))?;
             control(window, "COMBOBOX", "Audio output", OUTPUT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (24, 278, 358, 220))?;
             control(window, "BUTTON", "Refresh", REFRESH, WS_TABSTOP, (392, 278, 92, 28))?;
-            control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (24, 322, 140, 30))?;
-            control(window, "STATIC", "Previews the selected volume and output without saving.", 0, 0, (176, 324, 308, 36))?;
-            control(window, "STATIC", "Uses the system default if your selected device is unavailable.", STATUS, 0, (24, 376, 460, 36))?;
-            control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (272, 426, 100, 30))?;
-            control(window, "BUTTON", "Save and close", CLOSE, WS_TABSTOP, (384, 426, 100, 30))?;
+            control(window, "BUTTON", "Use GPU for speech (NVIDIA CUDA)", GPU, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (24, 322, 460, 28))?;
+            control(window, "STATIC", "Falls back to CPU if GPU startup is unavailable.", 0, 0, (24, 352, 460, 24))?;
+            control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (24, 382, 140, 30))?;
+            control(window, "STATIC", "Previews your selected settings without saving.", 0, 0, (176, 384, 308, 36))?;
+            control(window, "STATIC", "Uses the system default if your selected device is unavailable.", STATUS, 0, (24, 436, 460, 36))?;
+            control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (272, 486, 100, 30))?;
+            control(window, "BUTTON", "Close", CLOSE, WS_TABSTOP, (384, 486, 100, 30))?;
             set_checked(window, QUIET, form.settings.quiet_mode);
             set_checked(window, SCHEDULE, form.settings.schedule_enabled);
+            set_checked(window, GPU, form.settings.use_gpu);
             EnableWindow(GetDlgItem(window, START), form.settings.schedule_enabled as i32);
             EnableWindow(GetDlgItem(window, END), form.settings.schedule_enabled as i32);
             let selected = form.settings.output_device.clone();
             populate_outputs(window, &mut form, selected.as_deref());
             show_on_desktop(window, desktop.as_ref());
+            let speech_data = data.to_path_buf();
+            let use_gpu = form.settings.use_gpu;
+            std::thread::spawn(move || {
+                if let Err(error) = crate::tts::prepare(use_gpu) { crate::state::log(&speech_data, error); }
+            });
             let mut message = MSG::default();
             loop {
                 let result = GetMessageW(&mut message, std::ptr::null_mut(), 0, 0);

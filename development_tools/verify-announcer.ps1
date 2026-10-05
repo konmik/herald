@@ -19,9 +19,6 @@ $messages = @(
     @{ type = 'notify'; id = 'native-claude'; sessionID = 'verify-claude'; completed = 1; text = 'The native notification test passed.'; title = 'Claude native notification'; character = 'claude'; emotion = 'neutral' },
     @{ type = 'notify'; id = 'native-opencode'; sessionID = 'verify-opencode'; completed = 1; text = ('word ' * 30).Trim(); title = 'OpenCode native notification'; character = 'opencode'; emotion = 'neutral' }
 )
-for ($i = 0; $i -lt $messages.Count; $i++) {
-    $messages[$i] | ConvertTo-Json | Set-Content (Join-Path $inbox "$i.json") -Encoding utf8NoBOM
-}
 $info = [System.Diagnostics.ProcessStartInfo]::new($binary)
 $info.UseShellExecute = $false
 $info.Environment['CIVILIZED_AGENT_DATA'] = $data
@@ -35,10 +32,18 @@ $info.ArgumentList.Add($reportPath)
 $info.ArgumentList.Add('--snapshot')
 $info.ArgumentList.Add((Join-Path $temporary 'preview.png'))
 $process = [System.Diagnostics.Process]::Start($info)
+$queued = $false
+$started = [DateTimeOffset]::UtcNow
 $peak = 0
 $lastPresence = [DateTimeOffset]::MinValue
 while (-not $process.WaitForExit(50)) {
     $now = [DateTimeOffset]::UtcNow
+    if (-not $queued -and ($now - $started).TotalSeconds -ge 3) {
+        for ($i = 0; $i -lt $messages.Count; $i++) {
+            $messages[$i] | ConvertTo-Json | Set-Content (Join-Path $inbox "$i.json") -Encoding utf8NoBOM
+        }
+        $queued = $true
+    }
     if (($now - $lastPresence).TotalSeconds -ge 2) {
         $presence = @{ type = 'presence'; clientID = 'verification'; sessionIDs = @('verify-claude', 'verify-opencode'); at = $now.ToUnixTimeMilliseconds() }
         $path = Join-Path $inbox ("presence-$([guid]::NewGuid())")
@@ -70,8 +75,9 @@ if ($library) {
     $libraryPath = (Resolve-Path (Join-Path $root 'native-announcer/resources/videos')).Path
     if ($report.selectedVideos.Count -ne 2 -or @($report.selectedVideos | Where-Object { (Resolve-Path (Split-Path $_ -Parent)).Path -ne $libraryPath }).Count -ne 0) { throw 'Notifications must select videos from the shared library.' }
 }
-if ($peak -ge 100MB) { throw 'Announcer exceeded 100 MB.' }
 $shouldSpeak = $Speech -and -not $QuietMode -and $Volume -gt 0 -and -not $Meeting
+$memoryLimit = if ($shouldSpeak) { 256MB } else { 100MB }
+if ($peak -ge $memoryLimit) { throw "Announcer exceeded $($memoryLimit / 1MB) MB." }
 if ($shouldSpeak -and $report.speechStarted -ne 2) { throw 'Both characters must speak.' }
 if (-not $shouldSpeak -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 2)) { throw 'Quiet mode must suppress speech only.' }
 if (Test-Path (Join-Path $data 'errors.log')) { throw (Get-Content (Join-Path $data 'errors.log') -Raw) }

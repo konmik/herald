@@ -153,6 +153,7 @@ struct SpeechCommand {
     character: String,
     preferred: Option<String>,
     output_device: Option<String>,
+    use_gpu: bool,
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
 }
@@ -165,16 +166,23 @@ pub struct Speech {
 }
 
 impl Speech {
-    pub fn new() -> Self {
+    pub fn new(preload: bool, use_gpu: bool) -> Self {
+        #[cfg(not(target_os = "windows"))]
+        let _ = use_gpu;
         let (sender, commands) = mpsc::channel::<SpeechCommand>();
         let (events, receiver) = mpsc::channel();
         std::thread::spawn(move || {
+            if preload {
+                #[cfg(target_os = "windows")]
+                if let Err(error) = crate::tts::prepare(use_gpu) { log(&data_directory(), error); }
+            }
             for SpeechCommand {
                 text,
                 id,
                 character,
                 preferred,
                 output_device,
+                use_gpu,
                 volume,
                 cancelled,
             } in commands
@@ -182,7 +190,7 @@ impl Speech {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled);
+                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu);
                 let _ = events.send((id, result));
             }
         });
@@ -204,6 +212,7 @@ impl Speech {
             character: character.into(),
             preferred: settings.voices.get(character).cloned(),
             output_device: settings.output_device.clone(),
+            use_gpu: settings.use_gpu,
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
         });
@@ -229,101 +238,10 @@ fn speak(
     preferred: Option<&str>,
     output_device: Option<&str>,
     volume: &AtomicU16,
-    cancelled: &AtomicBool,
+    cancelled: &Arc<AtomicBool>,
+    use_gpu: bool,
 ) -> Result<(), String> {
-    use windows::core::{w, HSTRING};
-    use windows::Win32::Media::Audio::WAVEFORMATEX;
-    use windows::Win32::Media::Speech::*;
-    use windows::Win32::System::Com::*;
-    static FILE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    struct SpeechFile(PathBuf);
-    impl Drop for SpeechFile {
-        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
-    }
-    let data = data_directory();
-    crate::private::directory(&data).map_err(|error| error.to_string())?;
-    let temporary = SpeechFile(data.join(format!("speech-{}-{}.wav", std::process::id(), FILE_ID.fetch_add(1, Ordering::Relaxed))));
-    unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .map_err(|e| e.to_string())?;
-        let result = (|| -> windows::core::Result<()> {
-            let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)?;
-            let stream: ISpStream = CoCreateInstance(&SpStream, None, CLSCTX_ALL)?;
-            let format_id = windows::core::GUID::from_u128(0xc31adbae_527f_4ff5_a230_f62bb61ff70c);
-            let format = WAVEFORMATEX { wFormatTag: 1, nChannels: 1, nSamplesPerSec: 16000, nAvgBytesPerSec: 32000, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
-            stream.BindToFile(&HSTRING::from(temporary.0.to_string_lossy().as_ref()), SPFM_CREATE_ALWAYS, Some(&format_id), Some(&format), 0)?;
-            voice.SetOutput(&stream, false)?;
-            voice.SetVolume(100)?;
-            let category: ISpObjectTokenCategory =
-                CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
-            category.SetId(
-                w!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
-                false,
-            )?;
-            let tokens = category.EnumTokens(w!(""), w!(""))?;
-            let mut count = 0;
-            tokens.GetCount(&mut count)?;
-            let names: Vec<&str> = preferred.map(|p| vec![p]).unwrap_or_else(|| {
-                if character == "claude" {
-                    vec!["Mark", "David"]
-                } else {
-                    vec!["David", "Mark"]
-                }
-            });
-            let mut chosen = None;
-            for name in names {
-                for index in 0..count {
-                    let token = tokens.Item(index)?;
-                    let attributes = token.OpenKey(w!("Attributes"))?;
-                    let value = attributes.GetStringValue(w!("Name"))?;
-                    let label = value.to_string().unwrap_or_default();
-                    CoTaskMemFree(Some(value.0 as *const _));
-                    if label.to_lowercase().contains(&name.to_lowercase()) {
-                        chosen = Some(token);
-                        break;
-                    }
-                }
-                if chosen.is_some() {
-                    break;
-                }
-            }
-            if let Some(token) = chosen {
-                voice.SetVoice(&token)?;
-            }
-            voice.SetRate(if character == "claude" { 1 } else { -1 })?;
-            let escaped = text
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            let xml = HSTRING::from(format!(
-                "<pitch absmiddle=\"{}\">{escaped}</pitch>",
-                if character == "claude" { 1 } else { -2 }
-            ));
-            voice.Speak(&xml, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)?;
-            loop {
-                if cancelled.load(Ordering::Relaxed) {
-                    voice.Speak(w!(""), (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32, None)?;
-                    break;
-                }
-                let result = (windows::core::Interface::vtable(&voice).WaitUntilDone)(windows::core::Interface::as_raw(&voice), 50);
-                result.ok()?;
-                if result == windows::Win32::Foundation::S_OK {
-                    let mut status = SPVOICESTATUS::default();
-                    voice.GetStatus(&mut status, std::ptr::null_mut())?;
-                    status.hrLastResult.ok()?;
-                    break;
-                }
-            }
-            voice.SetOutput(None::<&windows::core::IUnknown>, true)?;
-            stream.Close()?;
-            Ok(())
-        })();
-        CoUninitialize();
-        result.map_err(|e| e.to_string())?;
-    }
-    if cancelled.load(Ordering::Relaxed) { return Ok(()); }
-    crate::audio::play_wav(&temporary.0, volume, output_device, cancelled)
+    crate::tts::speak(text, character, preferred, output_device, volume, cancelled, use_gpu)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -334,6 +252,7 @@ fn speak(
     _output_device: Option<&str>,
     volume: &AtomicU16,
     cancelled: &AtomicBool,
+    _use_gpu: bool,
 ) -> Result<(), String> {
     let mut command = if cfg!(target_os = "macos") {
         let mut command = hidden_command("say");
@@ -522,7 +441,7 @@ impl Preview {
             let signal = Signal::new(&data);
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
             if stop.load(Ordering::Relaxed) { return Ok(()); }
-            let mut speech = Speech::new();
+            let mut speech = Speech::new(true, settings.use_gpu);
             speech.start("This is an announcement", "settings-preview", "opencode", &settings);
             let started = std::time::Instant::now();
             loop {
@@ -699,7 +618,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
-        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled).unwrap();
+        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false).unwrap();
         assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
     }
 

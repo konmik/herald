@@ -10,6 +10,10 @@ mod render;
 mod state;
 mod settings;
 mod settings_app;
+#[cfg(target_os = "windows")]
+mod tts;
+#[cfg(target_os = "windows")]
+mod gpu;
 mod video;
 mod window;
 
@@ -57,6 +61,8 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if std::env::args().any(|argument| argument == "--gpu-speech-worker") { return tts::gpu_worker(); }
     let mut assets = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
@@ -164,7 +170,11 @@ fn run() -> Result<(), String> {
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
     let mut renderer = Renderer::new()?;
-    let mut speech = Speech::new();
+    let local = chrono::Local::now();
+    let preload_speech = settings_store.current.volume > 0
+        && !settings_store.current.quiet_at(local.hour() * 60 + local.minute())
+        && !platform::meeting_override(&data);
+    let mut speech = Speech::new(preload_speech, settings_store.current.use_gpu);
     let mut signal = Signal::new(&data);
     let meeting = Arc::new(MeetingStatus::new());
     let stop = Arc::new(AtomicBool::new(false));
@@ -215,7 +225,12 @@ fn run() -> Result<(), String> {
                 else if before != 0 && platform::foreground() != before { external_focus_changed = true; }
                 if now.duration_since(last_inbox) >= Duration::from_millis(250) {
                     match settings_store.reload() {
-                        Ok(true) => { speech.set_volume(settings_store.current.volume); signal.stop(); }
+                        Ok(true) => {
+                            speech.set_volume(settings_store.current.volume);
+                            signal.stop();
+                            #[cfg(target_os = "windows")]
+                            if !settings_store.current.use_gpu { std::thread::spawn(gpu::release); }
+                        }
                         Err(error) => state::log(&data, format!("Settings: {error}")),
                         _ => {}
                     }

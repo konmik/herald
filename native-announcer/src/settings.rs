@@ -11,6 +11,7 @@ pub struct Settings {
     pub quiet_end: u32,
     pub volume: u16,
     pub output_device: Option<String>,
+    pub use_gpu: bool,
     pub voices: HashMap<String, String>,
 }
 
@@ -23,6 +24,7 @@ impl Default for Settings {
             quiet_end: 8 * 60,
             volume: 100,
             output_device: None,
+            use_gpu: false,
             voices: HashMap::new(),
         }
     }
@@ -121,6 +123,13 @@ pub fn volume_gain(volume: u16) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_defaults_off_and_persists_when_selected() {
+        assert!(!Settings::decode(b"{}").unwrap().use_gpu);
+        let settings = Settings { use_gpu: true, ..Settings::default() };
+        assert!(Settings::decode(&serde_json::to_vec(&settings).unwrap()).unwrap().use_gpu);
+    }
 
     #[test]
     fn volume_is_linear_in_decibels_with_true_mute_and_full_scale() {

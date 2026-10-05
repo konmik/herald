@@ -87,11 +87,18 @@ pub fn decode_wav(wav: &[u8]) -> Result<Vec<i16>, String> {
 
 #[cfg(target_os = "windows")]
 pub fn play_wav(path: &std::path::Path, volume: &AtomicU16, selected: Option<&str>, cancelled: &AtomicBool) -> Result<(), String> {
-    use windows::Win32::Media::Audio::*;
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let wav = std::fs::read(path).map_err(|error| error.to_string())?;
     let samples = decode_wav(&wav)?;
-    let format = WAVEFORMATEX { wFormatTag: 1, nChannels: 1, nSamplesPerSec: 16000, nAvgBytesPerSec: 32000, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
+    play_pcm(&samples, 16000, volume, selected, cancelled)
+}
+
+#[cfg(target_os = "windows")]
+pub fn play_pcm(samples: &[i16], sample_rate: u32, volume: &AtomicU16, selected: Option<&str>, cancelled: &AtomicBool) -> Result<(), String> {
+    use windows::Win32::Media::Audio::*;
+    if cancelled.load(Ordering::Relaxed) || samples.is_empty() { return Ok(()); }
+    if !(8000..=192000).contains(&sample_rate) { return Err("Invalid announcement sample rate".into()); }
+    let format = WAVEFORMATEX { wFormatTag: 1, nChannels: 1, nSamplesPerSec: sample_rate, nAvgBytesPerSec: sample_rate * 2, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
     unsafe {
         let mut output = HWAVEOUT::default();
         let index = device_index(selected);
@@ -102,10 +109,10 @@ pub fn play_wav(path: &std::path::Path, volume: &AtomicU16, selected: Option<&st
         if result != 0 { return Err(format!("Could not open announcement audio output: {result}")); }
         #[repr(align(8))]
         struct Block { header: WAVEHDR, samples: Vec<i16>, prepared: bool }
-        let mut blocks: Vec<_> = (0..2).map(|_| Box::new(Block { header: WAVEHDR::default(), samples: vec![0; 640], prepared: false })).collect();
+        let mut blocks: Vec<_> = (0..2).map(|_| Box::new(Block { header: WAVEHDR::default(), samples: vec![0; sample_rate as usize / 25], prepared: false })).collect();
         let size = std::mem::size_of::<WAVEHDR>() as u32;
         let started = std::time::Instant::now();
-        let limit = std::time::Duration::from_secs_f64(samples.len() as f64 / 16000.0 + 5.0);
+        let limit = std::time::Duration::from_secs_f64(samples.len() as f64 / f64::from(sample_rate) + 5.0);
         let mut offset = 0;
         while !cancelled.load(Ordering::Relaxed) {
             for block in &mut blocks {

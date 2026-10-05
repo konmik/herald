@@ -44,6 +44,8 @@ try {
     $selected = Send-Control 106 0x147
     $count = Send-Control 106 0x146
     if ($selected -ne $count - 1 -or $selected -le 0) { throw 'Unavailable output must remain selected with system fallback' }
+    if ((Read-Control 107) -ne 'Apply' -or (Read-Control 108) -ne 'Close') { throw 'Settings must have Apply and Close buttons' }
+    if ((Send-Control 113 0xF0) -ne 0) { throw 'CPU must be the default' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if ($settings.outputDevice -ne 'unavailable-test-device') { throw 'Saving lost the unavailable selected device' }
@@ -55,6 +57,13 @@ try {
     while ((Read-Control 112) -eq 'Stop example' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if ((Read-Control 109) -ne 'Preview finished.') { throw "Audio preview did not finish: $(Read-Control 109)" }
     if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Preview saved unsaved settings' }
+    Send-Control 113 0xF1 1 | Out-Null
+    Send-Control 112 0xF5 | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    while ((Read-Control 112) -eq 'Stop example' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    if ((Read-Control 109) -ne 'Preview finished.') { throw "GPU preview did not finish: $(Read-Control 109)" }
+    if (Test-Path (Join-Path $temporary 'errors.log')) { throw (Get-Content (Join-Path $temporary 'errors.log') -Raw) }
+    if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'GPU preview saved unapplied changes' }
     Send-Control 112 0xF5 | Out-Null
     Send-Control 112 0xF5 | Out-Null
     if ((Read-Control 109) -ne 'Preview stopped.') { throw 'Preview could not be cancelled' }
@@ -69,13 +78,17 @@ try {
     Send-Control 106 0x14E 0 | Out-Null
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (-not $settings.quietMode -or -not $settings.scheduleEnabled -or $settings.quietStart -ne 1350 -or $settings.quietEnd -ne 495 -or $settings.volume -ne 35 -or $null -ne $settings.outputDevice -or $settings.voices.claude -ne 'Mark') { throw "Settings controls did not persist their values or preserve the voice selection: $($settings | ConvertTo-Json -Compress)" }
+    if (-not $settings.useGpu -or -not $settings.quietMode -or -not $settings.scheduleEnabled -or $settings.quietStart -ne 1350 -or $settings.quietEnd -ne 495 -or $settings.volume -ne 35 -or $null -ne $settings.outputDevice -or $settings.voices.claude -ne 'Mark') { throw "Settings controls did not persist their values or preserve the voice selection: $($settings | ConvertTo-Json -Compress)" }
+    $applied = Get-Content $settingsPath -Raw
+    Send-Control 105 0x405 1 15 | Out-Null
+    Send-Control 113 0xF1 0 | Out-Null
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000) -or $process.ExitCode -ne 0) { throw 'Settings app did not close cleanly' }
+    if ((Get-Content $settingsPath -Raw) -ne $applied) { throw 'Close must not save unapplied changes' }
     $process = [Diagnostics.Process]::Start($info)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do { Start-Sleep -Milliseconds 50; $process.Refresh() } while ($process.MainWindowHandle -eq [IntPtr]::Zero -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline)
-    if ((Send-Control 101 0xF0) -ne 1 -or (Send-Control 105 0x400) -ne 35 -or (Send-Control 106 0x147) -ne 0) { throw 'Saved settings did not survive reopening' }
+    if ((Send-Control 113 0xF0) -ne 1 -or (Send-Control 101 0xF0) -ne 1 -or (Send-Control 105 0x400) -ne 35 -or (Send-Control 106 0x147) -ne 0) { throw 'Saved settings did not survive reopening' }
     $reopen = [Diagnostics.Process]::Start($info)
     if (-not $reopen.WaitForExit(5000) -or $reopen.ExitCode -ne 0 -or $process.HasExited) { throw 'Reopening should show the existing settings window' }
     [CivilizedSettingsTest]::SendMessage($process.MainWindowHandle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
