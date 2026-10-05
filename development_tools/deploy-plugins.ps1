@@ -139,6 +139,7 @@ try {
     Invoke-Checked 'bun' @('test', './opencode-plugin/tests')
     Invoke-Checked 'claude' @('plugin', 'test', $source)
     Invoke-Checked 'claude' @('plugin', 'validate', $source)
+    Invoke-Checked 'node' @('--test', (Join-Path $PSScriptRoot 'tests/assets.test.mjs'))
     Invoke-Checked 'node' @((Join-Path $PSScriptRoot 'prepare-tts.mjs'))
     Invoke-Checked 'cargo' @('test', '--locked', '-j', '6', '--manifest-path', (Join-Path $announcer 'Cargo.toml'))
     $architecture = & node -p 'process.arch'

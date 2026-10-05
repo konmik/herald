@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { access, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installDirectory } from './install-directory.mjs'
 
 const name = 'kitten-nano-en-v0_8-int8'
 const resources = fileURLToPath(new URL('../native-announcer/resources/tts/', import.meta.url))
@@ -14,7 +14,7 @@ try {
   console.log(`Kitten Nano 0.8 INT8 ready: ${destination}`)
 } catch {
   await mkdir(resources, { recursive: true })
-  const stage = await mkdtemp(join(tmpdir(), 'civilized-kitten-'))
+  const stage = await mkdtemp(join(resources, '.kitten-install-'))
   try {
     const archive = join(stage, `${name}.tar.bz2`)
     const response = await fetch(`https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${name}.tar.bz2`, { signal: AbortSignal.timeout(120000) })
@@ -26,7 +26,7 @@ try {
     if (extraction.error) throw extraction.error
     if (extraction.status !== 0) throw new Error('Kitten model extraction failed')
     await Promise.all(required.map(file => access(join(stage, name, file))))
-    await rename(join(stage, name), destination)
+    await installDirectory(join(stage, name), destination)
     console.log(`Installed Kitten Nano 0.8 INT8: ${destination}`)
   } finally {
     await rm(stage, { recursive: true, force: true })
