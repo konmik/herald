@@ -65,7 +65,17 @@ try {
     $script:pluginEnabled = $false
     Enable-ClaudePlugin
     Assert-True ($script:enableCalls -eq 1) 'Deployment did not enable a disabled plugin'
-    Write-Output '7 deployment checks passed.'
+    $programs = Join-Path $temporary 'programs'
+    $binary = Join-Path $shared 'announcer.exe'
+    Install-SettingsShortcut $binary $programs
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut((Join-Path $programs 'Civilized Agent settings.lnk'))
+        Assert-True ($shortcut.TargetPath -eq $binary -and $shortcut.Arguments -eq '--settings') 'Settings shortcut does not launch the settings app'
+    } finally {
+        [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+    }
+    Write-Output '8 deployment checks passed.'
 } finally {
     $junction = Join-Path $temporary 'profile/plugins/cache/civilized-agent-local/civilized-agent/0.3.0/native-announcer'
     if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }

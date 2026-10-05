@@ -1,18 +1,22 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod capture;
+#[cfg(any(target_os = "windows", test))]
+mod audio;
 mod history;
 mod platform;
 mod private;
 mod render;
 mod state;
+mod settings;
+mod settings_app;
 mod video;
 mod window;
 
 use chrono::Timelike;
 use platform::{Signal, Speech};
 use render::Renderer;
-use state::{Inbox, MeetingStatus, Notification, Settings};
+use state::{Inbox, MeetingStatus, Notification};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -63,11 +67,13 @@ fn run() -> Result<(), String> {
     let mut report = None;
     let mut snapshot = None;
     let mut isolated = false;
+    let mut open_settings = false;
     let mut capture_directory = None;
     let mut capture_speech_seconds = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--settings" => open_settings = true,
             "--isolated" => isolated = true,
             "--capture-frames" => capture_directory = Some(PathBuf::from(arguments.next().ok_or("Missing capture directory")?)),
             "--capture-speech-seconds" => {
@@ -100,6 +106,7 @@ fn run() -> Result<(), String> {
         }
     }
     let data = platform::data_directory();
+    if open_settings { return settings_app::run(&data); }
     if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
         return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
     }
@@ -119,16 +126,7 @@ fn run() -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
         Err(error) => return Err(error.to_string()),
     };
-    let settings_path = data.join("settings.json");
-    let settings: Settings = if settings_path.exists() {
-        serde_json::from_slice(&std::fs::read(&settings_path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?
-    } else {
-        let settings = Settings::default();
-        private::write(&settings_path, &serde_json::to_vec(&settings).unwrap())
-            .map_err(|e| e.to_string())?;
-        settings
-    };
+    let mut settings_store = settings::Store::new(&data)?;
     let mut inbox = Inbox::new(data.clone());
     let demo_mode = demo.is_some();
     if let Some(character) = demo {
@@ -216,12 +214,19 @@ fn run() -> Result<(), String> {
                 if platform::is_foreground(&window) { focus_unchanged = false; }
                 else if before != 0 && platform::foreground() != before { external_focus_changed = true; }
                 if now.duration_since(last_inbox) >= Duration::from_millis(250) {
+                    match settings_store.reload() {
+                        Ok(true) => { speech.set_volume(settings_store.current.volume); signal.stop(); }
+                        Err(error) => state::log(&data, format!("Settings: {error}")),
+                        _ => {}
+                    }
                     if inbox.read(current.as_ref().filter(|a| !demo_mode || a.notification.session_id != "demo").map(|a| &a.notification)) {
                         speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
                     }
                     last_inbox = now;
                 }
-                let muted = meeting.muted(now) || platform::meeting_override(&data) || state::is_night(chrono::Local::now().hour(), settings.night_start, settings.night_end);
+                let settings = &settings_store.current;
+                let local = chrono::Local::now();
+                let muted = meeting.muted(now) || platform::meeting_override(&data) || settings.quiet_at(local.hour() * 60 + local.minute()) || settings.volume == 0;
                 for (id, result) in speech.events.try_iter() {
                     if let Some(active) = current.as_mut().filter(|a| a.notification.id == id) {
                         active.speech_finished = true;
@@ -268,7 +273,7 @@ fn run() -> Result<(), String> {
                         shown += 1;
                         titles.push(renderer.title.clone());
                         if muted { muted_announcements += 1; }
-                        if !muted { signal.play(); }
+                        if !muted { signal.play(settings); }
                         inbox.save(current.as_ref().map(|a| &a.notification));
                     }
                 }
@@ -276,11 +281,11 @@ fn run() -> Result<(), String> {
                 if let Some(active) = current.as_mut() {
                     if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
-                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), &settings); speech_started += 1; }
+                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), settings); speech_started += 1; }
                     }
                     if active.end.is_none() && active.ready_to_end(now) {
                         active.end = Some(now); speech.cancel();
-                        if !active.silent && !muted { signal.play(); }
+                        if !active.silent && !muted { signal.play(settings); }
                     }
                     if active.end.is_some_and(|end| now.duration_since(end) >= state::TRANSITION_DURATION) {
                         max_visible = max_visible.max(active.started.elapsed().as_secs_f64());

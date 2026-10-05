@@ -92,6 +92,22 @@ function Stop-OwnedAnnouncers {
     }
 }
 
+function Install-SettingsShortcut {
+    param([string]$Binary, [string]$ProgramsDirectory = [Environment]::GetFolderPath('Programs'))
+    New-Item -ItemType Directory -Path $ProgramsDirectory -Force | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut((Join-Path $ProgramsDirectory 'Civilized Agent settings.lnk'))
+        $shortcut.TargetPath = [IO.Path]::GetFullPath($Binary)
+        $shortcut.Arguments = '--settings'
+        $shortcut.WorkingDirectory = Split-Path $shortcut.TargetPath -Parent
+        $shortcut.Description = 'Quiet mode, schedule, volume and audio output for Civilized Agent'
+        $shortcut.Save()
+    } finally {
+        [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+    }
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }
 if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'Run this deployment script with PowerShell 7 on Windows' }
 if (-not $ClaudeConfigDirectory) {
@@ -142,6 +158,7 @@ try {
     }
     Enable-ClaudePlugin
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Built announcer binary is missing' }
+    Install-SettingsShortcut $binary
     Start-Process -FilePath $binary -ArgumentList @('--assets', ('"' + (Join-Path $announcer 'resources') + '"')) -WindowStyle Hidden | Out-Null
     $restartAnnouncer = $false
     Write-Output 'OpenCode plugin deployed through its existing repository registration.'

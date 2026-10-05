@@ -1,4 +1,4 @@
-param([switch]$Speech, [switch]$Meeting)
+param([switch]$Speech, [switch]$Meeting, [switch]$QuietMode, [ValidateRange(0, 100)][int]$Volume = 100, [string]$OutputDevice)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $binary = Join-Path $root 'native-announcer/bin/civilized-announcer-win32-x64.exe'
@@ -8,6 +8,9 @@ $inbox = Join-Path $data 'inbox'
 New-Item -ItemType Directory -Path $inbox -Force | Out-Null
 $reportPath = Join-Path $temporary 'report.json'
 $settings = if ($Speech -or $Meeting) { @{ nightStart = 22; nightEnd = 22 } } else { @{ nightStart = 0; nightEnd = 24 } }
+$settings.volume = $Volume
+$settings.quietMode = [bool]$QuietMode
+if ($OutputDevice) { $settings.outputDevice = $OutputDevice }
 $settings | ConvertTo-Json | Set-Content (Join-Path $data 'settings.json') -Encoding utf8NoBOM
 if ($Meeting) {
     @{ active = $true; updated = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000 } | ConvertTo-Json | Set-Content (Join-Path $data 'meeting.json') -Encoding utf8NoBOM
@@ -68,6 +71,7 @@ if ($library) {
     if ($report.selectedVideos.Count -ne 2 -or @($report.selectedVideos | Where-Object { (Resolve-Path (Split-Path $_ -Parent)).Path -ne $libraryPath }).Count -ne 0) { throw 'Notifications must select videos from the shared library.' }
 }
 if ($peak -ge 100MB) { throw 'Announcer exceeded 100 MB.' }
-if ($Speech -and $report.speechStarted -ne 2) { throw 'Both characters must speak.' }
-if (-not $Speech -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 2)) { throw 'Quiet hours must suppress speech only.' }
+$shouldSpeak = $Speech -and -not $QuietMode -and $Volume -gt 0 -and -not $Meeting
+if ($shouldSpeak -and $report.speechStarted -ne 2) { throw 'Both characters must speak.' }
+if (-not $shouldSpeak -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 2)) { throw 'Quiet mode must suppress speech only.' }
 if (Test-Path (Join-Path $data 'errors.log')) { throw (Get-Content (Join-Path $data 'errors.log') -Raw) }

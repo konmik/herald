@@ -39,25 +39,6 @@ impl Notification {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Settings {
-    pub night_start: u32,
-    pub night_end: u32,
-    #[serde(default)]
-    pub voices: HashMap<String, String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            night_start: 22,
-            night_end: 8,
-            voices: HashMap::new(),
-        }
-    }
-}
-
 pub fn is_night(hour: u32, start: u32, end: u32) -> bool {
     if start > end {
         hour >= start || hour < end

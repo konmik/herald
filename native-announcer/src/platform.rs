@@ -1,10 +1,11 @@
-use crate::state::{log, MeetingStatus, Settings};
+use crate::state::{log, MeetingStatus};
+use crate::settings::Settings;
 use crate::window::Window;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -151,6 +152,8 @@ struct SpeechCommand {
     id: String,
     character: String,
     preferred: Option<String>,
+    output_device: Option<String>,
+    volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -158,6 +161,7 @@ pub struct Speech {
     pub events: mpsc::Receiver<(String, Result<(), String>)>,
     sender: mpsc::Sender<SpeechCommand>,
     cancelled: Arc<AtomicBool>,
+    volume: Arc<AtomicU16>,
 }
 
 impl Speech {
@@ -170,13 +174,15 @@ impl Speech {
                 id,
                 character,
                 preferred,
+                output_device,
+                volume,
                 cancelled,
             } in commands
             {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &character, preferred.as_deref(), &cancelled);
+                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled);
                 let _ = events.send((id, result));
             }
         });
@@ -184,17 +190,21 @@ impl Speech {
             events: receiver,
             sender,
             cancelled: Arc::new(AtomicBool::new(false)),
+            volume: Arc::new(AtomicU16::new(100)),
         }
     }
 
     pub fn start(&mut self, text: &str, id: &str, character: &str, settings: &Settings) {
         self.cancel();
+        self.set_volume(settings.volume);
         self.cancelled = Arc::new(AtomicBool::new(false));
         let _ = self.sender.send(SpeechCommand {
             text: text.into(),
             id: id.into(),
             character: character.into(),
             preferred: settings.voices.get(character).cloned(),
+            output_device: settings.output_device.clone(),
+            volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
         });
     }
@@ -202,6 +212,8 @@ impl Speech {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
     }
+
+    pub fn set_volume(&self, volume: u16) { self.volume.store(volume.min(100), Ordering::Relaxed); }
 }
 
 impl Drop for Speech {
@@ -215,17 +227,34 @@ fn speak(
     text: &str,
     character: &str,
     preferred: Option<&str>,
+    output_device: Option<&str>,
+    volume: &AtomicU16,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     use windows::core::{w, HSTRING};
+    use windows::Win32::Media::Audio::WAVEFORMATEX;
     use windows::Win32::Media::Speech::*;
     use windows::Win32::System::Com::*;
+    static FILE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    struct SpeechFile(PathBuf);
+    impl Drop for SpeechFile {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+    let data = data_directory();
+    crate::private::directory(&data).map_err(|error| error.to_string())?;
+    let temporary = SpeechFile(data.join(format!("speech-{}-{}.wav", std::process::id(), FILE_ID.fetch_add(1, Ordering::Relaxed))));
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+        CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .map_err(|e| e.to_string())?;
         let result = (|| -> windows::core::Result<()> {
             let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)?;
+            let stream: ISpStream = CoCreateInstance(&SpStream, None, CLSCTX_ALL)?;
+            let format_id = windows::core::GUID::from_u128(0xc31adbae_527f_4ff5_a230_f62bb61ff70c);
+            let format = WAVEFORMATEX { wFormatTag: 1, nChannels: 1, nSamplesPerSec: 16000, nAvgBytesPerSec: 32000, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
+            stream.BindToFile(&HSTRING::from(temporary.0.to_string_lossy().as_ref()), SPFM_CREATE_ALWAYS, Some(&format_id), Some(&format), 0)?;
+            voice.SetOutput(&stream, false)?;
+            voice.SetVolume(100)?;
             let category: ISpObjectTokenCategory =
                 CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
             category.SetId(
@@ -277,19 +306,24 @@ fn speak(
                     voice.Speak(w!(""), (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32, None)?;
                     break;
                 }
-                voice.WaitUntilDone(50)?;
-                let mut status = SPVOICESTATUS::default();
-                voice.GetStatus(&mut status, std::ptr::null_mut())?;
-                if status.dwRunningState == SPRS_DONE.0 as u32 {
+                let result = (windows::core::Interface::vtable(&voice).WaitUntilDone)(windows::core::Interface::as_raw(&voice), 50);
+                result.ok()?;
+                if result == windows::Win32::Foundation::S_OK {
+                    let mut status = SPVOICESTATUS::default();
+                    voice.GetStatus(&mut status, std::ptr::null_mut())?;
                     status.hrLastResult.ok()?;
                     break;
                 }
             }
+            voice.SetOutput(None::<&windows::core::IUnknown>, true)?;
+            stream.Close()?;
             Ok(())
         })();
         CoUninitialize();
-        result.map_err(|e| e.to_string())
+        result.map_err(|e| e.to_string())?;
     }
+    if cancelled.load(Ordering::Relaxed) { return Ok(()); }
+    crate::audio::play_wav(&temporary.0, volume, output_device, cancelled)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -297,6 +331,8 @@ fn speak(
     text: &str,
     character: &str,
     preferred: Option<&str>,
+    _output_device: Option<&str>,
+    volume: &AtomicU16,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let mut command = if cfg!(target_os = "macos") {
@@ -329,6 +365,7 @@ fn speak(
             "espeak"
         };
         let mut command = hidden_command(program);
+        command.args(["-a", &(crate::settings::volume_gain(volume.load(Ordering::Relaxed)) * 100.0).round().to_string()]);
         command.args([
             "-v",
             preferred.unwrap_or(if character == "claude" {
@@ -341,7 +378,8 @@ fn speak(
         ]);
         command
     };
-    let mut child = command.arg(text).spawn().map_err(|e| e.to_string())?;
+    let spoken = if cfg!(target_os = "macos") { format!("[[volm {}]]{text}", crate::settings::volume_gain(volume.load(Ordering::Relaxed))) } else { text.into() };
+    let mut child = command.arg(spoken).spawn().map_err(|e| e.to_string())?;
     loop {
         if cancelled.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -362,6 +400,9 @@ fn speak(
 pub struct Signal {
     path: PathBuf,
     child: Option<Child>,
+    #[cfg(target_os = "windows")]
+    playback: Option<std::thread::JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Signal {
@@ -409,20 +450,23 @@ impl Signal {
             }
             let _ = std::fs::write(&path, wav);
         }
-        Self { path, child: None }
+        Self { path, child: None, #[cfg(target_os = "windows")] playback: None, cancelled: Arc::new(AtomicBool::new(false)) }
     }
 
-    pub fn play(&mut self) {
+    pub fn play(&mut self, settings: &Settings) {
         self.stop();
+        if settings.volume == 0 { return; }
+        self.cancelled = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "windows")]
-        unsafe {
-            use windows::core::HSTRING;
-            use windows::Win32::Media::Audio::*;
-            let _ = PlaySoundW(
-                &HSTRING::from(self.path.to_string_lossy().as_ref()),
-                None,
-                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
-            );
+        {
+            let path = self.path.clone();
+            let settings = settings.clone();
+            let cancelled = self.cancelled.clone();
+            self.playback = Some(std::thread::spawn(move || {
+                if let Err(error) = crate::audio::play_noise(&path, settings.volume, settings.output_device.as_deref(), &cancelled) {
+                    log(path.parent().unwrap(), error);
+                }
+            }));
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -432,7 +476,11 @@ impl Signal {
                 vec!["paplay", "aplay"]
             };
             for program in programs {
-                if let Ok(child) = hidden_command(program).arg(&self.path).spawn() {
+                let mut command = hidden_command(program);
+                if program == "afplay" { command.args(["-v", &crate::settings::volume_gain(settings.volume).to_string()]); }
+                if program == "paplay" { command.arg(format!("--volume={}", (crate::settings::volume_gain(settings.volume) * 65536.0).round() as u32)); }
+                if program == "aplay" && settings.volume != 100 { continue; }
+                if let Ok(child) = command.arg(&self.path).spawn() {
                     self.child = Some(child);
                     break;
                 }
@@ -441,13 +489,10 @@ impl Signal {
     }
 
     pub fn stop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
         #[cfg(target_os = "windows")]
-        unsafe {
-            let _ = windows::Win32::Media::Audio::PlaySoundW(
-                None,
-                None,
-                windows::Win32::Media::Audio::SND_ASYNC,
-            );
+        if let Some(playback) = self.playback.take() {
+            let _ = playback.join();
         }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -459,6 +504,51 @@ impl Signal {
 impl Drop for Signal {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub struct Preview {
+    cancelled: Arc<AtomicBool>,
+    playback: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl Preview {
+    pub fn start(data: PathBuf, settings: Settings) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let playback = std::thread::spawn(move || {
+            let signal = Signal::new(&data);
+            crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
+            if stop.load(Ordering::Relaxed) { return Ok(()); }
+            let mut speech = Speech::new();
+            speech.start("This is an announcement", "settings-preview", "opencode", &settings);
+            let started = std::time::Instant::now();
+            loop {
+                if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
+                match speech.events.recv_timeout(Duration::from_millis(50)) {
+                    Ok((_, result)) => return result,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
+            }
+        });
+        Self { cancelled, playback: Some(playback) }
+    }
+
+    pub fn finished(&mut self) -> Option<Result<(), String>> {
+        if !self.playback.as_ref()?.is_finished() { return None; }
+        Some(self.playback.take()?.join().unwrap_or_else(|_| Err("Audio preview failed.".into())))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(playback) = self.playback.take() { let _ = playback.join(); }
     }
 }
 
@@ -601,6 +691,17 @@ fn meeting_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "Plays speech on the system audio output"]
+    fn speech_uses_the_same_pcm_volume_path_as_static() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
+        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled).unwrap();
+        assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
+    }
 
     #[test]
     fn capture_activity_keeps_hidden_meetings_muted_and_probe_failures_fail_closed() {

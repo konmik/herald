@@ -114,6 +114,13 @@ def playback_seconds(text, speech_seconds):
     return max(10, 3 + len(text.split()) * 0.4, speech_seconds + 0.65) + 0.65
 
 
+def audio_gain(settings):
+    volume = settings.get("volume", 100)
+    if not isinstance(volume, (int, float)) or not 0 <= volume <= 100:
+        raise ValueError("Announcer volume must be between 0 and 100")
+    return 0 if volume == 0 else 10 ** ((-60 + 0.6 * volume) / 20)
+
+
 def main():
     parser = argparse.ArgumentParser()
     messages = parser.add_mutually_exclusive_group(required=True)
@@ -133,6 +140,7 @@ def main():
     history = args.history or runtime_data / "history.jsonl"
     message = last_message(history, args.session) if args.last else {"text": args.text, "title": "Herald videos", "source": "opencode"}
     settings = json.loads((runtime_data / "settings.json").read_text()) if (runtime_data / "settings.json").exists() else {}
+    gain = audio_gain(settings)
     temporary_root = Path(os.environ["LOCALAPPDATA"]) / "Temp/opencode"
     if args.binary:
         binary = args.binary.resolve()
@@ -218,7 +226,7 @@ def main():
                 Image.new("RGB", image.size, "#202020").save(frames_directory / "background.png")
             subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(frames_directory / "frames.ffconcat"), "-i", str(temporary / "speech.wav"), "-i", str(interference),
-                "-filter_complex", f"[0:v]fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2[v];[1:a]adelay={round(speech_delay*1000)}:all=1,apad[speech];[2:a]asplit=2[opening][closing];[opening]adelay={round(opening_delay*1000)}:all=1[start];[closing]adelay={round(closing_delay*1000)}:all=1[end];[speech][start][end]amix=inputs=3:normalize=0[a]",
+                "-filter_complex", f"[0:v]fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2[v];[1:a]adelay={round(speech_delay*1000)}:all=1,apad[speech];[2:a]asplit=2[opening][closing];[opening]adelay={round(opening_delay*1000)}:all=1[start];[closing]adelay={round(closing_delay*1000)}:all=1[end];[speech][start][end]amix=inputs=3:normalize=0,volume={gain}[a]",
                 "-map", "[v]", "-map", "[a]", "-t", f"{duration:.9f}", "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(args.output)
             ], check=True, timeout=120)
             report.update({"narrationGenerated": True, "speechDelaySeconds": speech_delay, "speechDurationSeconds": speech_seconds, "durationSeconds": duration, "beforeSeconds": 0.5, "afterSeconds": 0.5, "announcementDisappearsSeconds": duration - 0.5, "background": "#202020", "interferenceIncluded": True, "closingInterferenceSeconds": closing_delay, "interferenceGain": 1})

@@ -11,6 +11,14 @@ spec.loader.exec_module(recorder)
 
 
 class RecordingTests(unittest.TestCase):
+    def test_announcer_volume_scales_the_complete_recorded_audio(self):
+        self.assertEqual(recorder.audio_gain({}), 1)
+        self.assertAlmostEqual(recorder.audio_gain({"volume": 50}), 10 ** (-30 / 20))
+        self.assertAlmostEqual(recorder.audio_gain({"volume": 35}), 10 ** (-39 / 20))
+        self.assertEqual(recorder.audio_gain({"volume": 0}), 0)
+        with self.assertRaises(ValueError):
+            recorder.audio_gain({"volume": 101})
+
     def test_slow_narration_extends_animation_and_capture_deadline(self):
         text = ' '.join(['internationalization'] * 30)
         self.assertAlmostEqual(recorder.playback_seconds(text, 40), 41.3)
