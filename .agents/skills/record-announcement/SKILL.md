@@ -17,13 +17,13 @@ Done when the exact text, session and saved video are identified, or the user ha
 
 ## 2. Prepare recording
 
-Use `development_tools/record-announcement.py --help` for its current arguments. The helper requires FFmpeg, the deployed native announcer with `--isolated`, and a Python environment containing `numpy`, `soundcard`, `soundfile` and `pillow`.
+Use `development_tools/record-announcement.py --help` for its current arguments. The helper requires Windows SAPI, FFmpeg, Rust and a Python environment containing `pillow`. It builds a separate release binary outside the repository; `--binary` can select an existing binary with `--isolated` and `--capture-frames`.
 
-This machine's recording environment is `%LOCALAPPDATA%/Temp/opencode/civilized-recording-venv/Scripts/python.exe`. If absent, create that virtual environment with Python 3.13 and install those four packages into it. Keep dependencies and temporary captures outside the repository.
+This machine's recording environment is `%LOCALAPPDATA%/Temp/opencode/civilized-recording-venv/Scripts/python.exe`. If absent, create that virtual environment with Python 3.13 and install `pillow` into it. Keep dependencies and temporary frames outside the repository.
 
-The helper records an isolated announcer without stopping the live one. It enables narration outside quiet hours only in its temporary settings; meeting detection remains active. Record with no competing system audio, since WASAPI captures the default speaker's output. If the deployed binary lacks `--isolated`, obtain authorization to rebuild and deploy before continuing.
+The helper renders an isolated announcer without stopping or deploying the live one. Its preview is muted. It synthesizes the complete narration directly into a WAV using the integration's SAPI voice, rate and pitch, then combines that file with timestamped rendered frames. Neither desktop content nor system audio enters the recording. This produces a replay, not a capture of the original playback.
 
-Done when the dependencies import, FFmpeg works and no meeting or competing playback is active.
+Done when Pillow imports, FFmpeg works and the recording binary builds.
 
 ## 3. Capture
 
@@ -35,14 +35,16 @@ Save the deliverables under `./temp` with a descriptive, unused filename. In Pow
 
 For supplied text, replace `--last --session ...` with `--text 'The exact message.'`. For a particular saved history, use `--history`.
 
-The helper preserves the last message's video by placing only that video in its isolated library. It starts screen and audio capture before sending the message, records its own process's window, and crops the final MP4 to that window. Temporary full-desktop footage and audio are removed on exit. It also saves a PNG preview and JSON verification beside the MP4.
+The helper preserves the last message's video by placing only that video in its isolated library. It exports the announcer's rendered pixels against a plain background and aligns speech with the end of the opening transition. It includes 500 ms of empty background before appearance and after disappearance, rather than holding the final announcement frame. It mixes the announcer's own interference sound at the opening and closing transition times, with increased volume for the recording. Temporary frames and audio are removed on exit. It also saves a PNG preview and JSON verification beside the MP4.
 
 Done when the helper exits successfully and the MP4, preview and verification exist under `./temp`.
 
 ## 4. Verify and deliver
 
-Inspect the preview for the complete text, selected character and any private background visible around the window. Use FFprobe to confirm H.264 video, AAC audio, nonzero duration and constant 30 fps. Check audio volume with FFmpeg `volumedetect`.
+Inspect the preview for the complete text, selected character and plain background. Use FFprobe to confirm H.264 video, AAC audio, nonzero duration and constant 30 fps. Check audio volume with FFmpeg `volumedetect`.
 
-Read the JSON verification: the recorded text and character must match the original; `speechStarted` and `finished` must both be 1, with zero `mutedAnnouncements`. The helper rejects muted or unfinished narration rather than exporting other system audio as the announcement.
+Read the JSON verification: the recorded text and character must match the original; `narrationGenerated` must be true and `finished` must be 1. Require `beforeSeconds` and `afterSeconds` to be 0.5. Speech must finish before `announcementDisappearsSeconds`. Inspect frames inside both padding intervals for empty background and frames near the closing transition for continued animation. The isolated preview's `speechStarted` is 0 because narration comes from the complete WAV instead.
 
-Done when the recording is visibly correct, narration is present and verification matches. Return the MP4 path; describe reconstructed messages as replays, not recovered originals.
+Require `interferenceIncluded` to be true and check both transition audio segments for nonzero volume.
+
+Done when the recording is visibly correct, narration and both interference sounds are present and verification matches. Return the MP4 path; describe reconstructed messages as replays, not recovered originals.

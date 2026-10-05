@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod capture;
 mod history;
 mod platform;
 mod render;
@@ -61,10 +62,12 @@ fn run() -> Result<(), String> {
     let mut report = None;
     let mut snapshot = None;
     let mut isolated = false;
+    let mut capture_directory = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--isolated" => isolated = true,
+            "--capture-frames" => capture_directory = Some(PathBuf::from(arguments.next().ok_or("Missing capture directory")?)),
             "--assets" => assets = arguments.next().ok_or("Missing assets path")?.into(),
             "--demo" => demo = Some(arguments.next().ok_or("Missing character")?),
             "--test-seconds" => {
@@ -93,6 +96,10 @@ fn run() -> Result<(), String> {
     if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
         return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
     }
+    if capture_directory.is_some() && !isolated {
+        return Err("Frame capture requires isolated playback".into());
+    }
+    let mut frames = capture_directory.as_deref().map(capture::Frames::new).transpose()?;
     std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
     let _lock = match std::net::TcpListener::bind(("127.0.0.1", if isolated { 0 } else { 47863 })) {
         Ok(lock) => lock,
@@ -293,6 +300,9 @@ fn run() -> Result<(), String> {
                             }
                             renderer.text_interference = if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
                             renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, active.video.as_ref().map(video::Video::frame), interference);
+                            if let Some(frames) = &mut frames {
+                                frames.save(&buffer, size.width, size.height, active.started.elapsed(), active.end.map(|end| end.duration_since(active.started)))?;
+                            }
                             if active.started.elapsed() > state::TRANSITION_DURATION && active.end.is_none() {
                                 if let Some(path) = snapshot.take() {
                                     let preview = image::RgbaImage::from_fn(size.width, size.height, |x, y| {

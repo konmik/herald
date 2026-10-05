@@ -20,7 +20,7 @@ export default Plugin.define({
       async (sessionID, failed) => {
         const result = await ctx.session.generate({
           sessionID,
-          prompt: `Summarize the most recently ${failed ? "failed" : "completed"} task in exactly one short spoken sentence of at most 30 words. Include the actual outcome and any important failure or remaining blocker. Use plain English, no Markdown, no introduction, no file paths, no greetings, no catchphrases, and no theatrical language. Do not claim success unless confirmed. Do not run tools. Output only that sentence.`,
+          prompt: `Summarize the most recently ${failed ? "failed" : "completed"} task in exactly one short spoken sentence of at most 30 words. Include the actual outcome and any important failure or remaining blocker. Focus on work actually performed and its results. Omit statements about actions not taken, such as not deploying or not reloading. Use plain English, no Markdown, no introduction, no file paths, no greetings, no catchphrases, and no theatrical language. Do not claim success unless confirmed. Do not run tools. Output only that sentence.`,
         })
         return result.text
       },
