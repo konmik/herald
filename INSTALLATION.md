@@ -41,6 +41,8 @@ pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/op
 
 `-ClaudeConfigDirectory`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
 
+Host registration keeps the previous Claude cache until OpenCode registration and the shortcut have succeeded. A registration failure restores the previous cache, Claude registry and settings files, OpenCode configuration and shortcut. A newly created OpenCode config is removed on rollback. The verified versioned payload remains available for retry.
+
 Restart Claude sessions after installation. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
 
 `npm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.

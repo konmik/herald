@@ -243,7 +243,7 @@ function Stop-OwnedAnnouncers {
 }
 
 function Deploy-ClaudeFiles {
-    param([string]$Source, [string]$InstallPath, [string]$ConfigDirectory, [string]$Announcer)
+    param([string]$Source, [string]$InstallPath, [string]$ConfigDirectory, [string]$Announcer, [Collections.Generic.List[object]]$Backups)
     $destination = [IO.Path]::GetFullPath($InstallPath)
     Assert-ClaudeInstallation $destination $ConfigDirectory
     $runtime = if ($Announcer) { $Announcer } else { Join-Path $Source 'native-announcer' }
@@ -261,7 +261,8 @@ function Deploy-ClaudeFiles {
         Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage 'native-announcer') -Recurse -Force
         Move-Item -LiteralPath $destination -Destination $backup
         try { Move-Item -LiteralPath $stage -Destination $destination } catch { Move-Item -LiteralPath $backup -Destination $destination; throw }
-        Remove-DeploymentDirectory $backup
+        if ($null -ne $Backups) { $Backups.Add(@{ destination = $destination; backup = $backup }) }
+        else { Remove-DeploymentDirectory $backup }
     } finally { Remove-DeploymentDirectory $stage }
 }
 
@@ -284,14 +285,15 @@ function Install-SettingsShortcut {
 }
 
 function Register-OpenCodeBundle {
-    param([string]$App, [string[]]$Configs, [scriptblock]$BeforeWrite)
+    param([string]$App, [string[]]$Configs, [scriptblock]$BeforeWrite, [scriptblock]$AfterWrite)
     $locked = [Collections.Generic.List[object]]::new()
+    $completed = $false
     try {
         foreach ($config in $Configs) {
             Assert-NoLinks $config
             $exists = Test-Path -LiteralPath $config
             $stream = [IO.File]::Open($config, $(if ($exists) { 'Open' } else { 'CreateNew' }), 'ReadWrite', 'None')
-            $entry = @{ config = $config; stream = $stream; bytes = [byte[]]@(); written = $false }
+            $entry = @{ config = $config; stream = $stream; bytes = [byte[]]@(); written = $false; existed = $exists }
             $locked.Add($entry)
             if (-not $exists) {
                 $initial = [Text.Encoding]::UTF8.GetBytes("{}`n")
@@ -340,6 +342,8 @@ function Register-OpenCodeBundle {
             $entry.stream.SetLength($bytes.Length)
             $entry.stream.Flush($true)
         }
+        if ($AfterWrite) { & $AfterWrite }
+        $completed = $true
     } catch {
         foreach ($entry in $locked) {
             if (-not $entry.written) { continue }
@@ -351,11 +355,16 @@ function Register-OpenCodeBundle {
             } catch { Write-Warning "Could not restore OpenCode configuration: $_" }
         }
         throw
-    } finally { foreach ($entry in $locked) { $entry.stream.Dispose() } }
+    } finally {
+        foreach ($entry in $locked) {
+            $entry.stream.Dispose()
+            if (-not $completed -and -not $entry.existed) { Remove-Item -LiteralPath $entry.config -Force }
+        }
+    }
 }
 
 function Register-ClaudeBundle {
-    param([string]$App, [string]$ConfigDirectory)
+    param([string]$App, [string]$ConfigDirectory, [Collections.Generic.List[object]]$Backups)
     Assert-NoLinks $ConfigDirectory
     $source = Join-Path $App 'claude-plugin'
     $oldSource = Get-ClaudeMarketplaceSource $ConfigDirectory
@@ -364,8 +373,51 @@ function Register-ClaudeBundle {
     if (-not @(Get-ClaudeInstallations $ConfigDirectory).Count) { Invoke-Checked 'claude' @('plugin', 'install', $PluginId, '--scope', 'user') }
     $installed = @(Get-ClaudeInstallations $ConfigDirectory)
     if (-not $installed.Count) { throw 'Claude did not report a user installation' }
-    foreach ($installation in $installed) { Deploy-ClaudeFiles (Join-Path $App 'claude-plugin') $installation.installPath $ConfigDirectory }
+    foreach ($installation in $installed) { Deploy-ClaudeFiles (Join-Path $App 'claude-plugin') $installation.installPath $ConfigDirectory -Backups $Backups }
     Enable-ClaudePlugin
+}
+
+function Register-BundleHosts {
+    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration)
+    $files = @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ }
+    $files += Join-Path $ProgramsDirectory 'Civilized Agent settings.lnk'
+    $snapshots = @($files | ForEach-Object {
+        Assert-NoLinks $_
+        @{ path = $_; bytes = if (Test-Path -LiteralPath $_) { [IO.File]::ReadAllBytes($_) } else { $null } }
+    })
+    $previousCaches = @(Get-ClaudeInstallations $ClaudeConfigDirectory | ForEach-Object { [IO.Path]::GetFullPath($_.installPath) })
+    $backups = [Collections.Generic.List[object]]::new()
+    try {
+        Register-OpenCodeBundle $App $Configs {
+            if ($BeforeRegistration) { & $BeforeRegistration }
+            Register-ClaudeBundle $App $ClaudeConfigDirectory -Backups $backups
+        } {
+            Install-SettingsShortcut $Binary $ProgramsDirectory
+            if ($AfterRegistration) { & $AfterRegistration }
+        }
+    } catch {
+        $failure = $_
+        $newCaches = @(Get-ClaudeInstallations $ClaudeConfigDirectory | Where-Object { [IO.Path]::GetFullPath($_.installPath) -notin $previousCaches })
+        foreach ($installation in $newCaches) {
+            Assert-ClaudeInstallation $installation.installPath $ClaudeConfigDirectory
+            Remove-DeploymentDirectory $installation.installPath
+        }
+        for ($index = $backups.Count - 1; $index -ge 0; $index--) {
+            $entry = $backups[$index]
+            if ($entry.destination -in $previousCaches) {
+                Assert-ClaudeInstallation $entry.destination $ClaudeConfigDirectory
+                Remove-DeploymentDirectory $entry.destination
+                Move-Item -LiteralPath $entry.backup -Destination $entry.destination
+            } else { Remove-DeploymentDirectory $entry.backup }
+        }
+        foreach ($snapshot in $snapshots) {
+            if ($null -eq $snapshot.bytes) {
+                if (Test-Path -LiteralPath $snapshot.path) { Remove-Item -LiteralPath $snapshot.path -Force }
+            } else { [IO.File]::WriteAllBytes($snapshot.path, $snapshot.bytes) }
+        }
+        throw $failure
+    }
+    foreach ($entry in $backups) { Remove-DeploymentDirectory $entry.backup }
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -394,13 +446,12 @@ if (-not $SkipHostRegistration) {
     $stopped = @()
     try {
         $env:CLAUDE_CONFIG_DIR = $ClaudeConfigDirectory
-        Register-OpenCodeBundle $app $configs {
+        Register-BundleHosts $app $configs $ClaudeConfigDirectory $binary $ProgramsDirectory {
             $script:stopped = @(Stop-OwnedAnnouncers @(Get-OwnedAnnouncerDirectories $ClaudeConfigDirectory))
-            Register-ClaudeBundle $app $ClaudeConfigDirectory
+        } {
+            if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
+            else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude sessions to load the installed hooks.' }
         }
-        Install-SettingsShortcut $binary $ProgramsDirectory
-        if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
-        else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude sessions to load the installed hooks.' }
     } catch {
         foreach ($previous in $stopped) {
             if (Test-Path -LiteralPath $previous.binary) {

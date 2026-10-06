@@ -126,6 +126,12 @@ try {
     function claude {
         $script:claudeCalls.Add(($args -join '|'))
         if ($args[1] -eq 'list') { @(@{ id = $PluginId; scope = 'user'; enabled = $true }) | ConvertTo-Json -AsArray }
+        elseif ($args[1] -eq 'marketplace' -and $script:mutateClaude) {
+            $registry = Get-Content "$profile/plugins/known_marketplaces.json" -Raw | ConvertFrom-Json -AsHashtable
+            $registry['civilized-agent-local'].source.path = $args[3]
+            $registry | ConvertTo-Json -Depth 8 | Set-Content "$profile/plugins/known_marketplaces.json"
+            '{"unrelated":"changed during installation"}' | Set-Content "$profile/settings.json"
+        }
         elseif ($args[1] -ne 'marketplace') { throw 'Unexpected Claude command in bundle test' }
         $global:LASTEXITCODE = 0
     }
@@ -173,6 +179,27 @@ try {
         [IO.File]::WriteAllText($config, '{invalid}')
         Assert-Rejected { Register-OpenCodeBundle $app @($config) { $script:hostTouched = $true } } 'Invalid config was accepted'
         Assert-True (-not $script:hostTouched) 'Invalid config changed the host before validation'
+        [IO.File]::WriteAllText($config, $userConfig)
+        '{"unrelated":"preserve"}' | Set-Content "$profile/settings.json"
+        'previous hook' | Set-Content "$cache/hooks/register.ts"
+        $rollbackPrograms = Join-Path $temporary 'rollback-programs'
+        New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
+        $rollbackShortcut = Join-Path $rollbackPrograms 'Civilized Agent settings.lnk'
+        Write-NativeShortcut $rollbackShortcut 'C:/Windows/notepad.exe' '' 'C:/Windows'
+        $rollbackPaths = @($config, "$profile/settings.json", "$profile/plugins/known_marketplaces.json", "$profile/plugins/installed_plugins.json", "$cache/hooks/register.ts", $rollbackShortcut)
+        $beforeRollback = @{}
+        foreach ($path in $rollbackPaths) { $beforeRollback[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
+        $script:mutateClaude = $true
+        $binary = "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
+        Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms } 'An unrelated shortcut did not fail host registration'
+        foreach ($path in $rollbackPaths) {
+            Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -ceq $beforeRollback[$path]) "Host rollback did not restore $path"
+        }
+        $absentConfig = Join-Path $openCode 'previously-absent.jsonc'
+        Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms } 'Fresh config rollback did not fail'
+        Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
+        Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Host rollback left a cache backup'
+        $script:mutateClaude = $false
     } finally { [IO.File]::WriteAllBytes($nodePath, $fixtureNode) }
     Rename-Item -LiteralPath $bundle -NewName 'source-unavailable'
     Remove-DeploymentDirectory $payload

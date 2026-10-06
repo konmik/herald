@@ -42,6 +42,24 @@ try {
     Install-SettingsShortcut $binary $programs
     $shortcut = Read-NativeShortcut (Join-Path $programs 'Civilized Agent settings.lnk')
     if ($shortcut.TargetPath -ne $binary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
+    Invoke-Checked 'claude' @('plugin', 'marketplace', 'add', (Join-Path $root 'claude-plugin'), '--scope', 'user')
+    $blockedPrograms = Join-Path $scratch 'blocked-programs'
+    New-Item -ItemType Directory -Path $blockedPrograms | Out-Null
+    $blockedShortcut = Join-Path $blockedPrograms 'Civilized Agent settings.lnk'
+    Write-NativeShortcut $blockedShortcut 'C:/Windows/notepad.exe' '' 'C:/Windows'
+    $rollbackPaths = @($config, (Join-Path $profile 'settings.json'), (Join-Path $profile 'plugins/known_marketplaces.json'), (Join-Path $profile 'plugins/installed_plugins.json'), $blockedShortcut)
+    $rollbackBytes = @{}
+    foreach ($path in $rollbackPaths) { $rollbackBytes[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
+    $cacheBefore = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
+    $rejected = $false
+    try { Register-BundleHosts $app @($config) $profile $binary $blockedPrograms } catch { $rejected = $true }
+    if (-not $rejected) { throw 'An unrelated shortcut did not reject real host registration' }
+    foreach ($path in $rollbackPaths) {
+        if ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -cne $rollbackBytes[$path]) { throw "Real host rollback changed $path" }
+    }
+    $cacheAfter = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
+    if (@(Compare-Object $cacheBefore $cacheAfter).Count) { throw 'Real host rollback changed the previous cache' }
+    Register-BundleHosts $app @($config) $profile $binary $programs
     Remove-DeploymentDirectory $extract
     if (Test-Path -LiteralPath (Join-Path $app 'node_modules')) { throw 'Installed package must not contain checkout dependencies' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'boot-bundle.ps1') -AppDirectory $app -Evidence (Join-Path $evidencePath 'opencode-bootstrap')
@@ -62,7 +80,7 @@ try {
     }
     $stopped = @(Stop-OwnedAnnouncers @((Join-Path $app 'native-announcer')))
     if ($stopped.Count -ne 1 -or $stopped[0].binary -ne $binary -or -not $process.WaitForExit(5000) -or $stopped[0].assets.TrimEnd('\', '/') -ne (Join-Path $app 'native-announcer/resources').TrimEnd('\', '/')) { throw 'Owned installed announcer was not stopped correctly' }
-    @{ archive = [IO.Path]::GetFullPath($Archive); app = $app; claudePlugin = $cache; claudeConfig = $profile; openCodeConfig = $config; programs = $programs; scratch = $scratch; extractionRemoved = -not (Test-Path -LiteralPath $extract); passed = $true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
+    @{ archive = [IO.Path]::GetFullPath($Archive); app = $app; claudePlugin = $cache; claudeConfig = $profile; openCodeConfig = $config; programs = $programs; scratch = $scratch; rollbackPassed = $true; extractionRemoved = -not (Test-Path -LiteralPath $extract); passed = $true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
     Copy-Item -LiteralPath $config -Destination (Join-Path $evidencePath 'opencode.jsonc')
     Write-Output "PASS: real bundle installation, host registrations, physical Claude cache, shortcut and owned process handover. App saved at $app"
 } catch {
