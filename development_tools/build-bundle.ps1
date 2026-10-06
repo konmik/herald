@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot/bundle/install.ps1"
+. "$PSScriptRoot/bundle-licenses.ps1"
 if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 on Windows is required' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'temp/bundles' }
 Assert-NoLinks $OutputDirectory
@@ -14,6 +15,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $stage = Join-Path $OutputDirectory ('.civilized-stage-' + [guid]::NewGuid())
 $target = Join-Path $root 'native-announcer/target/bundle'
 $archive = Join-Path $OutputDirectory ('.civilized-archive-' + [guid]::NewGuid() + '.zip')
+$metafile = Join-Path $OutputDirectory ('.civilized-modules-' + [guid]::NewGuid() + '.json')
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     if ($PayloadDirectory) {
@@ -69,8 +71,11 @@ try {
     foreach ($entry in $package.exports.PSObject.Properties) { $exports[$entry.Name] = $entry.Value -replace '\.ts$', '.js' }
     @{ name = $package.name; version = $package.version; type = 'module'; private = $true; exports = $exports } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $stage 'package.json') -Encoding utf8NoBOM
     $output = Join-Path $stage 'opencode-plugin'
-    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/index.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--outdir', $output)
-    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/tui.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--external', '@opencode/plugin/tui', '--external', 'solid-js', '--outdir', $output)
+    $licenseDirectory = Join-Path $stage 'licenses/javascript'
+    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/index.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--outdir', $output, "--metafile=$metafile") | Out-Host
+    Copy-BundledLicenses $metafile $root $licenseDirectory
+    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/tui.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--external', '@opencode/plugin/tui', '--external', 'solid-js', '--outdir', $output, "--metafile=$metafile") | Out-Host
+    Copy-BundledLicenses $metafile $root $licenseDirectory
     foreach ($entry in @(@{ name = 'index'; export = '.' }, @{ name = 'tui'; export = './tui' })) {
         ('export { default } from "' + $exports[$entry.export] + '"') | Set-Content (Join-Path $stage "$($entry.name).ts") -Encoding utf8NoBOM
     }
@@ -79,7 +84,8 @@ try {
     }
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
     foreach ($name in @('install.ps1', 'shortcut.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
-    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', '--outdir', $stage)
+    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', '--outdir', $stage, "--metafile=$metafile") | Out-Host
+    Copy-BundledLicenses $metafile $root $licenseDirectory
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
     $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported architecture' } }
     $files = @(Get-PayloadFiles $stage | Sort-Object FullName | ForEach-Object { @{ path = [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/'); sha256 = Get-PayloadHash $_.FullName; size = $_.Length } })
@@ -94,4 +100,5 @@ try {
 } finally {
     Remove-DeploymentDirectory $stage
     if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+    if (Test-Path -LiteralPath $metafile) { Remove-Item -LiteralPath $metafile -Force }
 }
