@@ -52,3 +52,21 @@ test('Windows builds prepare CPU speech without GPU assets', async () => {
   assert.match(source, /import\('\.\/prepare-tts\.mjs'\)/)
   assert.doesNotMatch(source, /gpu|cuda/i)
 })
+
+test('bundled characters cover every library video with usable voice design inputs', async () => {
+  const resources = new URL('../../native-announcer/resources/', import.meta.url)
+  const catalog = JSON.parse(await readFile(new URL('characters.json', resources), 'utf8'))
+  const videos = (await readdir(new URL('videos/', resources))).filter(name => name.endsWith('.mp4')).sort()
+  const paths = Object.values(catalog).map(character => character.animationPath).sort()
+  assert.deepEqual(paths, videos.map(name => `videos/${name}`))
+  assert.equal(new Set(Object.values(catalog).map(character => character.name)).size, videos.length)
+  for (const [id, character] of Object.entries(catalog)) {
+    assert.match(id, /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)
+    assert.equal(typeof character.name, 'string')
+    assert.equal(character.name.trim().length > 0 && character.name.length <= 160, true)
+    assert.equal(character.voiceDescription.trim().length >= 20 && character.voiceDescription.length <= 1000, true)
+    assert.equal(character.sampleText.trim().length >= 100 && character.sampleText.length <= 1000, true)
+    assert.deepEqual(character.voice, { type: 'local', speaker: null })
+    assert.equal((await readFile(new URL(character.animationPath, resources))).length > 0, true)
+  }
+})

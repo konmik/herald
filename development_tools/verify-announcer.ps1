@@ -1,7 +1,6 @@
-param([switch]$Speech, [switch]$Meeting, [switch]$QuietMode, [ValidateRange(0, 100)][int]$Volume = 100, [string]$OutputDevice)
+param([switch]$Speech, [switch]$Meeting, [switch]$QuietMode, [ValidateRange(0, 100)][int]$Volume = 100, [string]$OutputDevice, [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/bin/civilized-announcer-win32-x64.exe'), [string]$Assets = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/resources'), [string]$Character)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$binary = Join-Path $root 'native-announcer/bin/civilized-announcer-win32-x64.exe'
 $temporary = Join-Path $env:LOCALAPPDATA "Temp/opencode/civilized-native-$([guid]::NewGuid())"
 $data = Join-Path $temporary 'data'
 $inbox = Join-Path $data 'inbox'
@@ -11,6 +10,7 @@ $settings = if ($Speech -or $Meeting) { @{ nightStart = 22; nightEnd = 22 } } el
 $settings.volume = $Volume
 $settings.quietMode = [bool]$QuietMode
 if ($OutputDevice) { $settings.outputDevice = $OutputDevice }
+if ($Character) { $settings.selectedCharacter = $Character }
 $settings | ConvertTo-Json | Set-Content (Join-Path $data 'settings.json') -Encoding utf8NoBOM
 if ($Meeting) {
     @{ active = $true; updated = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000 } | ConvertTo-Json | Set-Content (Join-Path $data 'meeting.json') -Encoding utf8NoBOM
@@ -24,7 +24,7 @@ $info.UseShellExecute = $false
 $info.Environment['CIVILIZED_AGENT_DATA'] = $data
 $info.ArgumentList.Add('--isolated')
 $info.ArgumentList.Add('--assets')
-$info.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
+$info.ArgumentList.Add([IO.Path]::GetFullPath($Assets))
 $info.ArgumentList.Add('--test-seconds')
 $info.ArgumentList.Add('75')
 $info.ArgumentList.Add('--report')
@@ -57,6 +57,12 @@ while (-not $process.WaitForExit(50)) {
 if ($process.ExitCode -ne 0) { throw "Announcer failed with exit code $($process.ExitCode). See $data/errors.log" }
 if (-not (Test-Path $reportPath)) { throw 'No report was written. Another announcer may already be running.' }
 $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+if ($Character) {
+    $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
+    if (-not $catalog.$Character) { throw 'Choose a bundled character from the catalog.' }
+    $expectedVideo = [IO.Path]::GetFullPath((Join-Path $Assets $catalog.$Character.animationPath))
+    if ($report.selectedVideos.Count -ne $messages.Count -or @($report.selectedVideos | Where-Object { [IO.Path]::GetFullPath($_) -ne $expectedVideo }).Count -ne 0) { throw 'Playback did not use the selected bundled character from the supplied assets directory.' }
+}
 $report | Add-Member -NotePropertyName peakResidentMB -NotePropertyValue ([Math]::Round($peak / 1MB, 2))
 $report | Add-Member -NotePropertyName binaryMB -NotePropertyValue ([Math]::Round((Get-Item $binary).Length / 1MB, 2))
 $report | ConvertTo-Json -Depth 5
@@ -68,11 +74,11 @@ if ($report.shown -ne 2 -or $report.finished -ne 2) { throw 'Both notifications 
 if ($report.durations[0] -lt 10 -or $report.durations[1] -lt 15) { throw 'Notification duration is too short.' }
 if ($report.sessionTitles[0] -ne $messages[0].title -or $report.sessionTitles[1] -ne $messages[1].title) { throw 'Session titles were not displayed.' }
 if ($report.animationFrames -lt 2 -or $report.staticFrames -lt 2) { throw 'Animation or static transitions did not render.' }
-$library = Get-ChildItem (Join-Path $root 'native-announcer/resources/videos') -Filter '*.mp4' -ErrorAction SilentlyContinue
+$library = Get-ChildItem (Join-Path $Assets 'videos') -Filter '*.mp4' -ErrorAction SilentlyContinue
 $expectedFPS = if ($library) { 16 } else { 8 }
 if ($report.videoFPS -ne $expectedFPS) { throw "Character playback must use $expectedFPS frames per second." }
 if ($library) {
-    $libraryPath = (Resolve-Path (Join-Path $root 'native-announcer/resources/videos')).Path
+    $libraryPath = (Resolve-Path (Join-Path $Assets 'videos')).Path
     if ($report.selectedVideos.Count -ne 2 -or @($report.selectedVideos | Where-Object { (Resolve-Path (Split-Path $_ -Parent)).Path -ne $libraryPath }).Count -ne 0) { throw 'Notifications must select videos from the shared library.' }
 }
 $shouldSpeak = $Speech -and -not $QuietMode -and $Volume -gt 0 -and -not $Meeting

@@ -7,6 +7,7 @@ Thumbs.db
 node_modules/
 /generated-assets/
 /native-announcer/resources/*
+!/native-announcer/resources/characters.json
 !/native-announcer/resources/portraits/
 !/native-announcer/resources/videos/
 /native-announcer/bin/

@@ -2,6 +2,15 @@ use crate::settings::Settings;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static BUNDLED_CHARACTERS: OnceLock<BTreeMap<String, Character>> = OnceLock::new();
+
+pub fn bundled_characters() -> &'static BTreeMap<String, Character> {
+    BUNDLED_CHARACTERS.get_or_init(|| {
+        serde_json::from_str(include_str!("../resources/characters.json")).expect("Bundled character catalog is invalid")
+    })
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -62,6 +71,16 @@ pub struct ResolvedCharacter {
     pub video_warning: Option<String>,
 }
 
+pub fn animation_path(id: &str, path: &Path, assets: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else if bundled_characters().get(id).and_then(|character| character.animation_path.as_deref()) == Some(path) {
+        assets.join(path)
+    } else {
+        path.to_owned()
+    }
+}
+
 impl ResolvedCharacter {
     pub fn history_identity(&self) -> &str {
         self.id.as_deref().unwrap_or(&self.name)
@@ -73,7 +92,8 @@ pub fn resolve(settings: &Settings, assets: &Path, source_character: &str) -> Re
     let fallback_video = crate::video::select_path(assets, source_character);
     if let Some(id) = settings.selected_character.as_deref() {
         if let Some(character) = settings.characters.get(id) {
-            let (video_path, video_warning) = match character.animation_path.as_ref() {
+            let resolved_animation = character.animation_path.as_ref().map(|path| animation_path(id, path, assets));
+            let (video_path, video_warning) = match resolved_animation.as_ref() {
                 Some(path) if path.is_file() => (path.clone(), None),
                 Some(path) => (
                     fallback_video.clone(),
@@ -215,6 +235,34 @@ mod tests {
         assert_eq!(resolved.voice, ResolvedVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert!(resolved.video_warning.is_some());
         assert_eq!(resolved.video_path, Path::new("missing-assets/opencode/neutral.mp4"));
+    }
+
+    #[test]
+    fn bundled_relative_video_uses_the_runtime_asset_root() {
+        let directory = std::env::temp_dir().join(format!("civilized-bundled-character-{}", crate::state::timestamp()));
+        let video = directory.join("videos/hatted-herald-01.mp4");
+        std::fs::create_dir_all(video.parent().unwrap()).unwrap();
+        std::fs::write(&video, []).unwrap();
+        let mut settings = Settings::default();
+        settings.selected_character = Some("hatted-herald-01".into());
+        let resolved = resolve(&settings, &directory, "opencode");
+        assert_eq!(resolved.video_path, video);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn absolute_custom_video_path_remains_absolute() {
+        let directory = std::env::temp_dir().join(format!("civilized-custom-character-{}", crate::state::timestamp()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let video = directory.join("custom.mp4");
+        std::fs::write(&video, []).unwrap();
+        let mut settings = Settings::default();
+        settings.characters.insert("custom".into(), character(CharacterVoice::default()));
+        settings.characters.get_mut("custom").unwrap().animation_path = Some(video.clone());
+        settings.selected_character = Some("custom".into());
+        let resolved = resolve(&settings, Path::new("relocated-assets"), "opencode");
+        assert_eq!(resolved.video_path, video);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

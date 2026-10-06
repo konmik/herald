@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "windows"))]
-pub fn run(_data: &std::path::Path) -> Result<(), String> {
+pub fn run(_data: &std::path::Path, _assets: &std::path::Path) -> Result<(), String> {
     Err("The settings app is currently available on Windows.".into())
 }
 
@@ -75,6 +75,7 @@ mod native {
 
     struct Form {
         data: PathBuf,
+        assets: PathBuf,
         settings: Settings,
         devices: Vec<OutputDevice>,
         missing: Option<String>,
@@ -145,13 +146,21 @@ mod native {
         let name = text(window, CHARACTER_NAME);
         let voice_description = text(window, VOICE_PROMPT);
         let video = text(window, VIDEO_PATH);
+        let assets = form.assets.clone();
         let draft = draft_for(form, &id);
         draft.name = name;
         if draft.voice_description != voice_description {
             draft.voice = CharacterVoice::default();
             draft.voice_description = voice_description;
         }
-        draft.animation_path = if video.trim().is_empty() || video == "Choose video…" { None } else { Some(PathBuf::from(video)) };
+        let video = PathBuf::from(video);
+        draft.animation_path = if video.as_os_str().is_empty() || video == PathBuf::from("Choose video…") {
+            None
+        } else if draft.animation_path.as_ref().is_some_and(|path| crate::characters::animation_path(&id, path, &assets) == video) {
+            draft.animation_path.clone()
+        } else {
+            Some(video)
+        };
         let name = if draft.name.trim().is_empty() { "New character".to_owned() } else { draft.name.clone() };
         let index = form.character_ids.iter().position(|candidate| candidate == &id);
         if let Some(index) = index {
@@ -165,10 +174,11 @@ mod native {
     unsafe fn set_draft_controls(window: HWND, form: &mut Form) {
         form.updating = true;
         if let Some(id) = form.active_draft.clone() {
+            let assets = form.assets.clone();
             let draft = draft_for(form, &id);
             label(window, CHARACTER_NAME, &draft.name);
             label(window, VOICE_PROMPT, &draft.voice_description);
-            label(window, VIDEO_PATH, &draft.animation_path.as_ref().map_or_else(|| "Choose video…".into(), |path| path.to_string_lossy().into_owned()));
+            label(window, VIDEO_PATH, &draft.animation_path.as_ref().map_or_else(|| "Choose video…".into(), |path| crate::characters::animation_path(&id, path, &assets).to_string_lossy().into_owned()));
         } else {
             for id in [CHARACTER_NAME, VOICE_PROMPT, VIDEO_PATH] { label(window, id, ""); }
         }
@@ -194,8 +204,7 @@ mod native {
         }
         if let Some(id) = form.active_draft.as_deref().and_then(|id| form.character_ids.iter().position(|candidate| candidate == id)) {
             SendMessageW(list, LB_SETCURSEL, id, 0);
-        } else if !form.character_ids.is_empty() {
-            let index = form.selected_character.as_deref().and_then(|selected| form.character_ids.iter().position(|candidate| candidate == selected)).unwrap_or(0);
+        } else if let Some(index) = form.selected_character.as_deref().and_then(|selected| form.character_ids.iter().position(|candidate| candidate == selected)) {
             form.active_draft = Some(form.character_ids[index].clone());
             SendMessageW(list, LB_SETCURSEL, index, 0);
         }
@@ -381,7 +390,7 @@ mod native {
         }
         let name = draft.name.clone();
         let description = draft.voice_description.clone();
-        let sample = VOICE_EXAMPLE;
+        let sample = if draft.sample_text.trim().is_empty() { VOICE_EXAMPLE.into() } else { draft.sample_text.clone() };
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         let (sender, receiver) = mpsc::channel();
@@ -409,7 +418,7 @@ mod native {
         let sample = if character.sample_text.trim().is_empty() { VOICE_EXAMPLE.into() } else { character.sample_text.clone() };
         settings.characters.insert(id.clone(), character);
         settings.selected_character = Some(id);
-        form.voice_preview = Some(crate::platform::Preview::voice(settings, sample));
+        form.voice_preview = Some(crate::platform::Preview::voice(settings, sample, form.assets.clone()));
         label(window, PLAY_VOICE, "Stop example");
         label(window, STATUS, "Playing voice example.");
         SetTimer(window, 3, 100, None);
@@ -557,7 +566,7 @@ mod native {
                             if settings.volume == 0 {
                                 label(window, STATUS, "Preview is silent at 0% volume.");
                             } else {
-                                (*form).preview = Some(crate::platform::Preview::start((*form).data.clone(), settings));
+                                (*form).preview = Some(crate::platform::Preview::start((*form).data.clone(), settings, (*form).assets.clone()));
                                 label(window, PREVIEW, "Stop example");
                                 label(window, STATUS, "Playing static, then: This is an announcement");
                                 SetTimer(window, 1, 100, None);
@@ -666,10 +675,11 @@ mod native {
         SetForegroundWindow(window);
     }
 
-    pub fn run(data: &Path) -> Result<(), String> {
+    pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
         let settings = Settings::load(data)?;
         let mut form = Box::new(Form {
             data: data.into(),
+            assets: assets.into(),
             selected_character: settings.selected_character.clone(),
             settings,
             devices: Vec::new(),

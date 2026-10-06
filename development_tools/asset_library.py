@@ -22,7 +22,7 @@ def clean_assets(assets, runtime_assets):
         if target in targets.values():
             raise FileExistsError(f"Two portraits would move to {target}")
         targets[resource] = target
-    keep = set(targets.values())
+    keep = set(targets.values()) | {runtime_assets / "characters.json"}
     moved = {resource for resource, target in targets.items() if resource != target}
     remove = [path for path in files if path not in keep and path not in moved]
     for resource in moved:

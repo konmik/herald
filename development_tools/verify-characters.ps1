@@ -176,7 +176,18 @@ try {
     Set-Control 114 'character-ui-test-key'
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The General tab must not show character fields.' }
     Select-CharactersTab
-    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203)) -or (Send-Control 201 0x18B) -ne 0) { throw 'An empty character list must hide its editor.' }
+    $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
+    $assets = Join-Path $root 'native-announcer/resources'
+    Add-Content (Join-Path $Evidence 'actions.txt') "Bundled count $(Send-Control 201 0x18B), editor visible $([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203)))"
+    if ((Send-Control 201 0x18B) -ne 11 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The preinstalled character catalog did not load without selecting a character.' }
+    $bundled = $catalog.'hatted-herald-01'
+    Send-Control 201 0x186 0 | Out-Null
+    [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+    if ((Read-Control 203) -ne $bundled.name -or (Read-Control 204) -ne $bundled.voiceDescription -or [IO.Path]::GetFullPath((Read-Control 206)) -ne [IO.Path]::GetFullPath((Join-Path $assets $bundled.animationPath))) { throw 'The bundled character did not display its name, prompt, and relocated animation.' }
+    $bundledSample = $bundled.sampleText
+    Send-Control 210 0xF5 | Out-Null
+    Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Bundled voice example did not finish. $(Read-Control 109)"
+    if ((Get-Content $settingsPath -Raw) -match 'installedBundledCharacters') { throw 'Previewing a bundled character saved unapplied installation state.' }
     foreach ($obsolete in @(205, 207, 208, 209, 211, 212, 213, 215)) {
         if ([CivilizedCharacterTest]::GetDlgItem($process.MainWindowHandle, $obsolete) -ne [IntPtr]::Zero) { throw "Obsolete character control $obsolete remains." }
     }
@@ -216,7 +227,7 @@ try {
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 2 -or $settings.selectedCharacter -ne $characterId) { throw 'Apply did not save both drafts and preserve the chosen character.' }
+    if (@($settings.characters.PSObject.Properties).Count -ne 13 -or $settings.selectedCharacter -ne $characterId) { throw 'Apply did not save both drafts and preserve the chosen character.' }
     Send-Control 200 0x100 0x25 | Out-Null
     Send-Control 200 0x101 0x25 | Out-Null
     Send-Control 107 0xF5 | Out-Null
@@ -237,12 +248,15 @@ try {
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne 'Second character') { throw 'The list did not select the second character.' }
     Delete-Character $false
-    if ((Send-Control 201 0x18B) -ne 2 -or (Read-Control 203) -ne 'Second character') { throw 'Cancelling Delete changed the character list.' }
+    if ((Send-Control 201 0x18B) -ne 13 -or (Read-Control 203) -ne 'Second character') { throw 'Cancelling Delete changed the character list.' }
     Delete-Character
-    if ((Send-Control 201 0x18B) -ne 1 -or (Read-Control 203) -ne 'Test herald') { throw 'Delete did not remove the selected character and select the remaining one.' }
+    if ((Send-Control 201 0x18B) -ne 12 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Delete did not remove the selected character without activating another one.' }
+    Send-Control 201 0x186 0 | Out-Null
+    [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+    if ((Read-Control 203) -ne 'Test herald') { throw 'The remaining custom character could not be selected after deletion.' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 1 -or $settings.selectedCharacter -ne $characterId) { throw 'Character deletion did not persist.' }
+    if (@($settings.characters.PSObject.Properties).Count -ne 12 -or $settings.selectedCharacter -ne $characterId) { throw 'Character deletion did not persist.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened settings did not close.' }
     $reportPath = Join-Path $temporary 'report.json'
@@ -278,22 +292,35 @@ try {
     $design = @($requests | Where-Object { $_.url -like '/v1/text-to-voice/design*' })
     $create = @($requests | Where-Object { $_.url -eq '/v1/text-to-voice' })
     $examples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $sample })
+    $bundledExamples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $bundledSample })
     $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
-    if ($design.Count -ne 2 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[0].body.voice_description -eq $design[1].body.voice_description -or $create.Count -ne 2 -or $create[0].body.generated_voice_id -ne 'generated-0' -or $examples.Count -ne 3 -or $speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Automatic voice creation, reuse, prompt changes, and runtime speech did not match user actions.' }
+    if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $bundledSample -or $design[1].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $create[0].body.generated_voice_id -ne 'generated-0' -or $examples.Count -ne 3 -or $bundledExamples.Count -ne 1 -or $speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Bundled and custom voice creation, reuse, prompt changes, and runtime speech did not match user actions.' }
     if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used a local speech fallback.' }
     Copy-Item $requestsFile (Join-Path $Evidence 'requests.jsonl')
     Open-Settings
     Select-CharactersTab
     Delete-Character
-    if ((Send-Control 201 0x18B) -ne 0 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting the final character did not return to the empty list.' }
+    if ((Send-Control 201 0x18B) -ne 11 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting the final custom character did not leave the preinstalled catalog without activating it.' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 0 -or $settings.selectedCharacter) { throw 'Deleting the final character did not clear the saved selection.' }
+    if (@($settings.characters.PSObject.Properties).Count -ne 11 -or $settings.selectedCharacter) { throw 'Deleting the final custom character did not clear the saved selection.' }
+    Send-Control 201 0x186 0 | Out-Null
+    [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+    Delete-Character
+    if ((Send-Control 201 0x18B) -ne 10 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting a bundled character did not leave its tombstone without activating another one.' }
+    Send-Control 107 0xF5 | Out-Null
+    $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if (@($settings.characters.PSObject.Properties).Count -ne 10 -or @($settings.installedBundledCharacters).Count -ne 11 -or $settings.characters.'hatted-herald-01') { throw 'Deleting a bundled character did not persist its tombstone.' }
     Send-Control 108 0xF5 | Out-Null
-    if (-not $process.WaitForExit(5000)) { throw 'Empty character settings did not close.' }
+    if (-not $process.WaitForExit(5000)) { throw 'Character settings did not close.' }
+    Open-Settings
+    Select-CharactersTab
+    if ((Send-Control 201 0x18B) -ne 10 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The bundled character tombstone did not survive reopening.' }
+    Send-Control 108 0xF5 | Out-Null
+    if (-not $process.WaitForExit(5000)) { throw 'Reopened character settings did not close.' }
     if (Test-Path (Join-Path $data 'history.jsonl')) { Copy-Item (Join-Path $data 'history.jsonl') (Join-Path $Evidence 'history.jsonl') }
-    Add-Content (Join-Path $Evidence 'actions.txt') 'Verified Apply, Close, reopened controls, and actual runtime animation and speech requests.'
-    Write-Output 'Character list, clean editor, automatic voice example, reuse, deletion, Apply, Close, reopen, custom video decoding, and ElevenLabs runtime speech passed.'
+    Add-Content (Join-Path $Evidence 'actions.txt') 'Verified preinstalled and custom profiles, Apply, Close, reopen, tombstones, actual runtime animation, and speech requests.'
+    Write-Output 'Preinstalled profiles, tailored voice examples, custom voice creation, deletion, tombstones, Apply, Close, reopen, custom video decoding, and ElevenLabs runtime speech passed.'
     Write-Output "Evidence saved to $Evidence"
 } catch {
     $_ | Out-String | Set-Content (Join-Path $Evidence 'failure.txt')

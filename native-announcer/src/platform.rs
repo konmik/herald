@@ -427,21 +427,21 @@ pub struct Preview {
 
 #[cfg(target_os = "windows")]
 impl Preview {
-    pub fn start(data: PathBuf, settings: Settings) -> Self {
+    pub fn start(data: PathBuf, settings: Settings, assets: PathBuf) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
-            play_example_speech(&settings, "This is an announcement", &stop)
+            play_example_speech(&settings, "This is an announcement", &stop, &assets)
         });
         Self { cancelled, playback: Some(playback) }
     }
 
-    pub fn voice(settings: Settings, text: String) -> Self {
+    pub fn voice(settings: Settings, text: String, assets: PathBuf) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
-        let playback = std::thread::spawn(move || play_example_speech(&settings, &text, &stop));
+        let playback = std::thread::spawn(move || play_example_speech(&settings, &text, &stop, &assets));
         Self { cancelled, playback: Some(playback) }
     }
 
@@ -460,10 +460,10 @@ impl Drop for Preview {
 }
 
 #[cfg(target_os = "windows")]
-fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>) -> Result<(), String> {
+fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
     if stop.load(Ordering::Relaxed) { return Ok(()); }
     let mut speech = Speech::new(false);
-    let character = crate::characters::resolve(settings, std::path::Path::new(""), "opencode");
+    let character = crate::characters::resolve(settings, assets, "opencode");
     speech.start(text, "settings-preview", &character, settings);
     let started = std::time::Instant::now();
     loop {

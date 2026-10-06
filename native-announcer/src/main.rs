@@ -111,7 +111,7 @@ fn run() -> Result<(), String> {
         }
     }
     let data = platform::data_directory();
-    if open_settings { return settings_app::run(&data); }
+    if open_settings { return settings_app::run(&data, &assets); }
     if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
         return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
     }
