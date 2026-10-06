@@ -639,7 +639,7 @@ mod native {
         let main_left = sidebar_width + 32;
         let main_right = width - 32;
         let main_width = main_right - main_left;
-        let footer_y = height - 80;
+        let footer_y = height - 112;
         if main_width <= 0 || footer_y <= 120 { return; }
         let move_control = |id: i32, x: i32, y: i32, w: i32, h: i32| {
             SetWindowPos(GetDlgItem(window, id), std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -689,7 +689,7 @@ mod native {
         move_control(API_KEY, main_left, 252, main_width, 34);
         move_control(API_KEY_HINT, main_left, 294, main_width, 54);
 
-        move_control(STATUS, 24, height - 70, width - 252, 32);
+        move_control(STATUS, 24, height - 96, width - 268, 80);
         move_control(APPLY, width - 228, height - 48, 100, 32);
         move_control(CLOSE, width - 116, height - 48, 100, 32);
     }
@@ -1003,7 +1003,7 @@ mod native {
                 control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (502, 518, 160, 34))?;
                 control(window, "BUTTON", "Delete", REMOVE_CHARACTER, WS_TABSTOP, (836, 518, 92, 34))?;
 
-                control(window, "STATIC", "Apply saves changes. Close discards unsaved edits.", STATUS, 0, (24, 650, 684, 32))?;
+                control(window, "EDIT", "Apply saves changes. Close discards unsaved edits.", STATUS, ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL | WS_TABSTOP, (24, 624, 692, 80))?;
                 control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (732, 672, 100, 32))?;
                 control(window, "BUTTON", "Close", CLOSE, WS_TABSTOP, (844, 672, 100, 32))?;
                 Ok(())
