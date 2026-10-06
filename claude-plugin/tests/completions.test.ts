@@ -40,12 +40,12 @@ test('short tasks and interrupted tasks make no summary request', async ($, on) 
   expect(requests).toBe(0)
 })
 
-test('subagent announcements fork the conversation with their final report once', async ($, on) => {
+test('subagents stay silent until the main task finishes', async ($, on) => {
   const clock = mock.clock(on)
   let forks = 0
   let completions = 0
   let prompt = ''
-  let command: unknown
+  const commands: Array<{ type: string; sessionID?: string; text?: string }> = []
   on('session.id', () => ({ value: 'main' }))
   on('turn.complete', () => ({ text: '' }))
   on('model.complete', () => {
@@ -55,10 +55,10 @@ test('subagent announcements fork the conversation with their final report once'
   on('model.fork', (_, e) => {
     forks++
     prompt = e.prompt
-    return { value: { isAnswered: true, text: 'The review is complete.', usage } }
+    return { value: { isAnswered: true, text: 'The reviews and tests passed.', usage } }
   })
   on('process.run', (_, e) => {
-    command = JSON.parse(e.init?.stdin ?? '{}')
+    commands.push(JSON.parse(e.init?.stdin ?? '{}'))
     return { value: processResult }
   })
   const event = { turnId: 'review', agentId: 'child', answer: 'Reviewed the implementation.', durationMs: 70000, isAborted: false, reason: 'answer' as const }
@@ -66,10 +66,16 @@ test('subagent announcements fork the conversation with their final report once'
   await clock.settle()
   await $.turn.complete(event)
   await clock.settle()
+  await $.turn.complete({ ...event, turnId: 'second-review', agentId: 'second-child' })
+  await clock.settle()
+  expect(forks).toBe(0)
+  expect(commands).toEqual([])
+  await $.turn.complete({ turnId: 'final', answer: 'The reviews and tests passed.', durationMs: 90000, isAborted: false, reason: 'answer' })
+  await clock.settle()
   expect(forks).toBe(1)
   expect(completions).toBe(0)
-  expect(prompt).toContain('Reviewed the implementation.')
-  expect(command).toMatchObject({ type: 'notify', sessionID: 'claude:main:child' })
+  expect(prompt).toContain('The reviews and tests passed.')
+  expect(commands).toMatchObject([{ type: 'notify', sessionID: 'claude:main', text: 'The reviews and tests passed.' }])
 })
 
 test('a new user turn cancels a queued summary', async ($, on) => {
@@ -197,7 +203,7 @@ test('a new user turn cancels pending child summaries', async ($, on) => {
   await clock.settle()
   expect(forks).toBe(0)
   expect(commands.filter((command) => command.type === 'notify')).toEqual([])
-  expect(commands.some((command) => command.type === 'discard' && command.sessionID === 'claude:child-reset:child')).toBe(true)
+  expect(commands.some((command) => command.type === 'discard' && command.sessionID === 'claude:child-reset')).toBe(true)
 })
 
 test('background shell work defers announcement and counts the whole task', async ($, on) => {
@@ -223,4 +229,40 @@ test('background shell work defers announcement and counts the whole task', asyn
   await $.turn.complete({ turnId: 'result', answer: 'Finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
+})
+
+test('the main task waits for every background agent and the final reply', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  const commands: Array<{ type: string; sessionID?: string; text?: string }> = []
+  on('session.id', () => ({ value: 'background-agents' }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('classic.Stop', () => ({}))
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'Both reviews passed.', usage } }))
+  on('process.run', (_, e) => { commands.push(JSON.parse(e.init?.stdin ?? '{}')); return { value: processResult } })
+  await $.turn.start({ turnId: 'launch', text: 'Run both reviews.' })
+  await clock.advance(70000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [
+    { id: 'first', type: 'agent', status: 'running', description: 'First review' },
+    { id: 'second', type: 'agent', status: 'running', description: 'Second review' },
+  ] })
+  await $.turn.complete({ turnId: 'launch', answer: 'Reviews are running.', durationMs: 70000, isAborted: false, reason: 'answer' })
+  await $.turn.complete({ turnId: 'first-result', agentId: 'first', answer: 'First review passed.', durationMs: 70000, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'notify')).toEqual([])
+  await $.turn.start({ turnId: 'intermediate', text: '' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [
+    { id: 'second', type: 'agent', status: 'running', description: 'Second review' },
+  ] })
+  await $.turn.complete({ turnId: 'intermediate', answer: 'One review remains.', durationMs: 1000, isAborted: false, reason: 'answer' })
+  await $.turn.complete({ turnId: 'second-result', agentId: 'second', answer: 'Second review passed.', durationMs: 80000, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'notify')).toEqual([])
+  await $.turn.start({ turnId: 'final', text: '' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  await $.turn.complete({ turnId: 'final', answer: 'Both reviews passed.', durationMs: 1000, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'notify')).toMatchObject([
+    { sessionID: 'claude:background-agents', text: 'Both reviews passed.' },
+  ])
 })
