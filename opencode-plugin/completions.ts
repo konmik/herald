@@ -9,7 +9,7 @@ export type Completion = {
 export class Completions {
   private runs = new Map<string, { started: number; token: object }>()
   private pending = new Map<string, object>()
-  private jobs = new Map<string, string>()
+  private jobs = new Map<string, { sessionID: string; started?: number }>()
 
   constructor(
     private summarize: (sessionID: string, failed: boolean) => Promise<string>,
@@ -31,16 +31,26 @@ export class Completions {
   }
 
   jobStarted(id: string, sessionID: string, started: number) {
+    if (!this.runs.has(sessionID)) return
     this.resume(sessionID, started)
-    this.jobs.set(id, sessionID)
+    this.jobs.set(id, { sessionID, started })
   }
 
   jobFinished(id: string) {
     this.jobs.delete(id)
   }
 
+  reparent(sessionID: string, rootID: string) {
+    if (sessionID === rootID) return
+    this.runs.delete(sessionID)
+    this.pending.delete(sessionID)
+    for (const [id, job] of this.jobs) {
+      if (job.sessionID === sessionID) this.jobs.set(id, { ...job, sessionID: rootID })
+    }
+  }
+
   sessionForJob(id: string) {
-    return this.jobs.get(id)
+    return this.jobs.get(id)?.sessionID
   }
 
   tracks(sessionID: string) {
@@ -48,19 +58,21 @@ export class Completions {
   }
 
   hasJobs(sessionID: string) {
-    return [...this.jobs.values()].includes(sessionID)
+    return [...this.jobs.values()].some((job) => job.sessionID === sessionID)
   }
 
-  notice(sessionID: string, metadata: Record<string, unknown> | undefined) {
+  notice(sessionID: string, metadata: Record<string, unknown> | undefined, created?: number) {
     if (!metadata || !["completed", "cancelled", "error"].includes(String(metadata.state))) return
     const id = metadata.source === "shell" ? metadata.shellID : metadata.source === "subagent" ? metadata.childID : undefined
-    if (typeof id === "string" && this.jobs.get(id) === sessionID) this.jobFinished(id)
+    if (typeof id !== "string") return
+    const job = this.jobs.get(id)
+    if (job?.sessionID === sessionID && (job.started === undefined || created === undefined || created >= job.started)) this.jobFinished(id)
   }
 
   snapshot() {
     return {
       runs: [...this.runs].map(([sessionID, run]) => ({ sessionID, started: run.started })),
-      jobs: [...this.jobs].map(([id, sessionID]) => ({ id, sessionID })),
+      jobs: [...this.jobs].map(([id, job]) => ({ id, sessionID: job.sessionID, ...(job.started === undefined ? {} : { started: job.started }) })),
     }
   }
 
@@ -74,7 +86,10 @@ export class Completions {
     }
     for (const job of value.jobs) {
       if (typeof job?.id === "string" && typeof job.sessionID === "string" && this.runs.has(job.sessionID)) {
-        this.jobs.set(job.id, job.sessionID)
+        this.jobs.set(job.id, {
+          sessionID: job.sessionID,
+          ...(typeof job.started === "number" && Number.isFinite(job.started) ? { started: job.started } : {}),
+        })
       }
     }
   }
@@ -86,8 +101,8 @@ export class Completions {
   cancel(sessionID: string) {
     this.view(sessionID)
     this.runs.delete(sessionID)
-    for (const [id, owner] of this.jobs) {
-      if (owner === sessionID) this.jobs.delete(id)
+    for (const [id, job] of this.jobs) {
+      if (job.sessionID === sessionID) this.jobs.delete(id)
     }
   }
 

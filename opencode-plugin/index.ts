@@ -37,22 +37,69 @@ export default Plugin.define({
       typeof ctx.options.minimumSeconds === "number" ? ctx.options.minimumSeconds * 1000 : 60_000,
       (sessionID, reason) => console.info(JSON.stringify({ plugin: "civilized-agent", sessionID, reason })),
     )
-    completions.restore(await ctx.storage.get("completion-tasks"))
     const controller = new AbortController()
     const owned = new Set<string>()
+    const roots = new Map<string, string>()
     const tasks = new Set<Promise<void>>()
     let saved = Promise.resolve()
     const persist = () => {
       saved = saved.then(() => ctx.storage.set("completion-tasks", completions.snapshot())).catch(console.error)
       return saved
     }
+    const rootFor = async (sessionID: string) => {
+      const known = roots.get(sessionID)
+      if (known) return known
+      const path: string[] = []
+      const visited = new Set<string>()
+      let current = sessionID
+      let root: string | undefined
+      while (!visited.has(current)) {
+        const cached = roots.get(current)
+        if (cached) {
+          root = cached
+          break
+        }
+        visited.add(current)
+        path.push(current)
+        const session = await ctx.session.get({ sessionID: current })
+        if (!session?.parentID || visited.has(session.parentID)) {
+          root = current
+          break
+        }
+        current = session.parentID
+      }
+      root ??= current
+      roots.set(root, root)
+      for (const id of path) {
+        roots.set(id, root)
+        completions.reparent(id, root)
+      }
+      return root
+    }
     const owns = async (sessionID: string) => {
       if (owned.has(sessionID)) return true
       const session = await ctx.session.get({ sessionID })
-      if (session.location.directory.toLowerCase() !== ctx.location.directory.toLowerCase()) return false
+      const rootID = await rootFor(sessionID)
+      const root = rootID === sessionID ? session : await ctx.session.get({ sessionID: rootID })
+      if (root.location.directory.toLowerCase() !== ctx.location.directory.toLowerCase()) return false
       owned.add(sessionID)
+      owned.add(rootID)
       return true
     }
+    completions.restore(await ctx.storage.get("completion-tasks"))
+    const restored = completions.snapshot()
+    const restoredSessions = new Set([
+      ...restored.runs.map((run) => run.sessionID),
+      ...restored.jobs.map((job) => job.sessionID),
+    ])
+    for (const sessionID of restoredSessions) {
+      try {
+        await rootFor(sessionID)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    await persist()
     const subscription = consumeEvents(
       (signal) => ctx.event.subscribe({ signal }),
       async (event) => {
@@ -60,7 +107,7 @@ export default Plugin.define({
           const info = event.data.info
           const sessionID = info.metadata.sessionID
           if (typeof sessionID !== "string" || !(await owns(sessionID))) return
-          completions.jobStarted(info.id, sessionID, info.time.started)
+          completions.jobStarted(info.id, await rootFor(sessionID), info.time.started)
           await persist()
           return
         }
@@ -73,41 +120,59 @@ export default Plugin.define({
         if (!("sessionID" in event.data)) return
         const sessionID = event.data.sessionID
         if (typeof sessionID !== "string") return
-        if (event.type === "session.created" && event.data.parentID && await owns(event.data.parentID)) {
-          completions.jobStarted(sessionID, event.data.parentID, event.created)
+        if (event.type === "session.created") {
+          if (typeof event.data.parentID !== "string" || !(await owns(event.data.parentID)) || !(await owns(sessionID))) return
+          completions.jobStarted(sessionID, await rootFor(sessionID), event.created)
+          await persist()
+          return
         }
         if (event.type === "session.deleted") {
-          if (!owned.has(sessionID) && !completions.tracks(sessionID)) return
+          if (!owned.has(sessionID) && !roots.has(sessionID) && !completions.tracks(sessionID)) return
         } else if (!(await owns(sessionID))) return
+        let rootID = roots.get(sessionID)
+        if (!rootID) {
+          try {
+            rootID = await rootFor(sessionID)
+          } catch (error) {
+            if (event.type !== "session.deleted") throw error
+            rootID = completions.sessionForJob(sessionID) ?? sessionID
+          }
+        }
+        const isRoot = rootID === sessionID
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "user") {
-          completions.start(sessionID, event.created)
+          if (isRoot) completions.start(rootID, event.created)
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "synthetic") {
-          completions.notice(sessionID, event.data.item.payload.metadata)
+          completions.notice(rootID, event.data.item.payload.metadata, event.created)
         }
         if (event.type === "session.execution.started") {
-          if (completions.hasJobs(sessionID)) {
+          if (!isRoot) completions.jobStarted(sessionID, rootID, event.created)
+          if (completions.hasJobs(rootID)) {
             const messages = await ctx.session.context({ sessionID })
             for (const message of messages) {
-              if (message.type === "synthetic") completions.notice(sessionID, message.metadata)
+              if (message.type === "synthetic") completions.notice(rootID, message.metadata, message.time?.created)
             }
           }
-          completions.resume(sessionID, event.created)
+          if (isRoot) completions.resume(rootID, event.created)
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.deleted" || event.type === "session.execution.interrupted") {
           completions.jobFinished(sessionID)
-          completions.cancel(sessionID)
+          completions.cancel(isRoot ? rootID : sessionID)
           await send({ type: "discard", sessionID, at: event.created })
-          if (event.type === "session.deleted") owned.delete(sessionID)
+          if (event.type === "session.deleted") {
+            owned.delete(sessionID)
+            roots.delete(sessionID)
+          }
         }
         if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") {
-          if (!completions.hasJobs(sessionID)) completions.jobFinished(sessionID)
+          completions.jobFinished(sessionID)
         }
         await persist()
         if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") return
-        const task = completions.finish(event.id, sessionID, event.created, event.type === "session.execution.failed")
+        if (!isRoot) return
+        const task = completions.finish(event.id, rootID, event.created, event.type === "session.execution.failed")
           .catch(console.error)
           .then(persist)
           .finally(() => tasks.delete(task))

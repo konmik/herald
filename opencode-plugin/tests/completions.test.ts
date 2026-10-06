@@ -179,3 +179,64 @@ test("a restored child can be deleted before ownership is looked up", async () =
   await completions.finish("parent-result", "parent", 80000)
   expect(results).toHaveLength(1)
 })
+
+test("moving child jobs to the main task preserves its timer and suppresses the child", async () => {
+  const results: Completion[] = []
+  const completions = new Completions(async () => "All work finished.", async (item) => { results.push(item) })
+  completions.start("root", 0)
+  completions.start("child", 50_000)
+  completions.jobStarted("shell", "child", 55_000)
+  completions.reparent("child", "root")
+  await completions.finish("child-result", "child", 70_000)
+  await completions.finish("early-root", "root", 70_000)
+  expect(results).toEqual([])
+  completions.jobFinished("shell")
+  await completions.finish("final-root", "root", 80_000)
+  expect(results).toEqual([{ id: "final-root", sessionID: "root", completed: 80_000, text: "All work finished.", emotion: "neutral" }])
+})
+
+test("a child timer cannot revive a cancelled main task", async () => {
+  const results: Completion[] = []
+  const completions = new Completions(async () => "The new task finished.", async (item) => { results.push(item) })
+  completions.start("root", 0)
+  completions.start("child", 10_000)
+  completions.cancel("root")
+  completions.reparent("child", "root")
+  completions.resume("root", 70_000)
+  await completions.finish("old-result", "root", 82_000)
+  expect(results).toEqual([])
+  completions.start("root", 100_000)
+  await completions.finish("new-result", "root", 160_000)
+  expect(results).toEqual([{ id: "new-result", sessionID: "root", completed: 160_000, text: "The new task finished.", emotion: "neutral" }])
+})
+
+test("an old completion notice cannot release a restarted job", async () => {
+  const results: Completion[] = []
+  const completions = new Completions(async () => "Both runs finished.", async (item) => { results.push(item) })
+  completions.start("root", 0)
+  completions.jobStarted("child", "root", 10_000)
+  completions.jobFinished("child")
+  completions.jobStarted("child", "root", 60_002)
+  completions.notice("root", { source: "subagent", childID: "child", state: "completed" }, 60_001)
+  await completions.finish("early", "root", 65_000)
+  expect(results).toEqual([])
+  completions.notice("root", { source: "subagent", childID: "child", state: "completed" }, 70_000)
+  await completions.finish("final", "root", 80_000)
+  expect(results).toEqual([{ id: "final", sessionID: "root", completed: 80_000, text: "Both runs finished.", emotion: "neutral" }])
+})
+
+test("late background starts cannot revive a cancelled main task", async () => {
+  const results: Completion[] = []
+  const completions = new Completions(async () => "The new task finished.", async (item) => { results.push(item) })
+  completions.start("root", 0)
+  completions.cancel("root")
+  completions.jobStarted("late-child", "root", 70_000)
+  completions.jobFinished("late-child")
+  await completions.finish("cancelled-result", "root", 130_000)
+  expect(results).toEqual([])
+  completions.start("root", 140_000)
+  completions.jobStarted("new-child", "root", 140_001)
+  completions.jobFinished("new-child")
+  await completions.finish("new-result", "root", 200_000)
+  expect(results).toEqual([{ id: "new-result", sessionID: "root", completed: 200_000, text: "The new task finished.", emotion: "neutral" }])
+})
