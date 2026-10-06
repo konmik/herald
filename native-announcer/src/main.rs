@@ -269,15 +269,15 @@ fn run() -> Result<(), String> {
                             Ok(video) => Some(video),
                             Err(error) => {
                                 state::log(&data, format!("Video: {error}"));
-                                let fallback = video::select_path(&assets, notification.character());
-                                if character.id.is_some() && fallback != path {
-                                    match video::Video::open(&fallback) {
+                                let default_video = video::select_path(&assets, notification.character());
+                                if character.id.is_some() && default_video != path {
+                                    match video::Video::open(&default_video) {
                                         Ok(video) => {
-                                            path = fallback;
+                                            path = default_video;
                                             character.video_path = path.clone();
                                             Some(video)
                                         }
-                                        Err(error) => { state::log(&data, format!("Fallback video: {error}")); None }
+                                        Err(error) => { state::log(&data, format!("Default video: {error}")); None }
                                     }
                                 } else { None }
                             }
@@ -415,8 +415,8 @@ mod tests {
                 id: None,
                 name: "opencode".into(),
                 voice: characters::ResolvedVoice::Local { speaker: None },
-                fallback_character: "opencode".into(),
-                fallback_speaker: None,
+                source_character: "opencode".into(),
+                local_speaker: None,
                 video_path: PathBuf::new(),
                 video_warning: None,
             },

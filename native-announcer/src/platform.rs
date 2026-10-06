@@ -152,8 +152,8 @@ struct SpeechCommand {
     text: String,
     id: String,
     voice: ResolvedVoice,
-    fallback_character: String,
-    fallback_speaker: Option<String>,
+    source_character: String,
+    local_speaker: Option<String>,
     settings: Settings,
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
@@ -179,8 +179,8 @@ impl Speech {
                 text,
                 id,
                 voice,
-                fallback_character,
-                fallback_speaker,
+                source_character,
+                local_speaker,
                 settings,
                 volume,
                 cancelled,
@@ -189,7 +189,7 @@ impl Speech {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &voice, &fallback_character, fallback_speaker.as_deref(), &volume, &cancelled, &settings);
+                let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings);
                 let _ = events.send((id, result));
             }
         });
@@ -209,8 +209,8 @@ impl Speech {
             text: text.into(),
             id: id.into(),
             voice: character.voice.clone(),
-            fallback_character: character.fallback_character.clone(),
-            fallback_speaker: character.fallback_speaker.clone(),
+            source_character: character.source_character.clone(),
+            local_speaker: character.local_speaker.clone(),
             settings: settings.clone(),
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
@@ -237,26 +237,26 @@ use crate::tts::speak;
 fn speak(
     text: &str,
     voice: &ResolvedVoice,
-    fallback_character: &str,
-    fallback_speaker: Option<&str>,
+    source_character: &str,
+    local_speaker: Option<&str>,
     volume: &AtomicU16,
     cancelled: &AtomicBool,
     _settings: &Settings,
 ) -> Result<(), String> {
     let preferred = match voice {
-        ResolvedVoice::Local { speaker } => speaker.as_deref().or(fallback_speaker),
-        ResolvedVoice::ElevenLabs { .. } => fallback_speaker,
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
+        ResolvedVoice::ElevenLabs { .. } => local_speaker,
     };
     let mut command = if cfg!(target_os = "macos") {
         let mut command = hidden_command("say");
-        command.args(["-r", if fallback_character == "claude" { "180" } else { "160" }]);
+        command.args(["-r", if source_character == "claude" { "180" } else { "160" }]);
         let available = Command::new("say")
             .args(["-v", "?"])
             .output()
             .map_err(|e| e.to_string())?;
         let available = String::from_utf8_lossy(&available.stdout);
         let names = preferred.map(|p| vec![p]).unwrap_or_else(|| {
-            if fallback_character == "claude" {
+            if source_character == "claude" {
                 vec!["Alex", "Daniel"]
             } else {
                 vec!["Daniel", "Alex"]
@@ -280,13 +280,13 @@ fn speak(
         command.args(["-a", &(crate::settings::volume_gain(volume.load(Ordering::Relaxed)) * 100.0).round().to_string()]);
         command.args([
             "-v",
-            preferred.unwrap_or(if fallback_character == "claude" {
+            preferred.unwrap_or(if source_character == "claude" {
                 "en-us+m2"
             } else {
                 "en-us+m3"
             }),
             "-s",
-            if fallback_character == "claude" { "180" } else { "160" },
+            if source_character == "claude" { "180" } else { "160" },
         ]);
         command
     };

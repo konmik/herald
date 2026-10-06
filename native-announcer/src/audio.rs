@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn device_selection_uses_stable_ids_and_falls_back_when_missing() {
+    fn device_selection_uses_stable_ids_and_system_default_when_missing() {
         let devices = vec![OutputDevice { id: "speakers".into(), name: "Speakers".into(), index: 3 }];
         assert_eq!(selected_index(&devices, Some("speakers")), Some(3));
         assert_eq!(selected_index(&devices, Some("unplugged")), None);

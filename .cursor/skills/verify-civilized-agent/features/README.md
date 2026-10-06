@@ -18,6 +18,6 @@ Use `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.
 
 - [Settings persistence](settings.md): Apply, Close without saving, reopen, CPU/GPU selection.
 - [Quiet mode and schedule](quiet.md): immediate mute, daily times, persisted controls, meeting suppression.
-- [Audio output](output.md): missing device fallback, refresh, system default, persisted selection.
+- [Audio output](output.md): missing device uses system default, refresh, persisted selection.
 - [Audio preview](preview.md): silent preview, unsaved audio settings, start/stop, completion.
 - [Announcements](announcements.md): real host completions, native rendering, character animation, focus, history, dismissal.

@@ -64,7 +64,7 @@ fn pcm(samples: &[f32]) -> Vec<i16> {
     samples.iter().map(|sample| if sample.is_finite() { (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16 } else { 0 }).collect()
 }
 
-pub fn speak(text: &str, voice: &ResolvedVoice, fallback_character: &str, fallback_speaker: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, settings: &crate::settings::Settings) -> Result<(), String> {
+pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_speaker: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, settings: &crate::settings::Settings) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) || text.trim().is_empty() { return Ok(()); }
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
     let voice_id = match voice {
@@ -86,10 +86,10 @@ pub fn speak(text: &str, voice: &ResolvedVoice, fallback_character: &str, fallba
         }
     }
     let preferred = match voice {
-        ResolvedVoice::Local { speaker } => speaker.as_deref().or(fallback_speaker),
-        ResolvedVoice::ElevenLabs { .. } => fallback_speaker,
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
+        ResolvedVoice::ElevenLabs { .. } => local_speaker,
     };
-    local_speak(text, fallback_character, preferred, settings.output_device.as_deref(), volume, cancelled)
+    local_speak(text, source_character, preferred, settings.output_device.as_deref(), volume, cancelled)
 }
 
 fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>) -> Result<(), String> {

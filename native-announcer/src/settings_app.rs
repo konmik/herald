@@ -126,10 +126,7 @@ mod native {
     }
 
     fn empty_draft() -> Character {
-        Character {
-            sample_text: VOICE_EXAMPLE.into(),
-            ..Default::default()
-        }
+        Character::default()
     }
 
     unsafe fn draft_for<'a>(form: &'a mut Form, id: &str) -> &'a mut Character {
@@ -302,7 +299,7 @@ mod native {
 
     fn api_key_status(api_key: Option<&str>) -> String {
         match api_key.filter(|key| !key.trim().is_empty()).map(crate::elevenlabs::validate_api_key) {
-            Some(Ok(())) => "Using the key entered in Settings. Kitten CPU is the fallback.".into(),
+            Some(Ok(())) => "Using the key entered in Settings. Kitten CPU provides local speech.".into(),
             None => "Enter an ElevenLabs key, or leave blank to use Kitten CPU.".into(),
             Some(Err(error)) => format!("ElevenLabs API key unavailable: {error}"),
         }
@@ -390,7 +387,6 @@ mod native {
         }
         let name = draft.name.clone();
         let description = draft.voice_description.clone();
-        let sample = if draft.sample_text.trim().is_empty() { VOICE_EXAMPLE.into() } else { draft.sample_text.clone() };
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         let (sender, receiver) = mpsc::channel();
@@ -402,7 +398,7 @@ mod native {
         std::thread::spawn(move || {
             let result = (|| {
                 let client = Client::from_settings(&settings)?.ok_or("Enter an ElevenLabs key in General settings.")?;
-                let previews = client.design(&description, &sample)?;
+                let previews = client.design(&description, VOICE_EXAMPLE)?;
                 if stop.load(Ordering::Relaxed) { return Err("Voice example was cancelled.".into()); }
                 let preview = previews.first().ok_or("No voice example was returned.")?;
                 client.create_voice(&name, &description, &preview.generated_voice_id)
@@ -415,10 +411,9 @@ mod native {
         if settings.volume == 0 { label(window, STATUS, "Voice preview is silent at 0% volume."); return; }
         let Some(id) = form.active_draft.clone() else { return; };
         let character = draft_for(form, &id).clone();
-        let sample = if character.sample_text.trim().is_empty() { VOICE_EXAMPLE.into() } else { character.sample_text.clone() };
         settings.characters.insert(id.clone(), character);
         settings.selected_character = Some(id);
-        form.voice_preview = Some(crate::platform::Preview::voice(settings, sample, form.assets.clone()));
+        form.voice_preview = Some(crate::platform::Preview::voice(settings, VOICE_EXAMPLE.into(), form.assets.clone()));
         label(window, PLAY_VOICE, "Stop example");
         label(window, STATUS, "Playing voice example.");
         SetTimer(window, 3, 100, None);

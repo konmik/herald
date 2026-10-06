@@ -1,14 +1,14 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 
-export function sessionTitle(path, fallback = '') {
-  if (!path) return fallback || 'Untitled session'
+export function sessionTitle(path, defaultTitle = '') {
+  if (!path) return defaultTitle || 'Untitled session'
   let file
   try {
     file = openSync(path, 'r')
     const size = fstatSync(file).size
     const bytes = Buffer.alloc(Math.min(size, 262144))
     readSync(file, bytes, 0, bytes.length, size - bytes.length)
-    let title = fallback
+    let title = defaultTitle
     for (const line of bytes.toString('utf8').split('\n')) {
       try {
         const entry = JSON.parse(line)
@@ -18,7 +18,7 @@ export function sessionTitle(path, fallback = '') {
     }
     return title || 'Untitled session'
   } catch {
-    return fallback || 'Untitled session'
+    return defaultTitle || 'Untitled session'
   } finally {
     if (file !== undefined) closeSync(file)
   }

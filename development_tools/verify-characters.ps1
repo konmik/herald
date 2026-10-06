@@ -184,7 +184,7 @@ try {
     Send-Control 201 0x186 0 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne $bundled.name -or (Read-Control 204) -ne $bundled.voiceDescription -or [IO.Path]::GetFullPath((Read-Control 206)) -ne [IO.Path]::GetFullPath((Join-Path $assets $bundled.animationPath))) { throw 'The bundled character did not display its name, prompt, and relocated animation.' }
-    $bundledSample = $bundled.sampleText
+    $sample = 'I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.'
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Bundled voice example did not finish. $(Read-Control 109)"
     if ((Get-Content $settingsPath -Raw) -match 'installedBundledCharacters') { throw 'Previewing a bundled character saved unapplied installation state.' }
@@ -196,7 +196,6 @@ try {
     if (-not [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'New did not show the character editor.' }
     Set-Control 203 'Test herald'
     Set-Control 204 'A warm theatrical herald with a rich British baritone, clear speech, and cheerful urgency.'
-    $sample = 'I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.'
     Pick-Animation
     $before = Get-Content $settingsPath -Raw
     $before | Set-Content (Join-Path $Evidence 'settings-before.json')
@@ -218,7 +217,7 @@ try {
     if (-not $characterId) { throw 'The chosen character was not activated.' }
     $character = $settings.characters.$characterId
     $serialized = $character | ConvertTo-Json -Depth 8 -Compress
-    if ($character.name -ne 'Test herald' -or $serialized -notmatch 'saved-generated-0' -or $serialized -notmatch [regex]::Escape('test-character.mp4')) { throw "Character did not persist its name, automatic voice, and video. $serialized" }
+    if ($character.name -ne 'Test herald' -or $serialized -match 'sampleText' -or $serialized -notmatch 'saved-generated-0' -or $serialized -notmatch [regex]::Escape('test-character.mp4')) { throw "Character did not persist its name, automatic voice, and video without a sample text. $serialized" }
     if ($settings.voices.claude -ne 'Mark') { throw 'Applying a character lost the existing local voice setting.' }
     Send-Control 202 0xF5 | Out-Null
     Set-Control 203 'Second character'
@@ -235,7 +234,7 @@ try {
     Select-CharactersTab
     $saved = Get-Content $settingsPath -Raw
     $saved | Set-Content (Join-Path $Evidence 'settings-applied.json')
-    if ($saved -match 'character-ui-test-key|audio_base_64|"previews"') { throw 'Settings contain plaintext credentials or transient previews.' }
+    if ($saved -match 'character-ui-test-key|audio_base_64|"previews"|sampleText') { throw 'Settings contain plaintext credentials, transient previews, or character sample text.' }
     Set-Control 203 'Unapplied name'
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Settings did not close.' }
@@ -292,10 +291,9 @@ try {
     $design = @($requests | Where-Object { $_.url -like '/v1/text-to-voice/design*' })
     $create = @($requests | Where-Object { $_.url -eq '/v1/text-to-voice' })
     $examples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $sample })
-    $bundledExamples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $bundledSample })
     $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
-    if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $bundledSample -or $design[1].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $create[0].body.generated_voice_id -ne 'generated-0' -or $examples.Count -ne 3 -or $bundledExamples.Count -ne 1 -or $speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Bundled and custom voice creation, reuse, prompt changes, and runtime speech did not match user actions.' }
-    if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used a local speech fallback.' }
+    if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[1].body.text -ne $sample -or $design[2].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $examples.Count -ne 4 -or $speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Bundled and custom voice creation, shared example reuse, prompt changes, and runtime speech did not match user actions.' }
+    if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used local speech.' }
     Copy-Item $requestsFile (Join-Path $Evidence 'requests.jsonl')
     Open-Settings
     Select-CharactersTab
@@ -320,7 +318,7 @@ try {
     if (-not $process.WaitForExit(5000)) { throw 'Reopened character settings did not close.' }
     if (Test-Path (Join-Path $data 'history.jsonl')) { Copy-Item (Join-Path $data 'history.jsonl') (Join-Path $Evidence 'history.jsonl') }
     Add-Content (Join-Path $Evidence 'actions.txt') 'Verified preinstalled and custom profiles, Apply, Close, reopen, tombstones, actual runtime animation, and speech requests.'
-    Write-Output 'Preinstalled profiles, tailored voice examples, custom voice creation, deletion, tombstones, Apply, Close, reopen, custom video decoding, and ElevenLabs runtime speech passed.'
+    Write-Output 'Preinstalled profiles, shared voice examples, custom voice creation, deletion, tombstones, Apply, Close, reopen, custom video decoding, and ElevenLabs runtime speech passed.'
     Write-Output "Evidence saved to $Evidence"
 } catch {
     $_ | Out-String | Set-Content (Join-Path $Evidence 'failure.txt')

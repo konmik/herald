@@ -65,8 +65,8 @@ test('bundled characters cover every library video with usable voice design inpu
     assert.equal(typeof character.name, 'string')
     assert.equal(character.name.trim().length > 0 && character.name.length <= 160, true)
     assert.equal(character.voiceDescription.trim().length >= 20 && character.voiceDescription.length <= 1000, true)
-    assert.equal(character.sampleText.trim().length >= 100 && character.sampleText.length <= 1000, true)
-    assert.deepEqual(character.voice, { type: 'local', speaker: null })
+    assert.equal(Object.hasOwn(character, 'sampleText'), false)
+    assert.equal(Object.hasOwn(character, 'voice'), false)
     assert.equal((await readFile(new URL(character.animationPath, resources))).length > 0, true)
   }
 })

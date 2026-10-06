@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profiles_merge_bundled_characters_without_overwriting_same_ids() {
+    fn legacy_sample_text_is_ignored_and_dropped_when_saved() {
         let custom = serde_json::json!({
             "name": "My herald",
             "voiceDescription": "A saved custom voice",
@@ -234,12 +234,23 @@ mod tests {
         let saved = &settings.characters["hatted-herald-01"];
         assert_eq!(saved.name, "My herald");
         assert_eq!(saved.voice_description, "A saved custom voice");
-        assert_eq!(saved.sample_text, "This is my saved character sample text.");
         assert_eq!(saved.animation_path, Some(PathBuf::from("C:\\Videos\\my-herald.mp4")));
         assert_eq!(saved.voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert_eq!(settings.selected_character.as_deref(), Some("hatted-herald-01"));
         assert_eq!(settings.characters.len(), 11);
         assert_eq!(settings.installed_bundled_characters.len(), 11);
+        let serialized = serde_json::to_value(&settings).unwrap();
+        assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
+        let data = std::env::temp_dir().join(format!("civilized-legacy-sample-{}", crate::state::timestamp()));
+        settings.save(&data).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+        let saved_character = &saved_json["characters"]["hatted-herald-01"];
+        assert!(saved_character.get("sampleText").is_none());
+        assert_eq!(saved_character["name"], "My herald");
+        assert_eq!(saved_character["voiceDescription"], "A saved custom voice");
+        assert_eq!(saved_character["animationPath"], "C:\\Videos\\my-herald.mp4");
+        assert_eq!(saved_character["voice"]["voiceId"], "saved-voice");
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[test]
@@ -329,7 +340,7 @@ mod tests {
     fn character_registry_and_selected_profile_persist_with_legacy_preferences() {
         let settings = Settings::decode(br#"{
             "voices":{"opencode":"Luna"},
-            "characters":{"herald":{"name":"Herald","voiceDescription":"A warm herald","sampleText":"Hear this announcement from the herald.","animationPath":"C:\\Videos\\herald.mp4","voice":{"type":"elevenLabs","voiceId":"saved-herald"}}},
+            "characters":{"herald":{"name":"Herald","voiceDescription":"A warm herald","animationPath":"C:\\Videos\\herald.mp4","voice":{"type":"elevenLabs","voiceId":"saved-herald"}}},
             "selectedCharacter":"herald"
         }"#).unwrap();
         assert_eq!(settings.voices["opencode"], "Luna");

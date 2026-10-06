@@ -48,7 +48,7 @@ try {
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Settings window did not open' }
     $selected = Send-Control 106 0x147
     $count = Send-Control 106 0x146
-    if ($selected -ne $count - 1 -or $selected -le 0) { throw 'Unavailable output must remain selected with system fallback' }
+    if ($selected -ne $count - 1 -or $selected -le 0) { throw 'Unavailable output must remain selected while using the system default' }
     if ((Read-Control 107) -ne 'Apply' -or (Read-Control 108) -ne 'Close') { throw 'Settings must have Apply and Close buttons' }
     if ((Send-Control 113 0x147) -ne 0 -or (Send-Control 113 0x146) -ne 3) { throw 'Speech models must be available with Flash selected by default' }
     if ((Send-Control 114 0xD2) -eq 0) { throw 'API key field must be masked' }
@@ -68,7 +68,7 @@ try {
     Send-Control 112 0xF5 | Out-Null
     $deadline = [DateTime]::UtcNow.AddSeconds(25)
     while ((Read-Control 112) -eq 'Stop example' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    if ((Read-Control 109) -ne 'Preview finished.') { throw "CPU fallback preview did not finish: $(Read-Control 109)" }
+    if ((Read-Control 109) -ne 'Preview finished.') { throw "CPU preview did not finish: $(Read-Control 109)" }
     if (Test-Path (Join-Path $temporary 'errors.log')) { throw (Get-Content (Join-Path $temporary 'errors.log') -Raw) }
     if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Model preview saved unapplied changes' }
     Send-Control 112 0xF5 | Out-Null
@@ -87,9 +87,9 @@ try {
     Send-Control 112 0xF5 | Out-Null
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     while ((Read-Control 112) -eq 'Stop example' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    if ((Read-Control 109) -ne 'Preview finished.') { throw "Remote failure did not fall back to CPU: $(Read-Control 109)" }
+    if ((Read-Control 109) -ne 'Preview finished.') { throw "Remote failure did not use local voice: $(Read-Control 109)" }
     $log = Get-Content (Join-Path $temporary 'errors.log') -Raw
-    if ($log -notmatch 'ElevenLabs speech unavailable; using local voice' -or $log -match 'settings-test-key') { throw 'CPU fallback must log the remote failure without the API key' }
+    if ($log -notmatch 'ElevenLabs speech unavailable; using local voice' -or $log -match 'settings-test-key') { throw 'Remote failure did not use local voice or keep the API key private' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if ($settings.speechModel -ne 'eleven_v4_turbo' -or $settings.elevenlabsApiKey -notlike 'dpapi:*' -or $settings.PSObject.Properties.Name -contains 'useGpu' -or -not $settings.quietMode -or -not $settings.scheduleEnabled -or $settings.quietStart -ne 1350 -or $settings.quietEnd -ne 495 -or $settings.volume -ne 35 -or $null -ne $settings.outputDevice -or $settings.voices.claude -ne 'Mark') { throw 'Settings controls did not persist their values or preserve the voice selection' }
@@ -110,7 +110,7 @@ try {
     if (-not $reopen.WaitForExit(5000) -or $reopen.ExitCode -ne 0 -or $process.HasExited) { throw 'Reopening should show the existing settings window' }
     [CivilizedSettingsTest]::SendMessage($process.MainWindowHandle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Settings app did not exit' }
-    Write-Output 'Settings UI, model selection, encrypted key persistence, CPU fallback, preview, cancellation, output fallback and reopen checks passed.'
+    Write-Output 'Settings UI, model selection, encrypted key persistence, local voice, preview, cancellation, system-default output and reopen checks passed.'
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     Remove-Item -LiteralPath $temporary -Recurse -Force
