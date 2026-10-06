@@ -127,8 +127,9 @@ export const register: Register = (on) => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId != null) return result
     if (completed.has(e.turnId)) return result
-    const key = await keyFor($, e.agentId)
+    const key = await keyFor($)
     const at = await $.clock.now()
     sessions.add(key)
     if (sessions.size > 2048) sessions.delete(sessions.values().next().value!)

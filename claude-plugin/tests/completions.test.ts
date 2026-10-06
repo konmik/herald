@@ -70,7 +70,7 @@ test('subagents stay silent until the main task finishes', async ($, on) => {
   await clock.settle()
   expect(forks).toBe(0)
   expect(commands).toEqual([])
-  await $.turn.complete({ turnId: 'final', answer: 'The reviews and tests passed.', durationMs: 90000, isAborted: false, reason: 'answer' })
+  await $.turn.complete({ turnId: 'reviews-final', answer: 'The reviews and tests passed.', durationMs: 90000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(forks).toBe(1)
   expect(completions).toBe(0)
@@ -251,6 +251,7 @@ test('the main task waits for every background agent and the final reply', async
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toEqual([])
   await $.turn.start({ turnId: 'intermediate', text: '' })
+  await clock.advance(1000)
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [
     { id: 'second', type: 'agent', status: 'running', description: 'Second review' },
   ] })
@@ -258,9 +259,10 @@ test('the main task waits for every background agent and the final reply', async
   await $.turn.complete({ turnId: 'second-result', agentId: 'second', answer: 'Second review passed.', durationMs: 80000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toEqual([])
-  await $.turn.start({ turnId: 'final', text: '' })
+  await $.turn.start({ turnId: 'agents-final', text: '' })
+  await clock.advance(1000)
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
-  await $.turn.complete({ turnId: 'final', answer: 'Both reviews passed.', durationMs: 1000, isAborted: false, reason: 'answer' })
+  await $.turn.complete({ turnId: 'agents-final', answer: 'Both reviews passed.', durationMs: 1000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toMatchObject([
     { sessionID: 'claude:background-agents', text: 'Both reviews passed.' },
