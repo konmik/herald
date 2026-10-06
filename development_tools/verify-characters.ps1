@@ -99,12 +99,19 @@ function Open-Settings {
     @{ pid = $process.Id; started = $process.StartTime.ToUniversalTime().ToString('o'); binary = $settingsInfo.FileName; sha256 = $binaryHash; scratch = $temporary } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'instance.json')
     Add-Content (Join-Path $Evidence 'actions.txt') 'Opened the owned settings window and checked its binary and controls.'
 }
-function Select-CharactersTab {
-    Send-Control 200 0x100 0x27 | Out-Null
-    Send-Control 200 0x101 0x27 | Out-Null
-    Add-Content (Join-Path $Evidence 'actions.txt') "Tab count $(Send-Control 200 0x1304), selected $(Send-Control 200 0x130B), editor visible $([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203)))"
-    Wait-Until { [CivilizedCharacterTest]::IsWindowVisible((Get-Control 201)) } 'Characters tab did not show its list.'
-    Add-Content (Join-Path $Evidence 'actions.txt') 'Selected the Characters tab through its native tab control.'
+function Select-SettingsPage([int]$Index) {
+    Send-Control 200 0x100 0x24 | Out-Null
+    Send-Control 200 0x101 0x24 | Out-Null
+    for ($step = 0; $step -lt $Index; $step++) {
+        Send-Control 200 0x100 0x28 | Out-Null
+        Send-Control 200 0x101 0x28 | Out-Null
+    }
+    if ((Send-Control 200 0x188) -ne $Index) { throw 'The settings sidebar did not select the requested page.' }
+    Add-Content (Join-Path $Evidence 'actions.txt') "Selected settings page $Index through the native sidebar."
+}
+function Select-CharactersPage {
+    Select-SettingsPage 0
+    Wait-Until { [CivilizedCharacterTest]::IsWindowVisible((Get-Control 201)) } 'Characters page did not show its list.'
 }
 function Pick-Animation {
     [CivilizedCharacterTest]::PostMessage((Get-Control 206), 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
@@ -173,9 +180,10 @@ try {
     $settingsInfo.ArgumentList.Add('--assets')
     $settingsInfo.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
     Open-Settings
+    Select-SettingsPage 3
     Set-Control 114 'character-ui-test-key'
-    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The General tab must not show character fields.' }
-    Select-CharactersTab
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The Speech service page must not show character fields.' }
+    Select-CharactersPage
     $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
     $assets = Join-Path $root 'native-announcer/resources'
     Add-Content (Join-Path $Evidence 'actions.txt') "Bundled count $(Send-Control 201 0x18B), editor visible $([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203)))"
@@ -207,10 +215,14 @@ try {
     Set-Control 204 'An elderly royal herald with a warm weathered baritone, measured pacing, clear speech, and cheerful urgency.'
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Changed prompt did not regenerate its voice. $(Read-Control 109)"
+    Select-SettingsPage 3
     Set-Control 114 ''
+    Select-CharactersPage
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "The no-key voice example did not play with Kitten CPU. $(Read-Control 109)"
+    Select-SettingsPage 3
     Set-Control 114 'character-ui-test-key'
+    Select-CharactersPage
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     $characterId = $settings.selectedCharacter
@@ -227,11 +239,10 @@ try {
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if (@($settings.characters.PSObject.Properties).Count -ne 13 -or $settings.selectedCharacter -ne $characterId) { throw 'Apply did not save both drafts and preserve the chosen character.' }
-    Send-Control 200 0x100 0x25 | Out-Null
-    Send-Control 200 0x101 0x25 | Out-Null
+    Select-SettingsPage 1
     Send-Control 107 0xF5 | Out-Null
-    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Apply on the General tab exposed character controls.' }
-    Select-CharactersTab
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Apply on the Audio page exposed character controls.' }
+    Select-CharactersPage
     $saved = Get-Content $settingsPath -Raw
     $saved | Set-Content (Join-Path $Evidence 'settings-applied.json')
     if ($saved -match 'character-ui-test-key|audio_base_64|"previews"|sampleText') { throw 'Settings contain plaintext credentials, transient previews, or character sample text.' }
@@ -240,7 +251,7 @@ try {
     if (-not $process.WaitForExit(5000)) { throw 'Settings did not close.' }
     if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Close saved an unapplied character edit.' }
     Open-Settings
-    Select-CharactersTab
+    Select-CharactersPage
     if ((Read-Control 203) -ne 'Test herald' -or (Read-Control 206) -ne $video) { throw 'The character did not survive reopening.' }
     @{ name = (Read-Control 203); animation = (Read-Control 206); selected = (Send-Control 201 0x188) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'reopened-controls.json')
     Send-Control 201 0x186 1 | Out-Null
@@ -296,7 +307,7 @@ try {
     if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used local speech.' }
     Copy-Item $requestsFile (Join-Path $Evidence 'requests.jsonl')
     Open-Settings
-    Select-CharactersTab
+    Select-CharactersPage
     Delete-Character
     if ((Send-Control 201 0x18B) -ne 11 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting the final custom character did not leave the preinstalled catalog without activating it.' }
     Send-Control 107 0xF5 | Out-Null
@@ -312,7 +323,7 @@ try {
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Character settings did not close.' }
     Open-Settings
-    Select-CharactersTab
+    Select-CharactersPage
     if ((Send-Control 201 0x18B) -ne 10 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The bundled character tombstone did not survive reopening.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened character settings did not close.' }

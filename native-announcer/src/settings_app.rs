@@ -10,15 +10,15 @@ mod native {
     use crate::elevenlabs::{Client, SpeechModel};
     use crate::settings::{format_time, parse_time, Settings};
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
     use std::hash::{Hash, Hasher};
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, Receiver};
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::{Controls::*, WindowsAndMessaging::*};
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OFN_NOCHANGEDIR};
+    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
     const TBM_GETPOS: u32 = WM_USER;
@@ -39,7 +39,7 @@ mod native {
     const API_KEY: i32 = 114;
     const API_KEY_LABEL: i32 = 116;
     const API_KEY_HINT: i32 = 117;
-    const TAB: i32 = 200;
+    const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
     const CHARACTER_NAME: i32 = 203;
@@ -47,6 +47,7 @@ mod native {
     const VIDEO_PATH: i32 = 206;
     const PLAY_VOICE: i32 = 210;
     const REMOVE_CHARACTER: i32 = 214;
+    const CHARACTER_EMPTY: i32 = 402;
     const QUIET_HINT: i32 = 301;
     const START_LABEL: i32 = 303;
     const END_LABEL: i32 = 304;
@@ -57,8 +58,107 @@ mod native {
     const NAME_LABEL: i32 = 310;
     const PROMPT_LABEL: i32 = 311;
     const VIDEO_LABEL: i32 = 313;
+    const PAGE_TITLE: i32 = 400;
+    const PAGE_HINT: i32 = 401;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
     const VOICE_EXAMPLE: &str = "I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.";
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Page {
+        Characters,
+        Audio,
+        QuietHours,
+        SpeechService,
+    }
+
+    impl Page {
+        fn index(self) -> usize {
+            PAGE_SPECS.iter().position(|spec| spec.page == self).unwrap()
+        }
+    }
+
+    struct PageSpec {
+        page: Page,
+        label: &'static str,
+        hint: &'static str,
+        controls: &'static [i32],
+    }
+
+    const CHARACTER_PAGE_CONTROLS: &[i32] = &[
+        CHARACTER_LIST,
+        NEW_CHARACTER,
+        CHARACTER_EMPTY,
+        NAME_LABEL,
+        CHARACTER_NAME,
+        PROMPT_LABEL,
+        VOICE_PROMPT,
+        VIDEO_LABEL,
+        VIDEO_PATH,
+        PLAY_VOICE,
+        REMOVE_CHARACTER,
+    ];
+    const AUDIO_PAGE_CONTROLS: &[i32] = &[
+        VOLUME_LABEL,
+        VOLUME,
+        OUTPUT_LABEL,
+        OUTPUT,
+        REFRESH,
+        PREVIEW,
+        PREVIEW_HINT,
+    ];
+    const QUIET_HOURS_PAGE_CONTROLS: &[i32] = &[
+        QUIET,
+        QUIET_HINT,
+        SCHEDULE,
+        START_LABEL,
+        START,
+        END_LABEL,
+        END,
+        TIME_HINT,
+    ];
+    const SPEECH_SERVICE_PAGE_CONTROLS: &[i32] = &[
+        MODEL_LABEL,
+        MODEL,
+        API_KEY_LABEL,
+        API_KEY,
+        API_KEY_HINT,
+    ];
+
+    static PAGE_SPECS: [PageSpec; 4] = [
+        PageSpec {
+            page: Page::Characters,
+            label: "Characters",
+            hint: "Edit animation and voice details, or create a new character.",
+            controls: CHARACTER_PAGE_CONTROLS,
+        },
+        PageSpec {
+            page: Page::Audio,
+            label: "Audio",
+            hint: "Set announcement volume, output device, and audio preview.",
+            controls: AUDIO_PAGE_CONTROLS,
+        },
+        PageSpec {
+            page: Page::QuietHours,
+            label: "Quiet hours",
+            hint: "Mute speech or schedule quiet hours in local time.",
+            controls: QUIET_HOURS_PAGE_CONTROLS,
+        },
+        PageSpec {
+            page: Page::SpeechService,
+            label: "Speech service",
+            hint: "Choose a model and optionally configure ElevenLabs.",
+            controls: SPEECH_SERVICE_PAGE_CONTROLS,
+        },
+    ];
+
+    fn page_spec(page: Page) -> &'static PageSpec {
+        PAGE_SPECS.iter().find(|spec| spec.page == page).unwrap()
+    }
+
+    fn page_from_index(index: isize) -> Option<Page> {
+        if index < 0 { return None; }
+        PAGE_SPECS.get(index as usize).map(|spec| spec.page)
+    }
 
     #[repr(C)]
     struct DesktopRequest {
@@ -71,6 +171,51 @@ mod native {
         id: String,
         receiver: Receiver<Result<String, String>>,
         cancelled: Arc<AtomicBool>,
+    }
+
+    struct UiResources {
+        body: HFONT,
+        heading: HFONT,
+        muted: HFONT,
+        main_brush: HBRUSH,
+        sidebar_brush: HBRUSH,
+    }
+
+    impl UiResources {
+        unsafe fn new() -> Result<Self, String> {
+            let face = wide("Segoe UI");
+            let mut ui = Self {
+                body: std::ptr::null_mut(),
+                heading: std::ptr::null_mut(),
+                muted: std::ptr::null_mut(),
+                main_brush: std::ptr::null_mut(),
+                sidebar_brush: std::ptr::null_mut(),
+            };
+            let font = |height, weight| {
+                let handle = CreateFontW(height, 0, 0, 0, weight, 0, 0, 0, 0, 0, 0, 0, 0, face.as_ptr());
+                if handle.is_null() { Err(std::io::Error::last_os_error().to_string()) } else { Ok(handle) }
+            };
+            ui.body = font(-16, 400)?;
+            ui.heading = font(-26, 600)?;
+            ui.muted = font(-15, 400)?;
+            ui.main_brush = CreateSolidBrush(color(255, 255, 255));
+            if ui.main_brush.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
+            ui.sidebar_brush = CreateSolidBrush(color(246, 248, 251));
+            if ui.sidebar_brush.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
+            Ok(ui)
+        }
+    }
+
+    impl Drop for UiResources {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.body.is_null() { DeleteObject(self.body as HGDIOBJ); }
+                if !self.heading.is_null() { DeleteObject(self.heading as HGDIOBJ); }
+                if !self.muted.is_null() { DeleteObject(self.muted as HGDIOBJ); }
+                if !self.main_brush.is_null() { DeleteObject(self.main_brush as HGDIOBJ); }
+                if !self.sidebar_brush.is_null() { DeleteObject(self.sidebar_brush as HGDIOBJ); }
+            }
+        }
     }
 
     struct Form {
@@ -88,9 +233,15 @@ mod native {
         removed_characters: std::collections::BTreeSet<String>,
         voice_job: Option<VoiceJob>,
         updating: bool,
+        active_page: Page,
+        ui: UiResources,
     }
 
     fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
+
+    fn color(red: u8, green: u8, blue: u8) -> u32 {
+        red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
+    }
 
     fn volume_label(volume: u16) -> String {
         if volume == 0 { "Announcer volume: muted".into() }
@@ -125,9 +276,25 @@ mod native {
         Ok(())
     }
 
-    fn empty_draft() -> Character {
-        Character::default()
+    unsafe fn set_font(window: HWND, id: i32, font: HFONT) {
+        let control = GetDlgItem(window, id);
+        if !control.is_null() { SendMessageW(control, WM_SETFONT, font as usize, 1); }
     }
+
+    unsafe fn apply_fonts(window: HWND, form: &Form) {
+        set_font(window, SIDEBAR, form.ui.body);
+        for spec in &PAGE_SPECS {
+            for id in spec.controls { set_font(window, *id, form.ui.body); }
+        }
+        for id in [APPLY, CLOSE, STATUS] { set_font(window, id, form.ui.body); }
+        set_font(window, PAGE_TITLE, form.ui.heading);
+        set_font(window, PAGE_HINT, form.ui.muted);
+        for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, CHARACTER_EMPTY, STATUS] {
+            set_font(window, id, form.ui.muted);
+        }
+    }
+
+    fn empty_draft() -> Character { Character::default() }
 
     unsafe fn draft_for<'a>(form: &'a mut Form, id: &str) -> &'a mut Character {
         if !form.drafts.contains_key(id) {
@@ -168,6 +335,21 @@ mod native {
         }
     }
 
+    unsafe fn refresh_page_visibility(window: HWND, form: &Form) {
+        let spec = page_spec(form.active_page);
+        label(window, PAGE_TITLE, spec.label);
+        label(window, PAGE_HINT, spec.hint);
+        for page in &PAGE_SPECS {
+            let visibility = if page.page == form.active_page { SW_SHOW } else { SW_HIDE };
+            for id in page.controls { ShowWindow(GetDlgItem(window, *id), visibility); }
+        }
+        let show_editor = form.active_page == Page::Characters && form.active_draft.is_some();
+        for id in [NAME_LABEL, CHARACTER_NAME, PROMPT_LABEL, VOICE_PROMPT, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER] {
+            ShowWindow(GetDlgItem(window, id), if show_editor { SW_SHOW } else { SW_HIDE });
+        }
+        ShowWindow(GetDlgItem(window, CHARACTER_EMPTY), if form.active_page == Page::Characters && !show_editor { SW_SHOW } else { SW_HIDE });
+    }
+
     unsafe fn set_draft_controls(window: HWND, form: &mut Form) {
         form.updating = true;
         if let Some(id) = form.active_draft.clone() {
@@ -180,7 +362,7 @@ mod native {
             for id in [CHARACTER_NAME, VOICE_PROMPT, VIDEO_PATH] { label(window, id, ""); }
         }
         form.updating = false;
-        show_page(window, SendMessageW(GetDlgItem(window, TAB), TCM_GETCURSEL, 0, 0) == 1);
+        refresh_page_visibility(window, form);
     }
 
     unsafe fn refresh_characters(window: HWND, form: &mut Form) {
@@ -208,7 +390,6 @@ mod native {
         form.selected_character = form.active_draft.clone();
         EnableWindow(list, (!form.character_ids.is_empty() && form.voice_job.is_none()) as i32);
         set_draft_controls(window, form);
-        show_page(window, SendMessageW(GetDlgItem(window, TAB), TCM_GETCURSEL, 0, 0) == 1);
     }
 
     unsafe fn new_character_id(form: &Form) -> String {
@@ -222,14 +403,34 @@ mod native {
     }
 
     unsafe fn select_character(window: HWND, form: &mut Form, index: usize) {
-        stop_previews(window, form);
         capture_current_draft(window, form);
+        stop_previews(window, form);
         let Some(id) = form.character_ids.get(index).cloned() else { return; };
         form.active_draft = Some(id.clone());
         form.selected_character = Some(id.clone());
         SendMessageW(GetDlgItem(window, CHARACTER_LIST), LB_SETCURSEL, index, 0);
         let _ = draft_for(form, &id);
         set_draft_controls(window, form);
+    }
+
+    unsafe fn select_page(window: HWND, form: &mut Form, page: Page) {
+        if form.active_page != page {
+            capture_current_draft(window, form);
+            stop_previews(window, form);
+            form.active_page = page;
+        }
+        SendMessageW(GetDlgItem(window, SIDEBAR), LB_SETCURSEL, page.index(), 0);
+        refresh_page_visibility(window, form);
+    }
+
+    unsafe fn populate_pages(window: HWND, form: &Form) {
+        let sidebar = GetDlgItem(window, SIDEBAR);
+        SendMessageW(sidebar, LB_RESETCONTENT, 0, 0);
+        for spec in &PAGE_SPECS {
+            SendMessageW(sidebar, LB_ADDSTRING, 0, wide(spec.label).as_ptr() as isize);
+        }
+        SendMessageW(sidebar, LB_SETITEMHEIGHT, 0, 38);
+        SendMessageW(sidebar, LB_SETCURSEL, form.active_page.index(), 0);
     }
 
     unsafe fn populate_outputs(window: HWND, form: &mut Form, selected: Option<&str>) {
@@ -253,8 +454,11 @@ mod native {
 
     unsafe fn selected_output(window: HWND, form: &Form) -> Option<String> {
         let index = SendMessageW(GetDlgItem(window, OUTPUT), CB_GETCURSEL, 0, 0);
-        if index <= 0 { None }
-        else { form.devices.get(index as usize - 1).map(|device| device.id.clone()).or_else(|| form.missing.clone()) }
+        if index <= 0 {
+            None
+        } else {
+            form.devices.get(index as usize - 1).map(|device| device.id.clone()).or_else(|| form.missing.clone())
+        }
     }
 
     unsafe fn read_speech_settings(window: HWND, form: &Form) -> Settings {
@@ -430,71 +634,64 @@ mod native {
     }
 
     unsafe fn layout(window: HWND, width: i32, height: i32) {
-        let width = width.max(680);
-        let height = height.max(660);
+        if width <= 0 || height <= 0 { return; }
+        let sidebar_width = 220;
+        let main_left = sidebar_width + 32;
+        let main_right = width - 32;
+        let main_width = main_right - main_left;
+        let footer_y = height - 112;
+        if main_width <= 0 || footer_y <= 120 { return; }
         let move_control = |id: i32, x: i32, y: i32, w: i32, h: i32| {
             SetWindowPos(GetDlgItem(window, id), std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         };
-        move_control(TAB, 12, 12, width - 24, height - 64);
-        move_control(QUIET, 28, 54, width - 56, 28);
-        move_control(QUIET_HINT, 28, 84, width - 56, 24);
-        move_control(SCHEDULE, 28, 120, width - 56, 28);
-        move_control(START_LABEL, 28, 156, 45, 24);
-        move_control(START, 76, 152, 78, 28);
-        move_control(END_LABEL, 168, 156, 24, 24);
-        move_control(END, 198, 152, 78, 28);
-        move_control(TIME_HINT, 290, 156, width - 318, 24);
-        move_control(VOLUME_LABEL, 28, 202, width - 56, 24);
-        move_control(VOLUME, 28, 230, width - 56, 40);
-        move_control(OUTPUT_LABEL, 28, 278, width - 56, 24);
-        move_control(OUTPUT, 28, 306, width - 154, 220);
-        move_control(REFRESH, width - 118, 306, 90, 28);
-        move_control(MODEL_LABEL, 28, 350, 110, 24);
-        move_control(MODEL, 144, 346, width - 172, 180);
-        move_control(API_KEY_LABEL, 28, 392, 110, 24);
-        move_control(API_KEY, 144, 388, width - 172, 28);
-        move_control(API_KEY_HINT, 28, 426, width - 56, 42);
-        move_control(PREVIEW, 28, 484, 140, 30);
-        move_control(PREVIEW_HINT, 180, 486, width - 208, 36);
-        move_control(CHARACTER_LIST, 28, 54, 196, height - 204);
-        move_control(NEW_CHARACTER, 28, height - 138, 196, 30);
-        move_control(NAME_LABEL, 248, 54, width - 276, 24);
-        move_control(CHARACTER_NAME, 248, 82, width - 276, 28);
-        move_control(VIDEO_LABEL, 248, 130, width - 276, 24);
-        move_control(VIDEO_PATH, 248, 158, width - 276, 30);
-        move_control(PROMPT_LABEL, 248, 210, width - 276, 24);
-        move_control(VOICE_PROMPT, 248, 238, width - 276, height - 438);
-        move_control(PLAY_VOICE, 248, height - 174, 160, 32);
-        move_control(REMOVE_CHARACTER, width - 118, height - 174, 90, 32);
-        move_control(STATUS, 28, height - 94, width - 56, 36);
-        move_control(APPLY, width - 228, height - 48, 100, 30);
-        move_control(CLOSE, width - 116, height - 48, 100, 30);
-    }
+        move_control(SIDEBAR, 24, 30, sidebar_width - 24, PAGE_SPECS.len() as i32 * 38);
+        move_control(PAGE_TITLE, main_left, 22, main_width, 42);
+        move_control(PAGE_HINT, main_left, 70, main_width, 32);
 
-    unsafe fn show_page(window: HWND, characters: bool) {
-        for id in [QUIET, QUIET_HINT, SCHEDULE, START_LABEL, START, END_LABEL, END, TIME_HINT, VOLUME_LABEL, VOLUME, OUTPUT_LABEL, OUTPUT, REFRESH, MODEL, MODEL_LABEL, API_KEY, API_KEY_LABEL, API_KEY_HINT, PREVIEW, PREVIEW_HINT] {
-            ShowWindow(GetDlgItem(window, id), if characters { SW_HIDE } else { SW_SHOW });
-        }
-        for id in [CHARACTER_LIST, NEW_CHARACTER] {
-            ShowWindow(GetDlgItem(window, id), if characters { SW_SHOW } else { SW_HIDE });
-        }
-        let form = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Form;
-        let show_editor = characters && !form.is_null() && (*form).active_draft.is_some();
-        for id in [NAME_LABEL, CHARACTER_NAME, PROMPT_LABEL, VOICE_PROMPT, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER] {
-            ShowWindow(GetDlgItem(window, id), if show_editor { SW_SHOW } else { SW_HIDE });
-        }
-    }
+        let character_list_y = 126;
+        let character_list_height = footer_y - character_list_y - 48;
+        let character_editor_x = main_left + 250;
+        let character_editor_width = main_right - character_editor_x;
+        move_control(CHARACTER_LIST, main_left, character_list_y, 220, character_list_height);
+        move_control(NEW_CHARACTER, main_left, character_list_y + character_list_height + 12, 220, 34);
+        move_control(CHARACTER_EMPTY, character_editor_x, character_list_y + 26, character_editor_width, 110);
+        move_control(NAME_LABEL, character_editor_x, character_list_y, character_editor_width, 24);
+        move_control(CHARACTER_NAME, character_editor_x, character_list_y + 28, character_editor_width, 34);
+        move_control(VIDEO_LABEL, character_editor_x, character_list_y + 78, character_editor_width, 24);
+        move_control(VIDEO_PATH, character_editor_x, character_list_y + 106, character_editor_width, 36);
+        move_control(PROMPT_LABEL, character_editor_x, character_list_y + 158, character_editor_width, 24);
+        let character_actions_y = footer_y - 42;
+        let prompt_height = character_actions_y - (character_list_y + 186) - 16;
+        move_control(VOICE_PROMPT, character_editor_x, character_list_y + 186, character_editor_width, prompt_height);
+        move_control(PLAY_VOICE, character_editor_x, character_actions_y, 160, 34);
+        move_control(REMOVE_CHARACTER, main_right - 92, character_actions_y, 92, 34);
 
-    unsafe fn add_tabs(window: HWND) -> Result<(), String> {
-        let tab = GetDlgItem(window, TAB);
-        for title in ["General", "Characters"] {
-            let mut title = wide(title);
-            let item = TCITEMW { mask: TCIF_TEXT, pszText: title.as_mut_ptr(), ..TCITEMW::default() };
-            if SendMessageW(tab, TCM_INSERTITEMW, SendMessageW(tab, TCM_GETITEMCOUNT, 0, 0) as usize, &item as *const _ as isize) < 0 {
-                return Err("Could not create settings tabs.".into());
-            }
-        }
-        Ok(())
+        move_control(VOLUME_LABEL, main_left, 128, main_width, 24);
+        move_control(VOLUME, main_left, 158, main_width, 42);
+        move_control(OUTPUT_LABEL, main_left, 220, main_width, 24);
+        move_control(OUTPUT, main_left, 250, main_width - 104, 220);
+        move_control(REFRESH, main_right - 90, 250, 90, 34);
+        move_control(PREVIEW, main_left, 324, 150, 34);
+        move_control(PREVIEW_HINT, main_left + 174, 326, main_width - 174, 48);
+
+        move_control(QUIET, main_left, 128, main_width, 32);
+        move_control(QUIET_HINT, main_left, 168, main_width, 28);
+        move_control(SCHEDULE, main_left, 214, main_width, 32);
+        move_control(START_LABEL, main_left, 260, 48, 24);
+        move_control(START, main_left + 52, 256, 84, 34);
+        move_control(END_LABEL, main_left + 158, 260, 24, 24);
+        move_control(END, main_left + 190, 256, 84, 34);
+        move_control(TIME_HINT, main_left + 304, 260, main_width - 304, 24);
+
+        move_control(MODEL_LABEL, main_left, 128, main_width, 24);
+        move_control(MODEL, main_left, 158, main_width, 220);
+        move_control(API_KEY_LABEL, main_left, 224, main_width, 24);
+        move_control(API_KEY, main_left, 252, main_width, 34);
+        move_control(API_KEY_HINT, main_left, 294, main_width, 54);
+
+        move_control(STATUS, 24, height - 96, width - 268, 80);
+        move_control(APPLY, width - 228, height - 48, 100, 32);
+        move_control(CLOSE, width - 116, height - 48, 100, 32);
     }
 
     unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -515,20 +712,54 @@ mod native {
             }
             WM_GETMINMAXINFO => {
                 let info = &mut *(lparam as *mut MINMAXINFO);
-                let mut bounds = RECT { left: 0, top: 0, right: 680, bottom: 660 };
+                let mut bounds = RECT { left: 0, top: 0, right: 860, bottom: 640 };
                 AdjustWindowRectEx(&mut bounds, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, 0, WS_EX_CONTROLPARENT);
                 info.ptMinTrackSize.x = bounds.right - bounds.left;
                 info.ptMinTrackSize.y = bounds.bottom - bounds.top;
                 0
             }
-            WM_NOTIFY if !form.is_null() && lparam != 0 => {
-                let header = &*(lparam as *const NMHDR);
-                if header.idFrom == TAB as usize && header.code == TCN_SELCHANGE {
-                    stop_previews(window, &mut *form);
-                    let characters = SendMessageW(GetDlgItem(window, TAB), TCM_GETCURSEL, 0, 0) == 1;
-                    show_page(window, characters);
+            WM_CTLCOLORSTATIC if !form.is_null() => {
+                let dc = wparam as HDC;
+                let control = lparam as HWND;
+                SetBkMode(dc, 1);
+                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
+                    SetTextColor(dc, color(92, 101, 112));
+                } else {
+                    SetTextColor(dc, color(32, 37, 43));
                 }
-                0
+                (*form).ui.main_brush as isize
+            }
+            WM_CTLCOLORLISTBOX if !form.is_null() => {
+                let dc = wparam as HDC;
+                let control = lparam as HWND;
+                SetBkMode(dc, 1);
+                if GetDlgCtrlID(control) == SIDEBAR {
+                    SetBkColor(dc, color(246, 248, 251));
+                    (*form).ui.sidebar_brush as isize
+                } else {
+                    SetBkColor(dc, color(255, 255, 255));
+                    (*form).ui.main_brush as isize
+                }
+            }
+            WM_DRAWITEM if !form.is_null() && wparam == SIDEBAR as usize && lparam != 0 => {
+                let item = &*(lparam as *const DRAWITEMSTRUCT);
+                let selected = item.itemState & ODS_SELECTED != 0;
+                let background = if selected { color(229, 239, 252) } else { color(246, 248, 251) };
+                SetDCBrushColor(item.hDC, background);
+                FillRect(item.hDC, &item.rcItem, GetStockObject(DC_BRUSH) as HBRUSH);
+                if let Some(spec) = PAGE_SPECS.get(item.itemID as usize) {
+                    SetBkMode(item.hDC, 1);
+                    SetTextColor(item.hDC, if selected { color(25, 80, 160) } else { color(32, 37, 43) });
+                    let previous = SelectObject(item.hDC, (*form).ui.body as HGDIOBJ);
+                    let mut bounds = item.rcItem;
+                    bounds.left += 10;
+                    bounds.right -= 10;
+                    let title = wide(spec.label);
+                    DrawTextW(item.hDC, title.as_ptr(), title.len() as i32 - 1, &mut bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    SelectObject(item.hDC, previous);
+                    if item.itemState & ODS_FOCUS != 0 { DrawFocusRect(item.hDC, &item.rcItem); }
+                }
+                1
             }
             WM_COMMAND if !form.is_null() => {
                 let id = (wparam & 0xffff) as i32;
@@ -543,6 +774,10 @@ mod native {
                         Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Civilized Agent settings").as_ptr(), MB_OK | MB_ICONERROR); }
                     },
                     CLOSE => { DestroyWindow(window); }
+                    SIDEBAR if code == LBN_SELCHANGE => {
+                        let index = SendMessageW(GetDlgItem(window, SIDEBAR), LB_GETCURSEL, 0, 0);
+                        if let Some(page) = page_from_index(index) { select_page(window, &mut *form, page); }
+                    }
                     REFRESH => {
                         let selected = selected_output(window, &*form);
                         populate_outputs(window, &mut *form, selected.as_deref());
@@ -578,8 +813,8 @@ mod native {
                         if index >= 0 { select_character(window, &mut *form, index as usize); }
                     }
                     NEW_CHARACTER => {
-                        stop_previews(window, &mut *form);
                         capture_current_draft(window, &mut *form);
+                        stop_previews(window, &mut *form);
                         let id = new_character_id(&*form);
                         (*form).drafts.insert(id.clone(), empty_draft());
                         (*form).selected_character = Some(id.clone());
@@ -687,6 +922,8 @@ mod native {
             voice_job: None,
             removed_characters: std::collections::BTreeSet::new(),
             updating: false,
+            active_page: Page::Audio,
+            ui: unsafe { UiResources::new()? },
         });
         unsafe {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -708,59 +945,75 @@ mod native {
                 SetForegroundWindow(existing);
                 return Ok(());
             }
-            InitCommonControlsEx(&INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES | ICC_TAB_CLASSES });
+            InitCommonControlsEx(&INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES });
             let instance = GetModuleHandleW(std::ptr::null());
             let window_class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class.as_ptr(),
-                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: (COLOR_BTNFACE + 1) as usize as HBRUSH, ..WNDCLASSW::default() };
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: (COLOR_WINDOW + 1) as usize as HBRUSH, ..WNDCLASSW::default() };
             if RegisterClassW(&window_class) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
             let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Civilized Agent settings").as_ptr(),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 720, 700,
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 960, 720,
                 std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null());
             if window.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
             SetWindowLongPtrW(window, GWLP_USERDATA, &mut *form as *mut Form as isize);
-            control(window, "SysTabControl32", "", TAB, WS_TABSTOP, (12, 12, 696, 604))?;
-            add_tabs(window)?;
-            control(window, "BUTTON", "Quiet mode (mute speech and static)", QUIET, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (28, 54, 664, 28))?;
-            control(window, "STATIC", "Announcements still appear while quiet mode is on.", QUIET_HINT, 0, (28, 84, 664, 24))?;
-            control(window, "BUTTON", "Quiet mode on a daily schedule", SCHEDULE, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (28, 120, 664, 28))?;
-            control(window, "STATIC", "From", START_LABEL, 0, (28, 156, 45, 24))?;
-            control(window, "EDIT", &format_time(form.settings.quiet_start), START, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (76, 152, 78, 28))?;
-            control(window, "STATIC", "to", END_LABEL, 0, (168, 156, 24, 24))?;
-            control(window, "EDIT", &format_time(form.settings.quiet_end), END, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (198, 152, 78, 28))?;
-            control(window, "STATIC", "Local time, HH:MM", TIME_HINT, 0, (290, 156, 300, 24))?;
-            control(window, "STATIC", &volume_label(form.settings.volume), VOLUME_LABEL, 0, (28, 202, 664, 24))?;
-            control(window, "msctls_trackbar32", "Announcer volume", VOLUME, WS_TABSTOP | TBS_AUTOTICKS, (28, 230, 664, 40))?;
-            SendMessageW(GetDlgItem(window, VOLUME), TBM_SETRANGEMAX, 0, 100);
-            SendMessageW(GetDlgItem(window, VOLUME), TBM_SETPOS, 1, form.settings.volume as isize);
-            control(window, "STATIC", "Audio output (speech and static)", OUTPUT_LABEL, 0, (28, 278, 664, 24))?;
-            control(window, "COMBOBOX", "Audio output", OUTPUT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (28, 306, 566, 220))?;
-            control(window, "BUTTON", "Refresh", REFRESH, WS_TABSTOP, (602, 306, 90, 28))?;
-            control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (28, 350, 110, 24))?;
-            control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (144, 346, 548, 180))?;
-            for model in SpeechModel::ALL {
-                SendMessageW(GetDlgItem(window, MODEL), CB_ADDSTRING, 0, wide(model.label()).as_ptr() as isize);
+            let creation = (|| -> Result<(), String> {
+                control(window, "LISTBOX", "Settings", SIDEBAR, WS_TABSTOP | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_OWNERDRAWFIXED as u32 | LBS_NOINTEGRALHEIGHT as u32, (24, 30, 196, 152))?;
+                control(window, "STATIC", "", PAGE_TITLE, 0, (252, 22, 676, 42))?;
+                control(window, "STATIC", "", PAGE_HINT, 0, (252, 70, 676, 32))?;
+
+                control(window, "BUTTON", "Quiet mode (mute speech and static)", QUIET, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (252, 128, 676, 32))?;
+                control(window, "STATIC", "Announcements still appear while quiet mode is on.", QUIET_HINT, 0, (252, 168, 676, 28))?;
+                control(window, "BUTTON", "Quiet mode on a daily schedule", SCHEDULE, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (252, 214, 676, 32))?;
+                control(window, "STATIC", "From", START_LABEL, 0, (252, 260, 48, 24))?;
+                control(window, "EDIT", &format_time(form.settings.quiet_start), START, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (304, 256, 84, 34))?;
+                control(window, "STATIC", "to", END_LABEL, 0, (410, 260, 24, 24))?;
+                control(window, "EDIT", &format_time(form.settings.quiet_end), END, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (442, 256, 84, 34))?;
+                control(window, "STATIC", "Local time, HH:MM", TIME_HINT, 0, (556, 260, 300, 24))?;
+
+                control(window, "STATIC", &volume_label(form.settings.volume), VOLUME_LABEL, 0, (252, 128, 676, 24))?;
+                control(window, "msctls_trackbar32", "Announcer volume", VOLUME, WS_TABSTOP | TBS_NOTICKS, (252, 158, 676, 42))?;
+                SendMessageW(GetDlgItem(window, VOLUME), TBM_SETRANGEMAX, 0, 100);
+                SendMessageW(GetDlgItem(window, VOLUME), TBM_SETPOS, 1, form.settings.volume as isize);
+                control(window, "STATIC", "Audio output (speech and static)", OUTPUT_LABEL, 0, (252, 220, 676, 24))?;
+                control(window, "COMBOBOX", "Audio output", OUTPUT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 250, 572, 220))?;
+                control(window, "BUTTON", "Refresh", REFRESH, WS_TABSTOP, (838, 250, 90, 34))?;
+                control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (252, 324, 150, 34))?;
+                control(window, "STATIC", "Previews your selected settings without saving.", PREVIEW_HINT, 0, (426, 326, 502, 48))?;
+
+                control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (252, 128, 676, 24))?;
+                control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 158, 676, 220))?;
+                for model in SpeechModel::ALL {
+                    SendMessageW(GetDlgItem(window, MODEL), CB_ADDSTRING, 0, wide(model.label()).as_ptr() as isize);
+                }
+                let selected = SpeechModel::ALL.iter().position(|model| *model == form.settings.speech_model).unwrap_or(0);
+                SendMessageW(GetDlgItem(window, MODEL), CB_SETCURSEL, selected, 0);
+                control(window, "STATIC", "ElevenLabs key", API_KEY_LABEL, 0, (252, 224, 676, 24))?;
+                control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (252, 252, 676, 34))?;
+                SendMessageW(GetDlgItem(window, API_KEY), EM_SETLIMITTEXT, 4096, 0);
+                control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (252, 294, 676, 54))?;
+
+                control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
+                control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
+                control(window, "STATIC", "Select a character or choose New to create one.", CHARACTER_EMPTY, 0, (502, 152, 426, 110))?;
+                control(window, "STATIC", "Name", NAME_LABEL, 0, (502, 126, 426, 24))?;
+                control(window, "EDIT", "", CHARACTER_NAME, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (502, 154, 426, 34))?;
+                control(window, "STATIC", "Video", VIDEO_LABEL, 0, (502, 204, 426, 24))?;
+                control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (502, 232, 426, 36))?;
+                control(window, "STATIC", "Voice description", PROMPT_LABEL, 0, (502, 284, 426, 24))?;
+                control(window, "EDIT", "", VOICE_PROMPT, WS_BORDER | WS_TABSTOP | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL, (502, 312, 426, 180))?;
+                control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (502, 518, 160, 34))?;
+                control(window, "BUTTON", "Delete", REMOVE_CHARACTER, WS_TABSTOP, (836, 518, 92, 34))?;
+
+                control(window, "EDIT", "Apply saves changes. Close discards unsaved edits.", STATUS, ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL | WS_TABSTOP, (24, 624, 692, 80))?;
+                control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (732, 672, 100, 32))?;
+                control(window, "BUTTON", "Close", CLOSE, WS_TABSTOP, (844, 672, 100, 32))?;
+                Ok(())
+            })();
+            if let Err(error) = creation {
+                DestroyWindow(window);
+                return Err(error);
             }
-            let selected = SpeechModel::ALL.iter().position(|model| *model == form.settings.speech_model).unwrap_or(0);
-            SendMessageW(GetDlgItem(window, MODEL), CB_SETCURSEL, selected, 0);
-            control(window, "STATIC", "ElevenLabs key", API_KEY_LABEL, 0, (28, 392, 110, 24))?;
-            control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (144, 388, 548, 28))?;
-            SendMessageW(GetDlgItem(window, API_KEY), EM_SETLIMITTEXT, 4096, 0);
-            control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (28, 426, 664, 42))?;
-            control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (28, 412, 140, 30))?;
-            control(window, "STATIC", "Previews your selected settings without saving.", PREVIEW_HINT, 0, (180, 414, 512, 36))?;
-            control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32, (28, 54, 196, 456))?;
-            control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (28, 522, 196, 30))?;
-            control(window, "STATIC", "Name", NAME_LABEL, 0, (28, 94, 110, 24))?;
-            control(window, "EDIT", "", CHARACTER_NAME, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (144, 90, 548, 28))?;
-            control(window, "STATIC", "Prompt", PROMPT_LABEL, 0, (28, 132, 110, 24))?;
-            control(window, "EDIT", "", VOICE_PROMPT, WS_BORDER | WS_TABSTOP | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL, (144, 128, 548, 74))?;
-            control(window, "STATIC", "Video", VIDEO_LABEL, 0, (248, 130, 400, 24))?;
-            control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (248, 158, 400, 30))?;
-            control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (248, 486, 160, 32))?;
-            control(window, "BUTTON", "Delete", REMOVE_CHARACTER, WS_TABSTOP, (574, 486, 90, 32))?;
-            control(window, "STATIC", "Uses the system default if your selected device is unavailable.", STATUS, 0, (28, 586, 664, 36))?;
-            control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (492, 632, 100, 30))?;
-            control(window, "BUTTON", "Close", CLOSE, WS_TABSTOP, (604, 632, 100, 30))?;
+            apply_fonts(window, &form);
+            populate_pages(window, &form);
             set_checked(window, QUIET, form.settings.quiet_mode);
             set_checked(window, SCHEDULE, form.settings.schedule_enabled);
             EnableWindow(GetDlgItem(window, START), form.settings.schedule_enabled as i32);
@@ -768,7 +1021,7 @@ mod native {
             let selected = form.settings.output_device.clone();
             populate_outputs(window, &mut form, selected.as_deref());
             refresh_characters(window, &mut form);
-            show_page(window, false);
+            refresh_page_visibility(window, &form);
             let mut client = RECT::default();
             GetClientRect(window, &mut client);
             layout(window, client.right, client.bottom);

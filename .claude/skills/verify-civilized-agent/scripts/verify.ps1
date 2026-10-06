@@ -45,8 +45,17 @@ function Read-Control([int]$Id) {
     [CivilizedVerify]::ReadText((Control $Id), 0xD, [IntPtr]512, $buffer) | Out-Null
     return $buffer.ToString()
 }
+function Select-Page([int]$Index) {
+    Send-Control 200 0x100 0x24 | Out-Null
+    Send-Control 200 0x101 0x24 | Out-Null
+    for ($step = 0; $step -lt $Index; $step++) {
+        Send-Control 200 0x100 0x28 | Out-Null
+        Send-Control 200 0x101 0x28 | Out-Null
+    }
+    if ((Send-Control 200 0x188) -ne $Index) { throw 'The settings sidebar did not select the requested page' }
+}
 function Snapshot([string]$Name) {
-    $state = [ordered]@{ title = $process.MainWindowTitle; quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); gpu = (Send-Control 113 0xF0) }
+    $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); model = (Send-Control 113 0x147) }
     $state | ConvertTo-Json | Set-Content (Join-Path $evidencePath "$Name.json") -Encoding utf8NoBOM
     return $state
 }
@@ -126,24 +135,29 @@ try {
         }
         if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Preview saved unapplied settings' }
     } else {
-        Write-Output 'Click Quiet mode and daily schedule; enter 22:30 and 08:15; choose 35% and CPU; Apply.'
+        Write-Output 'Set quiet hours to 22:30 and 08:15; choose 35% volume and ElevenLabs v4; Apply.'
+        Select-Page 2
         Send-Control 101 0xF5 | Out-Null
         Send-Control 102 0xF5 | Out-Null
         Send-Control 102 0xF5 | Out-Null
         [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '22:30') | Out-Null
         [CivilizedVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '08:15') | Out-Null
+        Select-Page 1
         Send-Control 105 0x405 1 35 | Out-Null
-        Send-Control 113 0xF1 0 | Out-Null
+        Select-Page 3
+        Send-Control 113 0x14E 1 | Out-Null
+        [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](113 + 65536), (Control 113)) | Out-Null
         Snapshot 'controls-draft' | Out-Null
         Send-Control 107 0xF5 | Out-Null
         $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
         if ((Read-Control 109) -ne 'Saved. Changes apply to the next announcement.') { throw 'Apply did not report saved state' }
-        if (-not $settings.quietMode -or -not $settings.scheduleEnabled -or $settings.quietStart -ne 1350 -or $settings.quietEnd -ne 495 -or $settings.volume -ne 35 -or $settings.useGpu -or $settings.voices.claude -ne 'Mark') { throw 'Applied settings did not persist' }
+        if (-not $settings.quietMode -or -not $settings.scheduleEnabled -or $settings.quietStart -ne 1350 -or $settings.quietEnd -ne 495 -or $settings.volume -ne 35 -or $settings.speechModel -ne 'eleven_v4' -or $settings.voices.claude -ne 'Mark') { throw 'Applied settings did not persist' }
     }
     Snapshot 'controls-after' | Out-Null
     Copy-Item $settingsPath (Join-Path $evidencePath 'settings-after.json')
     $applied = Get-Content $settingsPath -Raw
     Write-Output 'Change volume to 15% without Apply; Close; confirm disk unchanged.'
+    Select-Page 1
     Send-Control 105 0x405 1 15 | Out-Null
     Close-Settings
     if ((Get-Content $settingsPath -Raw) -ne $applied) { throw 'Close saved an unapplied edit' }
@@ -152,7 +166,14 @@ try {
     $reopened = Snapshot 'controls-reopened'
     $persisted = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if ($reopened.volume -ne $persisted.volume -or $reopened.quiet -ne [int]$persisted.quietMode -or $reopened.schedule -ne [int]$persisted.scheduleEnabled) { throw 'Saved state did not survive reopening' }
-    if (($Feature -eq 'Settings' -or $Feature -eq 'Quiet') -and ($reopened.start -ne '22:30' -or $reopened.end -ne '08:15' -or $reopened.gpu -ne 0)) { throw 'Saved schedule or CPU selection did not survive reopening' }
+    if ($Feature -eq 'Settings' -or $Feature -eq 'Quiet') {
+        Select-Page 2
+        Snapshot 'controls-reopened-quiet' | Out-Null
+        if ((Read-Control 103) -ne '22:30' -or (Read-Control 104) -ne '08:15') { throw 'Saved schedule did not survive reopening' }
+        Select-Page 3
+        Snapshot 'controls-reopened-speech' | Out-Null
+        if ((Send-Control 113 0x147) -ne 1) { throw 'Saved speech model did not survive reopening' }
+    }
     if ($Feature -eq 'Output' -and ($reopened.outputIndex -ne 0 -or $reopened.output -ne 'System default')) { throw 'Default output did not survive reopening' }
     Close-Settings
     @{ passed = $true; feature = $Feature; audible = [bool]$Audible; exitCode = $process.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'result.json')
