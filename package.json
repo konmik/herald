@@ -18,6 +18,8 @@
     "test:verification": "pwsh -NoProfile -File development_tools/test-verification-process.ps1",
     "test:hosts": "pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/hosts.ps1",
     "build:announcer": "node development_tools/build-announcer.mjs",
+    "build:bundle": "pwsh -NoProfile -File development_tools/build-bundle.ps1",
+    "test:bundle": "pwsh -NoProfile -File development_tools/test-bundle.ps1 && node --test development_tools/tests/registration.test.mjs",
     "deploy:plugins": "pwsh -NoProfile -File development_tools/deploy-plugins.ps1",
     "test:companion": "cargo test --locked --manifest-path native-announcer/Cargo.toml",
     "test:windows": "pwsh -NoProfile -File development_tools/verify-announcer.ps1",

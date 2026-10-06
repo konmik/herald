@@ -18,11 +18,42 @@ pub(crate) fn model_directory() -> Result<PathBuf, String> {
     Ok(std::env::current_exe().map_err(|error| error.to_string())?.parent().ok_or("Missing executable directory")?.join("../resources/tts/kitten-nano-en-v0_8-int8"))
 }
 
+#[cfg(windows)]
+fn native_model_directory(directory: &Path) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let absolute = directory.canonicalize().map_err(|error| format!("Could not resolve Kitten TTS directory: {error}"))?;
+    let wide: Vec<u16> = absolute.as_os_str().encode_wide().chain(Some(0)).collect();
+    let required = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 { return Err(format!("Could not resolve Kitten TTS short path: {}", std::io::Error::last_os_error())); }
+    let mut buffer = vec![0u16; required as usize];
+    let path = loop {
+        let length = unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 { return Err(format!("Could not resolve Kitten TTS short path: {}", std::io::Error::last_os_error())); }
+        if (length as usize) < buffer.len() {
+            break String::from_utf16(&buffer[..length as usize]).map_err(|_| "Kitten TTS short path contains invalid Unicode")?;
+        }
+        buffer.resize(length as usize, 0);
+    };
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
+    };
+    if !path.is_ascii() {
+        return Err("Kitten TTS requires an ASCII installation path because Windows short names are unavailable for this directory. Reinstall the Civilized Agent bundle in an ASCII path.".into());
+    }
+    Ok(path.into())
+}
+
 fn create_cpu_engine(directory: &Path, threads: i32) -> Result<OfflineTts, String> {
     if !(1..=32).contains(&threads) { return Err("TTS thread count must be between 1 and 32".into()); }
     for file in ["model.int8.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/en_dict"] {
-        if !directory.join(file).is_file() { return Err(format!("Missing Kitten TTS asset: {}. Run node development_tools/prepare-tts.mjs", directory.join(file).display())); }
+        if !directory.join(file).is_file() { return Err(format!("Missing Kitten TTS asset: {}. Reinstall the Civilized Agent bundle to restore speech assets.", directory.join(file).display())); }
     }
+    #[cfg(windows)]
+    let directory = native_model_directory(directory)?;
     let path = |name| Some(directory.join(name).to_string_lossy().into_owned());
     let config = OfflineTtsConfig {
         model: OfflineTtsModelConfig {
@@ -168,6 +199,40 @@ fn benchmark(output: &Path, threads: i32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_model_directory_reads_long_unicode_paths_and_resolves_parents() {
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
+        }
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Temp/opencode").join(format!("Civilized Agent TTS {} {unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let scratch = Scratch(root);
+        std::fs::write(scratch.0.join("tokens.txt"), b"ASCII bundled tokens").unwrap();
+        if scratch.0.to_str().unwrap().is_ascii() {
+            let normalized = native_model_directory(&scratch.0).unwrap();
+            assert_eq!(std::fs::read(normalized.join("tokens.txt")).unwrap(), b"ASCII bundled tokens");
+        }
+        let directory = scratch.0.join("installed versions Ω with spaces").join("long installed bundle version directory for native speech portability").join("another long directory matching the bundled release installation layout").join("native announcer resources with spaces").join("kitten model Ω directory");
+        std::fs::create_dir_all(directory.join("child")).unwrap();
+        std::fs::write(directory.join("tokens.txt"), b"bundled tokens").unwrap();
+        assert!(directory.as_os_str().len() > 260);
+        match native_model_directory(&directory.join("child/..")) {
+            Ok(normalized) => {
+                assert!(normalized.to_str().unwrap().is_ascii());
+                assert!(!normalized.to_str().unwrap().starts_with(r"\\?\"));
+                assert_eq!(std::fs::read(normalized.join("tokens.txt")).unwrap(), b"bundled tokens");
+                assert_eq!(native_model_directory(&directory.canonicalize().unwrap()).unwrap(), normalized);
+            }
+            Err(error) => {
+                assert!(error.contains("Windows short names are unavailable"), "{error}");
+                assert!(error.contains("Reinstall the Civilized Agent bundle in an ASCII path"), "{error}");
+            }
+        }
+    }
 
     #[test]
     #[ignore = "Measures native Kitten loading and synthesis with installed model assets"]

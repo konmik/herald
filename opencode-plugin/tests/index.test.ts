@@ -1,4 +1,7 @@
 import { afterAll, expect, mock, spyOn, test } from "bun:test"
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 type Event = { type: string; id: string; created: number; data: Record<string, unknown> }
 type Session = { id: string; parentID?: string; outcome?: string; location: { directory: string }; title: string }
@@ -25,6 +28,26 @@ const { default: plugin } = await import("../index")
 afterAll(() => {
   if (binary === undefined) delete process.env.CIVILIZED_AGENT_BINARY
   else process.env.CIVILIZED_AGENT_BINARY = binary
+})
+
+test("an installed OpenCode package ignores a checkout executable override", async () => {
+  const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
+  mkdirSync(temporary, { recursive: true })
+  const directory = mkdtempSync(join(temporary, "installed-opencode-"))
+  const previousExternal = process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+  try {
+    delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+    mkdirSync(join(directory, "opencode-plugin"))
+    const source = fileURLToPath(new URL("..", import.meta.url))
+    for (const name of readdirSync(source).filter(name => name.endsWith(".ts"))) copyFileSync(join(source, name), join(directory, "opencode-plugin", name))
+    writeFileSync(join(directory, "bundle-manifest.json"), "{}")
+    const { default: installed } = await import(pathToFileURL(join(directory, "opencode-plugin/index.ts")).href)
+    await expect(installed.setup({})).rejects.toThrow("Reinstall the application bundle")
+  } finally {
+    if (previousExternal === undefined) delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+    else process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = previousExternal
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 async function fixture(stored?: unknown, minimumSeconds = 0) {

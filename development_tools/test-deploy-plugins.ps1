@@ -30,7 +30,7 @@ try {
     Deploy-ClaudeFiles $source $cache $profile $shared
     Assert-True ((Get-Content "$cache/hooks/register.ts") -eq 'new hooks') 'Updated hooks were not deployed'
     Assert-True (-not (Test-Path "$cache/bin/obsolete.exe")) 'Obsolete output survived deployment'
-    Assert-True ((Get-Item "$cache/native-announcer").LinkType -eq 'Junction') 'Shared announcer junction is missing'
+    Assert-True (-not (Get-Item "$cache/native-announcer").LinkType) 'Runtime must be a physical copy'
     Assert-True ((Get-Content "$cache/native-announcer/resources/keep.txt") -eq 'shared asset') 'Shared resources are not accessible'
     Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Staging or backup output survived deployment'
 
@@ -65,16 +65,11 @@ try {
     $script:pluginEnabled = $false
     Enable-ClaudePlugin
     Assert-True ($script:enableCalls -eq 1) 'Deployment did not enable a disabled plugin'
-    $programs = Join-Path $temporary 'programs'
-    $binary = Join-Path $shared 'announcer.exe'
+    $programs = Join-Path $temporary 'programs Ω with spaces'
+    $binary = Join-Path $shared 'announcer Ω.exe'
     Install-SettingsShortcut $binary $programs
-    $shell = New-Object -ComObject WScript.Shell
-    try {
-        $shortcut = $shell.CreateShortcut((Join-Path $programs 'Civilized Agent settings.lnk'))
-        Assert-True ($shortcut.TargetPath -eq $binary -and $shortcut.Arguments -eq '--settings') 'Settings shortcut does not launch the settings app'
-    } finally {
-        [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
-    }
+    $shortcut = Read-NativeShortcut (Join-Path $programs 'Civilized Agent settings.lnk')
+    Assert-True ($shortcut.TargetPath -ceq $binary -and $shortcut.Arguments -ceq '--settings') 'Settings shortcut does not preserve the Unicode settings app path'
     Write-Output '8 deployment checks passed.'
 } finally {
     $junction = Join-Path $temporary 'profile/plugins/cache/civilized-agent-local/civilized-agent/0.3.0/native-announcer'

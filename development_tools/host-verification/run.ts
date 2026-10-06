@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto"
 import { OpenCode } from "@opencode/client"
 import { Service } from "@opencode/client/service"
 
-const [host, scenario, model, scratch, evidence, root, claude] = process.argv.slice(2)
+const [host, scenario, model, scratch, evidence, root, claude, app = root, claudePlugin] = process.argv.slice(2)
 if (!host || !scenario || !scratch || !evidence || !root) throw new Error("Missing host verification arguments")
 const proof = join(evidence, "host-proof.jsonl")
 const marker = process.env.CIVILIZED_AGENT_HOST_MARKER!
@@ -133,7 +133,7 @@ try {
     const sessionID = randomUUID()
     const args = ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-hook-events", "--session-id", sessionID,
       "--setting-sources", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--permission-mode", "dontAsk", "--allowedTools", "Bash,PowerShell,Agent,Task,TaskOutput,TaskStop",
-      "--plugin-dir", join(root, "claude-plugin"), "--plugin-dir", join(root, "development_tools/host-verification/claude")]
+      "--plugin-dir", claudePlugin || join(app, "claude-plugin"), "--plugin-dir", join(root, "development_tools/host-verification/claude")]
     if (model) args.push("--model", model)
     const process = Bun.spawn([claude, ...args], { cwd: scratch, stdin: "pipe", stdout: Bun.file(join(evidence, "transcript.jsonl")), stderr: Bun.file(join(evidence, "host-errors.txt")) })
     const prompt = (text: string) => process.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n")

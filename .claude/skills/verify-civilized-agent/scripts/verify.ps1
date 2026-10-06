@@ -1,12 +1,23 @@
 param(
     [ValidateSet('Settings', 'Quiet', 'Output', 'Preview')][string]$Feature = 'Settings',
     [string]$Evidence = ('temp/verification/' + [guid]::NewGuid()),
+    [string]$AppDirectory,
+    [string]$ClaudePluginDirectory,
+    [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode',
     [switch]$Audible
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
-$evidencePath = [IO.Path]::GetFullPath((Join-Path $root $Evidence))
+if ($AppDirectory) {
+    $AppDirectory = [IO.Path]::GetFullPath($AppDirectory)
+    $runtimeDirectory = if ($Runtime -eq 'Claude') { Join-Path $AppDirectory 'claude-plugin' } else { $AppDirectory }
+    if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+}
+$evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-verify-' + [guid]::NewGuid())
 $process = $null
 $transcribing = $false
@@ -64,7 +75,7 @@ function Close-Settings {
     if (-not $process.WaitForExit(5000) -or $process.ExitCode -ne 0) { throw 'Close did not exit cleanly' }
 }
 try {
-    if (-not (Test-Path $binary)) { throw 'Build first with cargo build --locked --manifest-path native-announcer/Cargo.toml' }
+    if (-not (Test-Path $binary)) { throw "Announcer executable is missing at $binary" }
     New-Item -ItemType Directory -Path $evidencePath, $scratch -Force | Out-Null
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
@@ -75,7 +86,13 @@ try {
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
-    $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
+    if ($AppDirectory) {
+        $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null
+        $info.ArgumentList.Add('--assets')
+        $info.ArgumentList.Add((Join-Path $runtimeDirectory 'native-announcer/resources'))
+    } else {
+        $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
+    }
     $info.ArgumentList.Add('--settings')
     Write-Output "Launch: $binary --settings; feature=$Feature; audible=$Audible"
     Launch

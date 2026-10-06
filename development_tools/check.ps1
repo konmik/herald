@@ -7,6 +7,7 @@ try {
         @('run', 'test:claude'),
         @('run', 'typecheck'),
         @('run', 'test:assets'),
+        @('run', 'test:bundle'),
         @('run', 'test:tools'),
         @('run', 'test:verification'),
         @('run', 'test:companion')

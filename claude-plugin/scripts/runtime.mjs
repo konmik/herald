@@ -17,9 +17,11 @@ export function boot() {
   }
   const suffix = process.platform === 'win32' ? '.exe' : ''
   const packaged = new URL('../native-announcer/', import.meta.url)
-  const announcer = existsSync(fileURLToPath(packaged)) ? packaged : new URL('../../native-announcer/', import.meta.url)
-  const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, announcer))
-  if (!existsSync(binary)) throw new Error('Civilized Agent native announcer is missing. Run npm run build:announcer on this platform.')
+  const installed = !existsSync(fileURLToPath(new URL('../.claude-plugin/development.json', import.meta.url)))
+  const announcer = installed || existsSync(fileURLToPath(packaged)) ? packaged : new URL('../../native-announcer/', import.meta.url)
+  const localBinary = fileURLToPath(new URL(`bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, announcer))
+  const binary = installed ? localBinary : process.env.CIVILIZED_AGENT_BINARY ?? localBinary
+  if (!existsSync(binary)) throw new Error(installed ? 'Civilized Agent runtime is missing. Reinstall the application bundle.' : 'Civilized Agent native announcer is missing. Run npm run build:announcer on this platform.')
   const assets = fileURLToPath(new URL('resources', announcer))
   const child = spawn(binary, ['--assets', assets], { detached: true, stdio: 'ignore', windowsHide: true })
   child.on('error', console.error)

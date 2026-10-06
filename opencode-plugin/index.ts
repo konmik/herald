@@ -14,8 +14,10 @@ export default Plugin.define({
       if (!process.env.CIVILIZED_AGENT_DATA) throw new Error("An external companion requires CIVILIZED_AGENT_DATA")
     } else {
       const suffix = process.platform === "win32" ? ".exe" : ""
-      const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
-      if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Run npm run build:announcer on this platform.`)
+      const installed = existsSync(fileURLToPath(new URL("../bundle-manifest.json", import.meta.url)))
+      const localBinary = fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
+      const binary = installed ? localBinary : process.env.CIVILIZED_AGENT_BINARY ?? localBinary
+      if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Reinstall the application bundle.`)
       const child = spawn(binary, ["--assets", fileURLToPath(new URL("../native-announcer/resources", import.meta.url))], { detached: true, stdio: "ignore", windowsHide: true })
       child.on("error", console.error)
       child.unref()

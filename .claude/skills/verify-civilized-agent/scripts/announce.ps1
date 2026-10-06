@@ -1,9 +1,27 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [switch]$Speech, [switch]$Meeting, [switch]$Quiet)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet)
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
-$evidencePath = [IO.Path]::GetFullPath((Join-Path $root $Evidence))
+$evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-announcement-' + [guid]::NewGuid())
 $binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
+$assets = Join-Path $root 'native-announcer/resources'
+$bridge = Join-Path $root 'claude-plugin/scripts/bridge.mjs'
+$node = 'node'
+if ($AppDirectory) {
+    $AppDirectory = [IO.Path]::GetFullPath($AppDirectory)
+    $runtimeDirectory = if ($Runtime -eq 'Claude') { Join-Path $AppDirectory 'claude-plugin' } else { $AppDirectory }
+    if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+    $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
+    $bridge = Join-Path $AppDirectory 'claude-plugin/scripts/bridge.mjs'
+    $node = Join-Path $AppDirectory 'claude-plugin/native-announcer/bin/node.exe'
+    if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) {
+        $bridge = Join-Path $runtimeDirectory 'scripts/bridge.mjs'
+        $node = Join-Path $runtimeDirectory 'native-announcer/bin/node.exe'
+    }
+}
 $process = $null
 $transcribing = $false
 $oldData = $env:CIVILIZED_AGENT_DATA
@@ -11,7 +29,7 @@ $oldData = $env:CIVILIZED_AGENT_DATA
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
 function Send-Bridge($Message) {
-    $Message | ConvertTo-Json -Compress | & node (Join-Path $root 'claude-plugin/scripts/bridge.mjs')
+    $Message | ConvertTo-Json -Compress | & $node $bridge
     if ($LASTEXITCODE -ne 0) { throw "Bridge exited $LASTEXITCODE" }
 }
 try {
@@ -24,8 +42,9 @@ try {
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
-    $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
-    foreach ($argument in @('--isolated', '--assets', (Join-Path $root 'native-announcer/resources'), '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
+    if ($AppDirectory) { $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null }
+    else { $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
+    foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
     Write-Output "Launch: $binary --isolated; data=$scratch; speech=$Speech; meeting=$Meeting; quiet=$Quiet"
     $process = [Diagnostics.Process]::Start($info)
     $hash = (Get-FileHash $binary).Hash

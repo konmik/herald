@@ -1,0 +1,44 @@
+# Windows bundle
+
+PowerShell 7 is required. Build on Windows with Node and Cargo matching the machine architecture:
+
+```powershell
+npm run build:bundle
+```
+
+The release ZIP is written to `temp/bundles`. Building prepares speech assets and compiles into a disposable target directory; it does not replace the checkout executable or install anything.
+
+To repackage an already extracted complete bundle without rebuilding native code or downloading assets:
+
+```powershell
+pwsh -NoProfile -File development_tools/build-bundle.ps1 -PayloadDirectory .\extracted-bundle -OutputDirectory .\temp\bundles
+```
+
+Repackaging refreshes the installer and its helpers and generates a new manifest in a staging copy. The source bundle is unchanged.
+
+Close any open Civilized Agent settings windows. Extract the ZIP, then run its installer:
+
+```powershell
+pwsh -NoProfile -File .\install.ps1 -WhatIf
+pwsh -NoProfile -File .\install.ps1
+```
+
+Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Host registration uses the installed Claude CLI. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise an existing `.claude-whg`, otherwise `.claude`. OpenCode uses `XDG_CONFIG_HOME/opencode`, otherwise `.config/opencode`. Both hosts are registered by default.
+
+The Start menu shortcut uses Windows' native Unicode shell-link interface, including when checking an existing shortcut's ownership. PowerShell 7 compiles this helper internally; no separate compiler installation is needed. Local speech uses Windows short filenames for non-ASCII paths. If the volume does not provide those names, install into an ASCII path.
+
+The complete payload is copied to `%LOCALAPPDATA%/Programs/CivilizedAgent/versions/<version>-<arch>-<payloadHash>`. Claude's local marketplace points there and its cache receives a separate physical runtime copy, including Node. OpenCode and the Start menu shortcut point to that installed version. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/CivilizedAgent`.
+
+Existing owned Claude marketplace registrations migrate with `claude plugin marketplace add` from the installed source. This changes the source without removing installed plugins. Existing cache junctions are replaced without touching their targets. OpenCode migration recognizes local packages by their package name, exports and plugin ID, preserving unrelated entries, comments and options. Keep the old registered package available until migration completes; unknown registrations are not removed.
+
+For a copy-only test installation:
+
+```powershell
+pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/opencode/civilized-test" -SkipHostRegistration -NoStart
+```
+
+`-ClaudeConfigDirectory`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
+
+Restart Claude sessions after installation. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
+
+`npm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.
