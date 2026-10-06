@@ -1,0 +1,353 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+mod platform;
+mod render;
+mod state;
+mod window;
+
+use chrono::Timelike;
+use platform::{Signal, Speech};
+use render::Renderer;
+use state::{Inbox, Notification, Settings};
+use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use window::{
+    ControlFlow, ElementState, Event, EventLoop, LogicalSize, MouseButton, PhysicalPosition,
+    WindowBuilder, WindowEvent,
+};
+
+struct Active {
+    notification: Notification,
+    started: Instant,
+    expires: Instant,
+    end: Option<Instant>,
+    speaking: bool,
+    speech_finished: bool,
+    silent: bool,
+    frames: Vec<PathBuf>,
+    portrait: PathBuf,
+}
+
+impl Active {
+    fn ready_to_end(&self, now: Instant) -> bool {
+        now >= self.expires && (self.silent || self.speech_finished)
+    }
+}
+
+fn main() {
+    if let Err(error) = run() {
+        let data = platform::data_directory();
+        let _ = std::fs::create_dir_all(&data);
+        state::log(&data, error);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let mut assets = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .unwrap()
+        .join("../assets");
+    let mut demo = None;
+    let mut test_seconds = None;
+    let mut report = None;
+    let mut snapshot = None;
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--assets" => assets = arguments.next().ok_or("Missing assets path")?.into(),
+            "--demo" => demo = Some(arguments.next().ok_or("Missing character")?),
+            "--test-seconds" => {
+                test_seconds = Some(
+                    arguments
+                        .next()
+                        .ok_or("Missing duration")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            "--report" => {
+                report = Some(PathBuf::from(
+                    arguments.next().ok_or("Missing report path")?,
+                ))
+            }
+            "--snapshot" => {
+                snapshot = Some(PathBuf::from(
+                    arguments.next().ok_or("Missing snapshot path")?,
+                ))
+            }
+            _ => return Err(format!("Unknown option: {argument}")),
+        }
+    }
+    let data = platform::data_directory();
+    std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+    let _lock = match std::net::TcpListener::bind("127.0.0.1:47863") {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let settings_path = data.join("settings.json");
+    let settings: Settings = if settings_path.exists() {
+        serde_json::from_slice(&std::fs::read(&settings_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+    } else {
+        let settings = Settings::default();
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap())
+            .map_err(|e| e.to_string())?;
+        settings
+    };
+    let mut inbox = Inbox::new(data.clone());
+    if let Some(character) = demo {
+        inbox.queue.push_back(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, emotion: "neutral".into() });
+    }
+    let before = platform::foreground();
+    let event_loop = EventLoop::new();
+    #[cfg(target_os = "macos")]
+    let event_loop = {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        let mut event_loop = event_loop;
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+        event_loop.set_activate_ignoring_other_apps(false);
+        event_loop
+    };
+    let window = Rc::new(
+        WindowBuilder::new()
+            .with_title("Civilized Agent")
+            .with_visible(false)
+            .with_focused(false)
+            .with_focusable(false)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_always_on_top(true)
+            .with_inner_size(LogicalSize::new(320.0, 240.0))
+            .build(&event_loop)
+            .map_err(|e| e.to_string())?,
+    );
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
+    }
+    let context = softbuffer::Context::new(window.clone()).map_err(|e| e.to_string())?;
+    let mut surface =
+        softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
+    let mut renderer = Renderer::new()?;
+    let mut speech = Speech::new();
+    let mut signal = Signal::new(&data);
+    let meeting = Arc::new(AtomicBool::new(false));
+    let detection_ready = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    platform::detect_meetings(
+        data.clone(),
+        meeting.clone(),
+        detection_ready.clone(),
+        stop.clone(),
+    );
+    let mut current: Option<Active> = None;
+    let launched = Instant::now();
+    let mut last_inbox = Instant::now() - Duration::from_secs(1);
+    let mut next_frame = Instant::now();
+    let mut focus_unchanged = true;
+    let mut external_focus_changed = false;
+    let mut shown = 0;
+    let mut finished = 0;
+    let mut max_visible = 0.0_f64;
+    let mut durations = Vec::new();
+    let mut titles = Vec::new();
+    let mut speech_started = 0;
+    let mut muted_announcements = 0;
+    let mut static_frames = 0;
+    let mut animation_frames = 0;
+    let mut passive_window_ok = true;
+    let mut window_fade_frames = 0;
+    let mut window_fade_ok = true;
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(next_frame);
+        match event {
+            Event::WindowEvent { event: WindowEvent::Focused(true), .. } => focus_unchanged = false,
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
+            | Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. }, .. } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+                speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
+            }
+            Event::MainEventsCleared => {
+                let now = Instant::now();
+                if now < next_frame { return; }
+                if test_seconds.is_some_and(|seconds| launched.elapsed() >= Duration::from_secs(seconds)) {
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                if platform::is_foreground(&window) { focus_unchanged = false; }
+                else if before != 0 && platform::foreground() != before { external_focus_changed = true; }
+                if now.duration_since(last_inbox) >= Duration::from_millis(250) {
+                    if inbox.read(current.as_ref().map(|a| &a.notification)) {
+                        speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
+                    }
+                    last_inbox = now;
+                }
+                let muted = meeting.load(Ordering::Relaxed) || platform::meeting_override(&data) || state::is_night(chrono::Local::now().hour(), settings.night_start, settings.night_end);
+                for (id, result) in speech.events.try_iter() {
+                    if let Some(active) = current.as_mut().filter(|a| a.notification.id == id) {
+                        active.speech_finished = true;
+                        if let Err(error) = result { state::log(&data, format!("Speech: {error}")); }
+                    }
+                }
+                if let Some(active) = current.as_mut() {
+                    if !detection_ready.load(Ordering::Relaxed) && now.duration_since(active.started) >= Duration::from_secs(5) { active.silent = true; }
+                    if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
+                }
+                if current.is_none() {
+                    if let Some(notification) = inbox.queue.pop_front() {
+                        renderer.text = notification.text.clone();
+                        renderer.title = if notification.title.trim().is_empty() { "Untitled session".into() } else { notification.title.clone() };
+                        renderer.color = if notification.character() == "claude" { 0xe08030 } else { 0x3080e0 };
+                        let monitor = window.current_monitor().or_else(|| window.primary_monitor());
+                        let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
+                        let height = (renderer.message_height() + 226).min(max_height).max(240);
+                        window.set_inner_size(LogicalSize::new(320.0, height as f64));
+                        if let Some(monitor) = monitor {
+                            let scale = monitor.scale_factor();
+                            let position = monitor.position();
+                            window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
+                        }
+                        let directory = assets.join(notification.character());
+                        let frames = frames_in(directory.join("neutral"));
+                        let expires = now + state::display_duration(&notification.text);
+                        current = Some(Active { notification, started: now, expires, end: None, speaking: false, speech_finished: muted, silent: muted, frames, portrait: directory.join("portrait.png") });
+                        window_fade_ok &= platform::opacity(&window, 0.0);
+                        let previous_focus = platform::foreground();
+                        platform::show(&window);
+                        if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
+                        passive_window_ok &= platform::passive_window(&window, true);
+                        window.request_redraw();
+                        shown += 1;
+                        titles.push(renderer.title.clone());
+                        if muted { muted_announcements += 1; }
+                        if !muted { signal.play(); }
+                        inbox.save(current.as_ref().map(|a| &a.notification));
+                    }
+                }
+                let mut dismiss = false;
+                if let Some(active) = current.as_mut() {
+                    let progress = active.end.map(|end| 1.0 - end.elapsed().as_secs_f32() / state::TRANSITION_DURATION.as_secs_f32()).unwrap_or_else(|| active.started.elapsed().as_secs_f32() / state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                    window_fade_ok &= platform::opacity(&window, progress * progress * (3.0 - 2.0 * progress));
+                    if progress > 0.0 && progress < 1.0 { window_fade_frames += 1; }
+                    if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking && (active.silent || detection_ready.load(Ordering::Relaxed)) {
+                        active.speaking = true;
+                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), &settings); speech_started += 1; }
+                    }
+                    if active.end.is_none() && active.ready_to_end(now) {
+                        active.end = Some(now); speech.cancel();
+                        if !active.silent && !muted { signal.play(); }
+                    }
+                    if active.end.is_some_and(|end| now.duration_since(end) >= state::TRANSITION_DURATION) {
+                        max_visible = max_visible.max(active.started.elapsed().as_secs_f64());
+                        durations.push(active.started.elapsed().as_secs_f64());
+                        dismiss = true;
+                    } else { window.request_redraw(); }
+                }
+                if dismiss {
+                    current = None; signal.stop(); platform::hide(&window); finished += 1; inbox.save(None);
+                    passive_window_ok &= platform::passive_window(&window, false);
+                }
+                let interval = current.as_ref().map(|active| if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { 42 } else { 1000 / state::VIDEO_FPS as u64 }).unwrap_or(250);
+                next_frame = now + Duration::from_millis(interval);
+                *control_flow = ControlFlow::WaitUntil(next_frame);
+            }
+            Event::RedrawRequested(_) => {
+                if let Some(active) = &current {
+                    let size = window.inner_size();
+                    if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+                        let result = (|| -> Result<(), String> {
+                            surface.resize(width, height).map_err(|e| e.to_string())?;
+                            let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
+                            let transition_time = active.end.map(|end| end.elapsed()).unwrap_or_else(|| active.started.elapsed());
+                            let interference = state::interference_amount(transition_time, active.notification.completed as u32);
+                            if interference > 0.0 { static_frames += 1; } else { animation_frames += 1; }
+                            let image = if active.frames.is_empty() { &active.portrait } else { &active.frames[state::video_frame_index(active.started.elapsed(), active.frames.len())] };
+                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, Some(image), interference);
+                            if active.started.elapsed() > state::TRANSITION_DURATION && active.end.is_none() {
+                                if let Some(path) = snapshot.take() {
+                                    let preview = image::RgbaImage::from_fn(size.width, size.height, |x, y| {
+                                        let color = buffer[(y * size.width + x) as usize];
+                                        image::Rgba([(color >> 16) as u8, (color >> 8) as u8, color as u8, if color == 0xff00ff { 0 } else { 255 }])
+                                    });
+                                    preview.save(path).map_err(|e| e.to_string())?;
+                                }
+                            }
+                            buffer.present().map_err(|e| e.to_string())
+                        })();
+                        if let Err(error) = result { state::log(&data, error); *control_flow = ControlFlow::Exit; }
+                    }
+                }
+            }
+            Event::LoopDestroyed => {
+                stop.store(true, Ordering::Relaxed); speech.cancel(); signal.stop();
+                if let Some(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
+                inbox.save(current.as_ref().map(|a| &a.notification));
+                if let Some(path) = &report {
+                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowFadeFrames": window_fade_frames, "windowFadeSucceeded": window_fade_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": state::VIDEO_FPS, "frameCacheLimit": 12});
+                    let _ = std::fs::write(path, report.to_string());
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+fn frames_in(directory: PathBuf) -> Vec<PathBuf> {
+    let mut frames: Vec<_> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|s| s.to_string_lossy().starts_with("frame-"))
+                && p.extension().is_some_and(|s| s == "png")
+        })
+        .collect();
+    frames.sort();
+    frames
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waits_for_speech_and_minimum_display_time() {
+        let started = Instant::now();
+        let mut active = Active {
+            notification: Notification {
+                id: "test".into(),
+                session_id: "test".into(),
+                completed: 1,
+                text: "Done.".into(),
+                title: "Test".into(),
+                character: "opencode".into(),
+                emotion: "neutral".into(),
+            },
+            started,
+            expires: started + Duration::from_secs(10),
+            end: None,
+            speaking: true,
+            speech_finished: false,
+            silent: false,
+            frames: vec![],
+            portrait: PathBuf::new(),
+        };
+        assert!(!active.ready_to_end(started + Duration::from_secs(20)));
+        active.speech_finished = true;
+        assert!(!active.ready_to_end(started + Duration::from_secs(9)));
+        assert!(active.ready_to_end(started + Duration::from_secs(10)));
+        active.silent = true;
+        active.speech_finished = false;
+        assert!(active.ready_to_end(started + Duration::from_secs(10)));
+    }
+}

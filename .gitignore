@@ -1,0 +1,12 @@
+desktop/bin/
+desktop/obj/
+scripts/__pycache__/
+node_modules/
+/assets/
+/claude/assets/
+/claude/bin/
+claude/.claude-plugin/types/
+announcer/target/
+claude/companion/__pycache__/
+__pycache__/
+*.pyc

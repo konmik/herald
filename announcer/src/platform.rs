@@ -1,0 +1,695 @@
+use crate::state::{log, Settings};
+use crate::window::Window;
+use std::path::{Path, PathBuf};
+use std::process::Child;
+#[cfg(not(target_os = "windows"))]
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub fn data_directory() -> PathBuf {
+    if let Some(path) = std::env::var_os("CIVILIZED_AGENT_DATA") {
+        return path.into();
+    }
+    let home = std::env::var_os(if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    })
+    .map(PathBuf::from)
+    .unwrap_or_else(|| ".".into());
+    if cfg!(target_os = "windows") {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or(home.join("AppData/Local"))
+            .join("CivilizedAgent")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/CivilizedAgent")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or(home.join(".local/share"))
+            .join("CivilizedAgent")
+    }
+}
+
+pub fn show(window: &Window) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let hwnd = window.hwnd() as *mut _;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            style | WS_EX_NOACTIVATE as isize | WS_EX_TOOLWINDOW as isize,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    window.set_visible(true);
+}
+
+pub fn foreground() -> usize {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as usize
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+pub fn is_foreground(window: &Window) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        foreground() == window.hwnd() as usize
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.is_focused()
+    }
+}
+
+pub fn opacity(window: &Window, amount: f32) -> bool {
+    let amount = amount.clamp(0.0, 1.0);
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        SetLayeredWindowAttributes(
+            window.hwnd() as *mut _,
+            0x00ff00ff,
+            (amount * 255.0).round() as u8,
+            LWA_ALPHA | LWA_COLORKEY,
+        ) != 0
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use tao::platform::macos::WindowExtMacOS;
+        let native = &*(window.ns_window() as *const objc2_app_kit::NSWindow);
+        native.setAlphaValue(amount as f64);
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::WidgetExt;
+        use tao::platform::unix::WindowExtUnix;
+        window.gtk_window().set_opacity(amount as f64);
+        true
+    }
+}
+
+pub fn hide(window: &Window) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        let _ = ShowWindow(window.hwnd() as *mut _, SW_HIDE);
+    }
+    #[cfg(not(target_os = "windows"))]
+    window.set_visible(false);
+}
+
+pub fn passive_window(window: &Window, visible: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let hwnd = window.hwnd() as *mut _;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        (IsWindowVisible(hwnd) != 0) == visible
+            && style & WS_EX_NOACTIVATE as isize != 0
+            && style & WS_EX_TOPMOST as isize != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.is_visible() == visible
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    command
+}
+
+struct SpeechCommand {
+    text: String,
+    id: String,
+    character: String,
+    preferred: Option<String>,
+    cancelled: Arc<AtomicBool>,
+}
+
+pub struct Speech {
+    pub events: mpsc::Receiver<(String, Result<(), String>)>,
+    sender: mpsc::Sender<SpeechCommand>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Speech {
+    pub fn new() -> Self {
+        let (sender, commands) = mpsc::channel::<SpeechCommand>();
+        let (events, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for SpeechCommand {
+                text,
+                id,
+                character,
+                preferred,
+                cancelled,
+            } in commands
+            {
+                if cancelled.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let result = speak(&text, &character, preferred.as_deref(), &cancelled);
+                let _ = events.send((id, result));
+            }
+        });
+        Self {
+            events: receiver,
+            sender,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn start(&mut self, text: &str, id: &str, character: &str, settings: &Settings) {
+        self.cancel();
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        let _ = self.sender.send(SpeechCommand {
+            text: text.into(),
+            id: id.into(),
+            character: character.into(),
+            preferred: settings.voices.get(character).cloned(),
+            cancelled: self.cancelled.clone(),
+        });
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Speech {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn speak(
+    text: &str,
+    character: &str,
+    preferred: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::Media::Speech::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| e.to_string())?;
+        let result = (|| -> windows::core::Result<()> {
+            let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)?;
+            let category: ISpObjectTokenCategory =
+                CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
+            category.SetId(
+                w!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
+                false,
+            )?;
+            let tokens = category.EnumTokens(w!(""), w!(""))?;
+            let mut count = 0;
+            tokens.GetCount(&mut count)?;
+            let names: Vec<&str> = preferred.map(|p| vec![p]).unwrap_or_else(|| {
+                if character == "claude" {
+                    vec!["Mark", "David"]
+                } else {
+                    vec!["David", "Mark"]
+                }
+            });
+            let mut chosen = None;
+            for name in names {
+                for index in 0..count {
+                    let token = tokens.Item(index)?;
+                    let attributes = token.OpenKey(w!("Attributes"))?;
+                    let value = attributes.GetStringValue(w!("Name"))?;
+                    let label = value.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(value.0 as *const _));
+                    if label.to_lowercase().contains(&name.to_lowercase()) {
+                        chosen = Some(token);
+                        break;
+                    }
+                }
+                if chosen.is_some() {
+                    break;
+                }
+            }
+            if let Some(token) = chosen {
+                voice.SetVoice(&token)?;
+            }
+            voice.SetRate(if character == "claude" { 1 } else { -1 })?;
+            let escaped = text
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let xml = HSTRING::from(format!(
+                "<pitch absmiddle=\"{}\">{escaped}</pitch>",
+                if character == "claude" { 1 } else { -2 }
+            ));
+            voice.Speak(&xml, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)?;
+            loop {
+                if cancelled.load(Ordering::Relaxed) {
+                    voice.Speak(w!(""), (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32, None)?;
+                    break;
+                }
+                voice.WaitUntilDone(50)?;
+                let mut status = SPVOICESTATUS::default();
+                voice.GetStatus(&mut status, std::ptr::null_mut())?;
+                if status.dwRunningState == SPRS_DONE.0 as u32 {
+                    status.hrLastResult.ok()?;
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        CoUninitialize();
+        result.map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn speak(
+    text: &str,
+    character: &str,
+    preferred: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = hidden_command("say");
+        command.args(["-r", if character == "claude" { "180" } else { "160" }]);
+        let available = Command::new("say")
+            .args(["-v", "?"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let available = String::from_utf8_lossy(&available.stdout);
+        let names = preferred.map(|p| vec![p]).unwrap_or_else(|| {
+            if character == "claude" {
+                vec!["Alex", "Daniel"]
+            } else {
+                vec!["Daniel", "Alex"]
+            }
+        });
+        if let Some(name) = names.into_iter().find(|name| {
+            available
+                .lines()
+                .any(|line| line.starts_with(&format!("{name} ")))
+        }) {
+            command.args(["-v", name]);
+        }
+        command
+    } else {
+        let program = if Command::new("espeak-ng").arg("--version").output().is_ok() {
+            "espeak-ng"
+        } else {
+            "espeak"
+        };
+        let mut command = hidden_command(program);
+        command.args([
+            "-v",
+            preferred.unwrap_or(if character == "claude" {
+                "en-us+m2"
+            } else {
+                "en-us+m3"
+            }),
+            "-s",
+            if character == "claude" { "180" } else { "160" },
+        ]);
+        command
+    };
+    let mut child = command.arg(text).spawn().map_err(|e| e.to_string())?;
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Speech exited with {status}"))
+            };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub struct Signal {
+    path: PathBuf,
+    child: Option<Child>,
+}
+
+impl Signal {
+    pub fn new(data: &Path) -> Self {
+        let path = data.join("interference-v3.wav");
+        if !path.exists() {
+            let samples = (crate::state::TRANSITION_DURATION.as_secs_f32() * 16000.0) as u32;
+            let sample_bytes = samples * 2;
+            let mut wav = Vec::new();
+            wav.extend(b"RIFF");
+            wav.extend((36 + sample_bytes).to_le_bytes());
+            wav.extend(b"WAVEfmt ");
+            wav.extend(16u32.to_le_bytes());
+            wav.extend(1u16.to_le_bytes());
+            wav.extend(1u16.to_le_bytes());
+            wav.extend(16000u32.to_le_bytes());
+            wav.extend(32000u32.to_le_bytes());
+            wav.extend(2u16.to_le_bytes());
+            wav.extend(16u16.to_le_bytes());
+            wav.extend(b"data");
+            wav.extend(sample_bytes.to_le_bytes());
+            let mut seed = 734971u32;
+            let mut filtered = 0.0_f32;
+            for index in 0..samples {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let white = (seed % 681) as f32 - 340.0;
+                filtered = filtered * 0.35 + white * 0.65;
+                let crackle = if seed.is_multiple_of(257) {
+                    if seed & 1 == 0 {
+                        180.0
+                    } else {
+                        -180.0
+                    }
+                } else {
+                    0.0
+                };
+                let envelope = crate::state::interference_amount(
+                    Duration::from_secs_f32(index as f32 / 16000.0),
+                    734971,
+                );
+                let value = ((white * 0.7 + filtered * 0.3 + crackle) * envelope) as i16;
+                wav.extend(value.to_le_bytes());
+            }
+            let _ = std::fs::write(&path, wav);
+        }
+        Self { path, child: None }
+    }
+
+    pub fn play(&mut self) {
+        self.stop();
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::Media::Audio::*;
+            let _ = PlaySoundW(
+                &HSTRING::from(self.path.to_string_lossy().as_ref()),
+                None,
+                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let programs = if cfg!(target_os = "macos") {
+                vec!["afplay"]
+            } else {
+                vec!["paplay", "aplay"]
+            };
+            for program in programs {
+                if let Ok(child) = hidden_command(program).arg(&self.path).spawn() {
+                    self.child = Some(child);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn stop(&mut self) {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows::Win32::Media::Audio::PlaySoundW(
+                None,
+                None,
+                windows::Win32::Media::Audio::SND_ASYNC,
+            );
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Signal {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub fn detect_meetings(
+    data: PathBuf,
+    active: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match meeting_active() {
+                Ok(value) => active.store(value, Ordering::Relaxed),
+                Err(error) => {
+                    log(&data, format!("Meeting detection: {error}"));
+                }
+            }
+            ready.store(true, Ordering::Relaxed);
+            for _ in 0..50 {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    });
+}
+
+pub fn meeting_override(data: &Path) -> bool {
+    std::fs::read(data.join("meeting.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            v["active"].as_bool() == Some(true)
+                && v["updated"]
+                    .as_f64()
+                    .is_some_and(|at| at <= now && now - at < 30.0)
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn meeting_active() -> Result<bool, String> {
+    use windows::core::BSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Accessibility::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    unsafe extern "system" fn inspect(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        value: isize,
+    ) -> i32 {
+        if unsafe { IsWindowVisible(hwnd) != 0 } {
+            let mut title = [0u16; 512];
+            let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+            let title = String::from_utf16_lossy(&title[..length as usize]).to_lowercase();
+            if [
+                "teams", "zoom", "slack", "webex", "discord", "chrome", "edge", "firefox",
+            ]
+            .iter()
+            .any(|app| title.contains(app))
+            {
+                unsafe { &mut *(value as *mut Vec<(HWND, String)>) }.push((HWND(hwnd), title));
+            }
+        }
+        1
+    }
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .map_err(|e| e.to_string())?;
+        let result = (|| -> windows::core::Result<bool> {
+            let mut windows = Vec::<(HWND, String)>::new();
+            if EnumWindows(Some(inspect), &mut windows as *mut _ as isize) == 0 {
+                return Err(windows::core::Error::from_thread());
+            }
+            if windows
+                .iter()
+                .any(|(_, title)| title == "zoom meeting" || title == "zoom workplace meeting")
+            {
+                return Ok(true);
+            }
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+            let mut names = automation
+                .CreatePropertyCondition(UIA_NamePropertyId, &BSTR::from("Leave").into())?;
+            for name in ["Leave call", "Leave meeting", "End call"] {
+                let condition = automation
+                    .CreatePropertyCondition(UIA_NamePropertyId, &BSTR::from(name).into())?;
+                names = automation.CreateOrCondition(&names, &condition)?;
+            }
+            let button_type = automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &UIA_ButtonControlTypeId.0.into(),
+            )?;
+            let condition = automation.CreateAndCondition(&names, &button_type)?;
+            for (hwnd, _) in windows {
+                let Ok(element) = automation.ElementFromHandle(hwnd) else {
+                    continue;
+                };
+                if let Ok(button) = element.FindFirst(TreeScope_Descendants, &condition) {
+                    if button
+                        .CurrentIsOffscreen()
+                        .is_ok_and(|offscreen| !offscreen.as_bool())
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        })();
+        CoUninitialize();
+        result.map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interference_audio_has_silent_edges_and_a_faded_envelope() {
+        let data = std::env::temp_dir()
+            .join("opencode")
+            .join(format!("civilized-signal-{}", std::process::id()));
+        std::fs::create_dir_all(&data).unwrap();
+        let signal = Signal::new(&data);
+        let wav = std::fs::read(&signal.path).unwrap();
+        let samples: Vec<_> = wav[44..]
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        assert_eq!(samples.len(), 10400);
+        assert_eq!(samples[0], 0);
+        assert_eq!(*samples.last().unwrap(), 0);
+        let edge: i32 = samples[..100].iter().map(|v| i32::from(*v).abs()).sum();
+        let middle: i32 = samples[4500..5500]
+            .iter()
+            .map(|v| i32::from(*v).abs())
+            .sum();
+        assert!(middle > edge * 20);
+        drop(signal);
+        std::fs::remove_dir_all(data).unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn meeting_active() -> Result<bool, String> {
+    let script = r#"tell application "System Events"
+set matched to false
+repeat with p in (application processes whose background only is false)
+if name of p is in {"zoom.us", "Microsoft Teams", "Slack", "Webex", "Discord", "Google Chrome", "Safari", "Firefox"} then
+repeat with w in windows of p
+try
+repeat with el in entire contents of w
+if role of el is "AXButton" and name of el is in {"Leave", "Leave call", "Leave meeting", "End call"} then set matched to true
+end repeat
+end try
+end repeat
+end if
+end repeat
+return matched
+end tell"#;
+    let output = Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+#[cfg(target_os = "linux")]
+fn meeting_active() -> Result<bool, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            use atspi::proxy::accessible::AccessibleProxy;
+            let connection = atspi::AccessibilityConnection::new()
+                .await
+                .map_err(|e| e.to_string())?;
+            let proxy = connection
+                .root_accessible_on_registry()
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut pending = proxy.get_children().await.map_err(|e| e.to_string())?;
+            let mut count = 0;
+            while let Some(reference) = pending.pop() {
+                count += 1;
+                if count > 1500 {
+                    break;
+                }
+                let Some(name) = reference.name() else {
+                    continue;
+                };
+                let proxy = AccessibleProxy::builder(connection.connection())
+                    .destination(name.as_str())
+                    .map_err(|e| e.to_string())?
+                    .path(reference.path().as_str())
+                    .map_err(|e| e.to_string())?
+                    .build()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let name = proxy.name().await.unwrap_or_default();
+                if ["Leave", "Leave call", "Leave meeting", "End call"].contains(&name.as_str())
+                    && proxy
+                        .get_role()
+                        .await
+                        .is_ok_and(|role| role == atspi::Role::Button)
+                    && proxy
+                        .get_state()
+                        .await
+                        .is_ok_and(|states| states.contains(atspi::State::Showing))
+                {
+                    return Ok(true);
+                }
+                if let Ok(children) = proxy.get_children().await {
+                    let limit = 100.min(4096usize.saturating_sub(pending.len()));
+                    pending.extend(children.into_iter().take(limit));
+                }
+            }
+            Ok(false)
+        })
+        .await
+        .map_err(|_| "Accessibility inspection timed out".to_owned())?
+    })
+}

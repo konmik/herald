@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["bun", "node"],
+    "typeRoots": ["C:/third-party/opencode/packages/plugin/node_modules/@types"],
+    "paths": {
+      "@opencode/plugin": ["C:/third-party/opencode/packages/plugin/src/promise/index.ts"],
+      "@opencode/plugin/tui": ["C:/third-party/opencode/packages/plugin/src/tui/index.ts"],
+      "solid-js": ["C:/third-party/opencode/packages/plugin/node_modules/solid-js"]
+    }
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

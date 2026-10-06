@@ -1,0 +1,12 @@
+{
+  "name": "civilized-agent-local",
+  "owner": { "name": "elkmo" },
+  "plugins": [
+    {
+      "name": "civilized-agent",
+      "source": "./claude",
+      "description": "Animated spoken task-completion summaries on Windows, macOS and Linux.",
+      "version": "0.3.0"
+    }
+  ]
+}

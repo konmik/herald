@@ -1,0 +1,21 @@
+{
+  "name": "civilized-agent",
+  "version": "0.3.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.ts"
+  },
+  "scripts": {
+    "test": "bun test ./tests",
+    "build:announcer": "node scripts/build-announcer.mjs",
+    "test:companion": "cargo test --locked --manifest-path announcer/Cargo.toml",
+    "test:windows": "pwsh -NoProfile -File scripts/verify-announcer.ps1",
+    "profile:plugin": "bun scripts/profile-plugin.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.23",
+    "solid-js": ">=1.9.0"
+  }
+}
