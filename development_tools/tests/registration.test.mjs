@@ -51,6 +51,21 @@ test('registration adds only the plugins field and rejects invalid configuration
   for (const text of ['[]', '{"plugins":{}}', '{"plugins":[],"plugins":[]}', '{bad}']) assert.throws(() => updateRegistration(text, '.', 'C:/installed'))
 })
 
+test('upgrading a compiled package replaces its registration and preserves options', () => {
+  const root = mkdtempSync(join(process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir(), 'registration-upgrade-'))
+  try {
+    const old = join(root, 'old-version')
+    const installed = join(root, 'new-version').replaceAll('\\', '/')
+    mkdirSync(join(old, 'opencode-plugin'), { recursive: true })
+    writeFileSync(join(old, 'package.json'), JSON.stringify({ name: 'civilized-agent', exports: { '.': './opencode-plugin/index.js', './tui': './opencode-plugin/tui.js' } }))
+    writeFileSync(join(old, 'opencode-plugin/index.js'), 'export default {id:"civilized-agent",setup(){}}')
+    const text = JSON.stringify({ plugins: [{ package: old, options: { minimumSeconds: 90 } }, 'keep'] })
+    const updated = updateRegistration(text, root, installed)
+    assert.deepEqual(JSON.parse(updated).plugins, [{ package: installed, options: { minimumSeconds: 90 } }, 'keep'])
+    assert.equal(updateRegistration(updated, root, installed), updated)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('consecutive duplicate registrations are removed without breaking array commas', () => {
   for (const text of ['{"plugins":["C:/installed","C:/installed","C:/installed"]}', '{"plugins":["C:/installed","C:/installed","C:/installed",]}', '{"plugins":["C:/installed","C:/installed","keep","C:/installed"]}']) {
     const plugins = parseJSONC(updateRegistration(text, '.', 'C:/installed')).value.plugins
