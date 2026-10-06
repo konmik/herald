@@ -85,17 +85,11 @@ try {
     & bun -e "const {default: plugin} = await import('$entry'); if (plugin.id !== 'civilized-agent') throw new Error('Wrong packaged plugin')"
     Assert-True ($LASTEXITCODE -eq 0) 'Compiled plugin failed to import outside the checkout'
     $tuiEntry = [uri]::new((Join-Path $bundle 'tui.ts')).AbsoluteUri
-    $peerDirectory = Join-Path $temporary 'node_modules'
-    $solidPeer = Join-Path $peerDirectory 'solid-js'
-    New-Item -ItemType Directory -Path $peerDirectory | Out-Null
-    New-Item -ItemType Junction -Path $solidPeer -Target (Join-Path (Split-Path $PSScriptRoot -Parent) 'node_modules/solid-js') | Out-Null
-    $solidEntry = [uri]::new((Join-Path $solidPeer 'dist/solid.js')).AbsoluteUri
     $tuiScript = @"
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 const {default: plugin} = await import('$tuiEntry');
 if (plugin.id !== 'civilized-agent.tui' || typeof plugin.setup !== 'function') throw new Error('Wrong packaged TUI plugin');
-const {createRoot} = await import('$solidEntry');
 const inbox = join(process.env.CIVILIZED_AGENT_DATA, 'inbox');
 async function waitForPresence(matches) {
     const deadline = Date.now() + 5000;
@@ -107,23 +101,15 @@ async function waitForPresence(matches) {
     }
     throw new Error('Timed out waiting for packaged TUI presence');
 }
-let dispose;
+let cleanup;
 try {
-    createRoot((rootDispose) => {
-        dispose = rootDispose;
-        plugin.setup({ui: {slot({render}) { render() }, router: {current: () => ({type: 'session', sessionID: 'root'})}, tabs: {enabled: () => true, list: () => [{sessionID: 'root'}]}}});
-    });
+    cleanup = await plugin.setup({ui: {router: {current: () => ({type: 'session', sessionID: 'root'})}, tabs: {enabled: () => true, list: () => [{sessionID: 'root'}]}}});
     await waitForPresence((message) => message.type === 'presence' && message.sessionIDs?.[0] === 'root');
-} finally { dispose?.() }
+} finally { await cleanup?.() }
 await waitForPresence((message) => message.type === 'presence' && Array.isArray(message.sessionIDs) && message.sessionIDs.length === 0);
 "@
-    try {
-        & bun --conditions=browser -e $tuiScript
-        Assert-True ($LASTEXITCODE -eq 0) 'Packaged TUI plugin failed to import and render outside the checkout'
-    } finally {
-        Remove-Item -LiteralPath $solidPeer -Force
-        Remove-Item -LiteralPath $peerDirectory -Force
-    }
+    & bun -e $tuiScript
+    Assert-True ($LASTEXITCODE -eq 0) 'Packaged TUI plugin failed to load and report presence without checkout dependencies'
     $presence = @(Get-ChildItem -LiteralPath (Join-Path $nativeData 'inbox') -Filter '*.json' -File | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
     $initial = @($presence | Where-Object { $_.type -eq 'presence' -and $_.sequence -eq 1 }) | Select-Object -First 1
     $cleared = @($presence | Where-Object { $_.type -eq 'presence' -and $_.sessionIDs -is [array] -and $_.sessionIDs.Count -eq 0 }) | Select-Object -First 1
