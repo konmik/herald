@@ -43,6 +43,9 @@ try {
     $shortcut = Read-NativeShortcut (Join-Path $programs 'Civilized Agent settings.lnk')
     if ($shortcut.TargetPath -ne $binary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
     Remove-DeploymentDirectory $extract
+    if (Test-Path -LiteralPath (Join-Path $app 'node_modules')) { throw 'Installed package must not contain checkout dependencies' }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'boot-bundle.ps1') -AppDirectory $app -Evidence (Join-Path $evidencePath 'opencode-bootstrap')
+    if ($LASTEXITCODE -ne 0) { throw 'Real installed OpenCode bootstrap failed' }
     $again = Install-Payload $app (Join-Path $scratch 'installed')
     if ($again -ne $app) { throw 'Repeated installation changed its location' }
     $start = [Diagnostics.ProcessStartInfo]::new($binary)

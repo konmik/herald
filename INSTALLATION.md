@@ -16,6 +16,8 @@ pwsh -NoProfile -File development_tools/build-bundle.ps1 -PayloadDirectory .\ext
 
 Repackaging refreshes the installer and its helpers and generates a new manifest in a staging copy. The source bundle is unchanged.
 
+`npm run test:bundle` runs unit checks with placeholder native files and mocked Claude commands. It does not prove a working native installation. Before deployment, run `npm run test:bundle:installed -- -Archive <release.zip>`. This uses a disposable Claude profile and real host commands, verifies the installed cache and shortcut, removes the extraction folder, boots OpenCode from the installed compiled package, and starts the real native executable. It makes no model requests and leaves the disposable installation available for further runtime checks.
+
 Close any open Civilized Agent settings windows. Extract the ZIP, then run its installer:
 
 ```powershell

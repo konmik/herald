@@ -18,8 +18,7 @@ New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
     $payload = Join-Path $temporary 'payload'
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
-    $required = @('package.json', 'opencode-plugin/index.ts', 'opencode-plugin/tui.ts', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/native-announcer/bin/node.exe')
-    foreach ($module in @('bridge', 'completions', 'events', 'state-client', 'work-state')) { $required += "opencode-plugin/$module.ts" }
+    $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/native-announcer/bin/node.exe')
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
         $required += "$prefix/bin/civilized-announcer-win32-$arch.exe", "$prefix/bin/onnxruntime.dll", "$prefix/bin/sherpa-onnx-c-api.dll", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
         foreach ($name in @('model.int8.onnx', 'voices.bin', 'tokens.txt', 'espeak-ng-data/en_dict', 'LICENSE')) { $required += "$prefix/resources/tts/kitten-nano-en-v0_8-int8/$name" }
@@ -29,24 +28,6 @@ try {
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
         'fixture' | Set-Content -LiteralPath $path
     }
-    '{"name":"civilized-agent","version":"0.3.0","exports":{".":"./opencode-plugin/index.ts","./tui":"./opencode-plugin/tui.ts"},"dependencies":{"@opencode/plugin":"1.0.0","@opencode/client":"1.0.0","solid-js":"1.0.0"}}' | Set-Content "$payload/package.json"
-    foreach ($name in @('@opencode/plugin', '@opencode/client', 'solid-js')) {
-        $directory = Join-Path $payload "node_modules/$name"
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-        $moduleManifest = @{ name = $name; version = '1.0.0'; exports = './index.js'; license = 'MIT' }
-        if ($name -eq '@opencode/plugin') { $moduleManifest.exports = @{ '.' = @{ node = './index.js'; 'custom-source' = './unpublished.ts'; 'react-native' = './unpublished-native.js' }; './' = './' } }
-        if ($name -eq '@opencode/client') { $moduleManifest.Remove('exports'); $moduleManifest.main = 'index' }
-        $moduleManifest | ConvertTo-Json -Depth 6 | Set-Content "$directory/package.json"
-        'export const fixture = true' | Set-Content "$directory/index.js"
-        'fixture license' | Set-Content "$directory/LICENSE"
-    }
-    $nativeModule = Join-Path $payload 'node_modules/fixture-native'
-    New-Item -ItemType Directory -Path $nativeModule -Force | Out-Null
-    '{"name":"fixture-native","version":"1.0.0","cpu":["x64"]}' | Set-Content "$nativeModule/package.json"
-    'native fixture' | Set-Content "$nativeModule/index.node"
-    $pluginDependency = Get-Content "$payload/node_modules/@opencode/plugin/package.json" -Raw | ConvertFrom-Json -AsHashtable
-    $pluginDependency.optionalDependencies = @{ 'fixture-native' = '1.0.0' }
-    $pluginDependency | ConvertTo-Json -Depth 8 | Set-Content "$payload/node_modules/@opencode/plugin/package.json"
     '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$payload/claude-plugin/.claude-plugin/plugin.json"
     '{"name":"civilized-agent-local"}' | Set-Content "$payload/claude-plugin/.claude-plugin/marketplace.json"
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
@@ -55,26 +36,13 @@ try {
     $bundle = Join-Path $temporary 'extracted'
     Expand-Archive -LiteralPath $zip -DestinationPath $bundle
     Test-Bundle $bundle | Out-Null
-    $dependencyManifestPath = "$bundle/bundle-manifest.json"
-    $dependencyManifest = [IO.File]::ReadAllText($dependencyManifestPath)
-    $missingDependency = Join-Path $temporary 'removed-solid-js'
-    Move-Item -LiteralPath "$bundle/node_modules/solid-js" -Destination $missingDependency
-    $withoutDependency = $dependencyManifest | ConvertFrom-Json
-    $withoutDependency.files = @($withoutDependency.files | Where-Object { -not $_.path.StartsWith('node_modules/solid-js/') })
-    $withoutDependency | ConvertTo-Json -Depth 8 | Set-Content $dependencyManifestPath
-    Assert-Rejected { & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory (Join-Path $temporary 'missing-dependency-install') -SkipHostRegistration -NoStart } 'Manifest-complete payload without Solid was accepted'
-    Assert-True (-not (Test-Path (Join-Path $temporary 'missing-dependency-install'))) 'Missing runtime dependency mutated the destination'
-    Move-Item -LiteralPath $missingDependency -Destination "$bundle/node_modules/solid-js"
-    [IO.File]::WriteAllText($dependencyManifestPath, $dependencyManifest)
-    $dependencyEntry = "$bundle/node_modules/@opencode/plugin/index.js"
-    $entryBytes = [IO.File]::ReadAllBytes($dependencyEntry)
-    Remove-Item -LiteralPath $dependencyEntry
-    $withoutEntry = $dependencyManifest | ConvertFrom-Json
-    $withoutEntry.files = @($withoutEntry.files | Where-Object { $_.path -ne 'node_modules/@opencode/plugin/index.js' })
-    $withoutEntry | ConvertTo-Json -Depth 8 | Set-Content $dependencyManifestPath
-    Assert-Rejected { Test-Bundle $bundle } 'Runtime package with a missing exported entry was accepted'
-    [IO.File]::WriteAllBytes($dependencyEntry, $entryBytes)
-    [IO.File]::WriteAllText($dependencyManifestPath, $dependencyManifest)
+    Assert-True (-not (Test-Path "$bundle/node_modules")) 'Compiled bundle contains a dependency tree'
+    foreach ($package in @('@opencode-plugin-2.0.24', 'effect-4.0.0-rc.112', 'jsonc-parser-3.3.1')) {
+        Assert-True (@(Get-ChildItem -LiteralPath "$bundle/licenses/javascript/$package" -File).Count -gt 0) "Bundled JavaScript license missing: $package"
+    }
+    $entry = [uri]::new((Join-Path $bundle 'index.ts')).AbsoluteUri
+    & bun -e "const {default: plugin} = await import('$entry'); if (plugin.id !== 'civilized-agent') throw new Error('Wrong packaged plugin')"
+    Assert-True ($LASTEXITCODE -eq 0) 'Compiled plugin failed to import outside the checkout'
     $sourceManifest = [IO.File]::ReadAllBytes("$bundle/bundle-manifest.json")
     $repacked = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $bundle -OutputDirectory (Join-Path $temporary 'repacked-output')
     $repackedBundle = Join-Path $temporary 'repacked'
@@ -82,7 +50,7 @@ try {
     Test-Bundle $repackedBundle | Out-Null
     Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes("$bundle/bundle-manifest.json")) -eq [Convert]::ToHexString($sourceManifest)) 'Repack changed the source manifest'
     Assert-True ((Get-Content "$repackedBundle/shortcut.ps1" -Raw) -ceq (Get-Content "$PSScriptRoot/bundle/shortcut.ps1" -Raw)) 'Repack did not refresh the shortcut adapter'
-    Assert-True ((Get-Content "$bundle/claude-plugin/hooks/register.ts" -Raw).Contains("[$.plugin.root + '/native-announcer/bin/node.exe',")) 'Packaged hook still relies on PATH Node'
+    Assert-True ((Get-Content "$bundle/claude-plugin/hooks/register.ts" -Raw) -ceq (Get-Content "$PSScriptRoot/../claude-plugin/hooks/register.ts" -Raw)) 'Packaging rewrote the Claude hook source'
     $root = Join-Path $temporary 'installed'
     & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart -WhatIf | Out-Null
     Assert-True (-not (Test-Path $root)) 'WhatIf mutated the installation'
@@ -108,14 +76,13 @@ try {
     [IO.File]::WriteAllBytes($file, $bytes)
     $manifestPath = "$bundle/bundle-manifest.json"
     $original = [IO.File]::ReadAllText($manifestPath)
-    foreach ($module in @('bridge', 'completions', 'events', 'state-client', 'work-state')) {
-        $modulePath = "opencode-plugin/$module.ts"
+    foreach ($modulePath in @('index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js')) {
         $moduleBytes = [IO.File]::ReadAllBytes((Join-Path $bundle $modulePath))
         Remove-Item -LiteralPath (Join-Path $bundle $modulePath)
         $manifest = $original | ConvertFrom-Json
         $manifest.files = @($manifest.files | Where-Object path -NE $modulePath)
         $manifest | ConvertTo-Json -Depth 8 | Set-Content $manifestPath
-        Assert-Rejected { Test-Bundle $bundle } "Missing production module was accepted: $module"
+        Assert-Rejected { Test-Bundle $bundle } "Missing production entry was accepted: $modulePath"
         [IO.File]::WriteAllBytes((Join-Path $bundle $modulePath), $moduleBytes)
         [IO.File]::WriteAllText($manifestPath, $original)
     }
@@ -233,5 +200,5 @@ try {
     Assert-True ((Read-NativeShortcut $shortcutPath).TargetPath -ceq $foreignBinary) 'Ownership rejection changed the existing shortcut'
     Assert-True ((Read-NativeShortcut "$programs/Unrelated.lnk").TargetPath -eq 'C:\Windows\notepad.exe') 'Installer changed an unrelated shortcut'
     Assert-True (@(Get-ChildItem $root -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Installation left staging or backup directories'
-    Write-Output 'Bundle build, validation, installation, repair, relocation and Claude migration checks passed.'
+    Write-Output 'Bundle unit checks passed: compiled imports and licenses, file integrity, copying, repair and mocked host migration. Native startup and real host installation require test:bundle:installed.'
 } finally { Remove-DeploymentDirectory $temporary }

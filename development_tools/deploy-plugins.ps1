@@ -17,6 +17,7 @@ try {
     Invoke-Checked 'claude' @('plugin', 'validate', (Join-Path $Repository 'claude-plugin'))
     $zip = & "$PSScriptRoot/build-bundle.ps1"
     $zip = @($zip)[-1]
+    Invoke-Checked 'pwsh' @('-NoProfile', '-File', (Join-Path $Repository '.claude/skills/verify-civilized-agent/scripts/install-bundle.ps1'), '-Archive', $zip)
     $extract = Join-Path $Repository ('temp/bundles/.civilized-extract-' + [guid]::NewGuid())
     try {
         Expand-Archive -LiteralPath $zip -DestinationPath $extract

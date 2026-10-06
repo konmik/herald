@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree } from 'jsonc-parser'
+import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree } from 'jsonc-parser/lib/esm/main.js'
 
 export function parseJSONC(text) {
   const errors = []

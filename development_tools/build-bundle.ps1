@@ -84,7 +84,7 @@ try {
     }
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
     foreach ($name in @('install.ps1', 'shortcut.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
-    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', '--outdir', $stage, "--metafile=$metafile") | Out-Host
+    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', "--outfile=$(Join-Path $stage 'register-opencode.mjs')", "--metafile=$metafile") | Out-Host
     Copy-BundledLicenses $metafile $root $licenseDirectory
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
     $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported architecture' } }
