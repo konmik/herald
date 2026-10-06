@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test"
 import { Completions, type Completion } from "../completions"
 
-test("announces tasks after one minute and includes child sessions independently", async () => {
+test("announces independent main sessions after one minute", async () => {
   const results: Completion[] = []
   const completions = new Completions(async (id) => `Finished ${id}.`, async (item) => { results.push(item) })
-  completions.start("parent", 0)
-  completions.start("child", 10)
-  await completions.finish("a", "child", 60_010)
-  await completions.finish("b", "parent", 80_000)
-  expect(results.map((item) => item.sessionID)).toEqual(["child", "parent"])
+  completions.start("first", 0)
+  completions.start("second", 10)
+  await completions.finish("a", "second", 60_010)
+  await completions.finish("b", "first", 80_000)
+  expect(results.map((item) => item.sessionID)).toEqual(["second", "first"])
   expect(results.every((item) => item.emotion === "neutral")).toBe(true)
 })
 
