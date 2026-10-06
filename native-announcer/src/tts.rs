@@ -1,4 +1,5 @@
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKittenModelConfig, OfflineTtsModelConfig};
+use crate::platform::SpeechPlayback;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -85,7 +86,7 @@ pub fn gpu_worker() -> Result<(), String> {
     Ok(())
 }
 
-pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool) -> Result<(), String> {
+pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool, playback: Option<&SpeechPlayback<'_>>) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) || text.trim().is_empty() { return Ok(()); }
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
     let text = text.to_owned();
@@ -110,7 +111,16 @@ pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device
         })
     });
     let mut result = Ok(());
+    let mut ready_sent = false;
     for samples in &chunks {
+        if cancelled.load(Ordering::Relaxed) { break; }
+        if samples.is_empty() { continue; }
+        if !ready_sent {
+            ready_sent = true;
+            if let Some(playback) = playback {
+                if !playback.begin(cancelled) { break; }
+            }
+        }
         if cancelled.load(Ordering::Relaxed) { break; }
         if let Err(error) = crate::audio::play_pcm(&samples, 24000, volume, output_device, cancelled) {
             cancelled.store(true, Ordering::Relaxed);
@@ -120,7 +130,7 @@ pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device
     }
     drop(chunks);
     let generation = generator.join().map_err(|_| "Kitten TTS generation failed".to_string())?;
-    if cancelled.load(Ordering::Relaxed) { result } else { result.and(generation) }
+    if cancelled.load(Ordering::Relaxed) { result } else if result.is_ok() && generation.is_ok() && !ready_sent { Err("Kitten TTS generated no audio".into()) } else { result.and(generation) }
 }
 
 #[cfg(test)]
@@ -204,9 +214,9 @@ mod tests {
 
     #[test]
     fn cancelled_or_empty_speech_never_loads_the_model() {
-        assert!(speak("Hello", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), false).is_ok());
-        assert!(speak(" ", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_ok());
-        assert!(speak("a\0b", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_err());
+        assert!(speak("Hello", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), false, None).is_ok());
+        assert!(speak(" ", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false, None).is_ok());
+        assert!(speak("a\0b", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false, None).is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::process::Child;
 #[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn data_directory() -> PathBuf {
@@ -147,6 +147,63 @@ pub fn hidden_command(program: &str) -> Command {
     command
 }
 
+enum GateState {
+    Waiting,
+    Released,
+    Cancelled,
+}
+
+pub(crate) struct SpeechGate {
+    state: Mutex<GateState>,
+    wake: Condvar,
+}
+
+impl SpeechGate {
+    fn new() -> Self {
+        Self { state: Mutex::new(GateState::Waiting), wake: Condvar::new() }
+    }
+
+    fn release(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if matches!(*state, GateState::Waiting) { *state = GateState::Released; }
+            self.wake.notify_all();
+        }
+    }
+
+    fn cancel(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if matches!(*state, GateState::Waiting) { *state = GateState::Cancelled; }
+            self.wake.notify_all();
+        }
+    }
+
+    pub(crate) fn wait(&self, cancelled: &AtomicBool) -> bool {
+        let Ok(mut state) = self.state.lock() else { return false; };
+        while matches!(*state, GateState::Waiting) && !cancelled.load(Ordering::Relaxed) {
+            let Ok((next, _)) = self.wake.wait_timeout(state, Duration::from_millis(50)) else { return false; };
+            state = next;
+        }
+        matches!(*state, GateState::Released) && !cancelled.load(Ordering::Relaxed)
+    }
+}
+
+pub enum SpeechEvent {
+    Ready { id: String },
+    Finished { id: String, result: Result<(), String> },
+}
+
+pub(crate) struct SpeechPlayback<'a> {
+    gate: &'a SpeechGate,
+    ready: &'a dyn Fn(),
+}
+
+impl SpeechPlayback<'_> {
+    pub(crate) fn begin(&self, cancelled: &AtomicBool) -> bool {
+        (self.ready)();
+        self.gate.wait(cancelled)
+    }
+}
+
 struct SpeechCommand {
     text: String,
     id: String,
@@ -156,13 +213,15 @@ struct SpeechCommand {
     use_gpu: bool,
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
+    gate: Arc<SpeechGate>,
 }
 
 pub struct Speech {
-    pub events: mpsc::Receiver<(String, Result<(), String>)>,
+    pub events: mpsc::Receiver<SpeechEvent>,
     sender: mpsc::Sender<SpeechCommand>,
     cancelled: Arc<AtomicBool>,
     volume: Arc<AtomicU16>,
+    request: Option<(String, Arc<SpeechGate>)>,
 }
 
 impl Speech {
@@ -170,7 +229,7 @@ impl Speech {
         #[cfg(not(target_os = "windows"))]
         let _ = use_gpu;
         let (sender, commands) = mpsc::channel::<SpeechCommand>();
-        let (events, receiver) = mpsc::channel();
+        let (events, receiver) = mpsc::channel::<SpeechEvent>();
         std::thread::spawn(move || {
             if preload {
                 #[cfg(target_os = "windows")]
@@ -185,13 +244,20 @@ impl Speech {
                 use_gpu,
                 volume,
                 cancelled,
+                gate,
             } in commands
             {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu);
-                let _ = events.send((id, result));
+                let ready_events = events.clone();
+                let ready_id = id.clone();
+                let ready = move || {
+                    let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone() });
+                };
+                let playback = SpeechPlayback { gate: &gate, ready: &ready };
+                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu, Some(&playback));
+                let _ = events.send(SpeechEvent::Finished { id, result });
             }
         });
         Self {
@@ -199,6 +265,7 @@ impl Speech {
             sender,
             cancelled: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU16::new(100)),
+            request: None,
         }
     }
 
@@ -206,6 +273,8 @@ impl Speech {
         self.cancel();
         self.set_volume(settings.volume);
         self.cancelled = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(SpeechGate::new());
+        self.request = Some((id.into(), gate.clone()));
         let _ = self.sender.send(SpeechCommand {
             text: text.into(),
             id: id.into(),
@@ -215,11 +284,19 @@ impl Speech {
             use_gpu: settings.use_gpu,
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
+            gate,
         });
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
+        if let Some((_, gate)) = &self.request { gate.cancel(); }
+    }
+
+    pub fn release(&self, id: &str) {
+        if let Some((request_id, gate)) = &self.request {
+            if request_id == id { gate.release(); }
+        }
     }
 
     pub fn set_volume(&self, volume: u16) { self.volume.store(volume.min(100), Ordering::Relaxed); }
@@ -243,7 +320,9 @@ fn speak(
     volume: &AtomicU16,
     cancelled: &AtomicBool,
     _use_gpu: bool,
+    playback: Option<&SpeechPlayback<'_>>,
 ) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let mut command = if cfg!(target_os = "macos") {
         let mut command = hidden_command("say");
         command.args(["-r", if character == "claude" { "180" } else { "160" }]);
@@ -288,6 +367,10 @@ fn speak(
         command
     };
     let spoken = if cfg!(target_os = "macos") { format!("[[volm {}]]{text}", crate::settings::volume_gain(volume.load(Ordering::Relaxed))) } else { text.into() };
+    if let Some(playback) = playback {
+        if !playback.begin(cancelled) { return Ok(()); }
+    }
+    if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let mut child = command.arg(spoken).spawn().map_err(|e| e.to_string())?;
     loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -429,15 +512,19 @@ impl Preview {
         let stop = cancelled.clone();
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
-            crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
-            if stop.load(Ordering::Relaxed) { return Ok(()); }
             let mut speech = Speech::new(false, settings.use_gpu);
             speech.start("This is an announcement", "settings-preview", "opencode", &settings);
             let started = std::time::Instant::now();
             loop {
                 if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
                 match speech.events.recv_timeout(Duration::from_millis(50)) {
-                    Ok((_, result)) => return result,
+                    Ok(SpeechEvent::Ready { id }) if id == "settings-preview" => {
+                        crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
+                        if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
+                        speech.release("settings-preview");
+                    }
+                    Ok(SpeechEvent::Finished { id, result }) if id == "settings-preview" => return result,
+                    Ok(SpeechEvent::Ready { .. }) | Ok(SpeechEvent::Finished { .. }) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
@@ -608,7 +695,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
-        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false).unwrap();
+        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false, None).unwrap();
         assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
     }
 
@@ -619,6 +706,42 @@ mod tests {
         assert_eq!(meeting_evidence(Ok(false), Ok(false)), Ok(false));
         assert!(meeting_evidence(Err("Capture unavailable".into()), Ok(false)).is_err());
         assert!(meeting_evidence(Ok(false), Err("Controls unavailable".into())).is_err());
+    }
+
+    #[test]
+    fn speech_gate_waits_until_released() {
+        let gate = Arc::new(SpeechGate::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker_cancelled = cancelled.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx.send(worker_gate.wait(&worker_cancelled)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        gate.release();
+        assert!(finished_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+    }
+
+    #[test]
+    fn speech_gate_cancellation_unblocks_waiting_audio() {
+        let gate = Arc::new(SpeechGate::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker_cancelled = cancelled.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx.send(worker_gate.wait(&worker_cancelled)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancelled.store(true, Ordering::Relaxed);
+        gate.cancel();
+        assert!(!finished_rx.recv_timeout(Duration::from_secs(1)).unwrap());
     }
 
     #[test]

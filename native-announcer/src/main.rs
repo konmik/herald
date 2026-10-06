@@ -18,7 +18,7 @@ mod video;
 mod window;
 
 use chrono::Timelike;
-use platform::{Signal, Speech};
+use platform::{Signal, Speech, SpeechEvent};
 use render::Renderer;
 use state::{Inbox, MeetingStatus, Notification};
 use std::num::NonZeroU32;
@@ -44,6 +44,63 @@ struct Active {
     video_path: PathBuf,
     history_recorded: bool,
 }
+
+struct Pending {
+    notification: Notification,
+    requested: Instant,
+    duration: Duration,
+    video: Option<video::Video>,
+    video_path: PathBuf,
+}
+
+enum Presentation {
+    Idle,
+    Preparing(Pending),
+    Playing(Active),
+}
+
+impl Presentation {
+    fn notification(&self) -> Option<&Notification> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing(pending) => Some(&pending.notification),
+            Self::Playing(active) => Some(&active.notification),
+        }
+    }
+
+    fn take_preparing(&mut self, id: Option<&str>) -> Option<Pending> {
+        let matches = match (&*self, id) {
+            (Self::Preparing(pending), Some(id)) => pending.notification.id == id,
+            (Self::Preparing(_), None) => true,
+            _ => false,
+        };
+        if !matches { return None; }
+        match std::mem::replace(self, Self::Idle) {
+            Self::Preparing(pending) => Some(pending),
+            _ => None,
+        }
+    }
+}
+
+impl Pending {
+    fn activate(self, silent: bool) -> Active {
+        let started = Instant::now();
+        Active {
+            notification: self.notification,
+            started,
+            expires: started + self.duration,
+            end: None,
+            speaking: false,
+            speech_finished: silent,
+            silent,
+            video: self.video,
+            video_path: self.video_path,
+            history_recorded: false,
+        }
+    }
+}
+
+const SPEECH_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Active {
     fn ready_to_end(&self, now: Instant) -> bool {
@@ -183,7 +240,7 @@ fn run() -> Result<(), String> {
         meeting.clone(),
         stop.clone(),
     );
-    let mut current: Option<Active> = None;
+    let mut current = Presentation::Idle;
     let launched = Instant::now();
     let mut last_inbox = Instant::now() - Duration::from_secs(1);
     let mut next_frame = Instant::now();
@@ -212,7 +269,7 @@ fn run() -> Result<(), String> {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
             | Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. }, .. } => *control_flow = ControlFlow::Exit,
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-                speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
+                speech.cancel(); signal.stop(); current = Presentation::Idle; platform::hide(&window); inbox.save(None);
             }
             Event::MainEventsCleared => {
                 let now = Instant::now();
@@ -234,24 +291,56 @@ fn run() -> Result<(), String> {
                         Err(error) => state::log(&data, format!("Settings: {error}")),
                         _ => {}
                     }
-                    if inbox.read(current.as_ref().filter(|a| !demo_mode || a.notification.session_id != "demo").map(|a| &a.notification)) {
-                        speech.cancel(); signal.stop(); current = None; platform::hide(&window); inbox.save(None);
+                    let invalidated = {
+                        let notification = current.notification().filter(|n| !demo_mode || n.session_id != "demo");
+                        inbox.read(notification)
+                    };
+                    if invalidated {
+                        speech.cancel(); signal.stop(); current = Presentation::Idle; platform::hide(&window); inbox.save(None);
                     }
                     last_inbox = now;
                 }
                 let settings = &settings_store.current;
                 let local = chrono::Local::now();
                 let muted = meeting.muted(now) || platform::meeting_override(&data) || settings.quiet_at(local.hour() * 60 + local.minute()) || settings.volume == 0;
-                for (id, result) in speech.events.try_iter() {
-                    if let Some(active) = current.as_mut().filter(|a| a.notification.id == id) {
-                        active.speech_finished = true;
-                        if let Err(error) = result { state::log(&data, format!("Speech: {error}")); }
+                let mut activation = None;
+                if muted {
+                    if let Some(pending) = current.take_preparing(None) {
+                        speech.cancel();
+                        activation = Some((pending, true));
                     }
                 }
-                if let Some(active) = current.as_mut() {
-                    if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
+                for event in speech.events.try_iter() {
+                    match event {
+                        SpeechEvent::Ready { id } => {
+                            if let Some(pending) = current.take_preparing(Some(&id)) {
+                                if muted { speech.cancel(); }
+                                activation = Some((pending, muted));
+                            }
+                        }
+                        SpeechEvent::Finished { id, result } => {
+                            if let Some(pending) = current.take_preparing(Some(&id)) {
+                                if let Err(error) = result { state::log(&data, format!("Speech: {error}")); }
+                                speech.cancel();
+                                activation = Some((pending, true));
+                            } else if let Presentation::Playing(active) = &mut current {
+                                if active.notification.id == id {
+                                    active.speech_finished = true;
+                                    if let Err(error) = result { state::log(&data, format!("Speech: {error}")); }
+                                }
+                            }
+                        }
+                    }
                 }
-                if current.is_none() {
+                let timed_out = matches!(&current, Presentation::Preparing(pending) if now.saturating_duration_since(pending.requested) >= SPEECH_READY_TIMEOUT);
+                if timed_out {
+                    if let Some(pending) = current.take_preparing(None) {
+                        state::log(&data, format!("Speech readiness timed out for {}", pending.notification.id));
+                        speech.cancel();
+                        activation = Some((pending, true));
+                    }
+                }
+                if activation.is_none() && matches!(current, Presentation::Idle) {
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
                         renderer.text = notification.text.clone();
@@ -270,33 +359,44 @@ fn run() -> Result<(), String> {
                             Ok(video) => Some(video),
                             Err(error) => { state::log(&data, format!("Video: {error}")); None }
                         };
-                        if let Some(video) = &video {
-                            selected_videos.push(path.to_string_lossy().into_owned());
-                            video_frame_rates.push(video.fps());
-                        }
-                        let started = Instant::now();
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
-                        let expires = started + duration;
-                        current = Some(Active { notification, started, expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
-                        abrupt_window_ok &= platform::opacity(&window, 1.0);
-                        window_opacity_updates += 1;
-                        let previous_focus = platform::foreground();
-                        platform::show(&window);
-                        if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
-                        passive_window_ok &= platform::passive_window(&window, true);
-                        window.request_redraw();
-                        shown += 1;
-                        titles.push(renderer.title.clone());
-                        if muted { muted_announcements += 1; }
-                        if !muted { signal.play(settings); }
-                        inbox.save(current.as_ref().map(|a| &a.notification));
+                        let pending = Pending { notification, requested: Instant::now(), duration, video, video_path: path };
+                        if muted {
+                            activation = Some((pending, true));
+                        } else {
+                            speech.start(&pending.notification.text, &pending.notification.id, pending.notification.character(), settings);
+                            speech_started += 1;
+                            current = Presentation::Preparing(pending);
+                        }
                     }
                 }
+                if let Some((pending, silent)) = activation {
+                    let active = pending.activate(silent);
+                    abrupt_window_ok &= platform::opacity(&window, 1.0);
+                    window_opacity_updates += 1;
+                    let previous_focus = platform::foreground();
+                    platform::show(&window);
+                    if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
+                    passive_window_ok &= platform::passive_window(&window, true);
+                    window.request_redraw();
+                    shown += 1;
+                    titles.push(renderer.title.clone());
+                    if active.silent { muted_announcements += 1; }
+                    if let Some(video) = &active.video {
+                        selected_videos.push(active.video_path.to_string_lossy().into_owned());
+                        video_frame_rates.push(video.fps());
+                    }
+                    if !active.silent { signal.play(settings); }
+                    inbox.save(Some(&active.notification));
+                    current = Presentation::Playing(active);
+                }
                 let mut dismiss = false;
-                if let Some(active) = current.as_mut() {
+                if let Presentation::Playing(active) = &mut current {
+                    if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
                     if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
-                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), settings); speech_started += 1; }
+                        signal.stop();
+                        if !active.silent { speech.release(&active.notification.id); }
                     }
                     if active.end.is_none() && active.ready_to_end(now) {
                         active.end = Some(now); speech.cancel();
@@ -309,15 +409,20 @@ fn run() -> Result<(), String> {
                     } else { window.request_redraw(); }
                 }
                 if dismiss {
-                    current = None; signal.stop(); platform::hide(&window); finished += 1; inbox.save(None);
+                    current = Presentation::Idle; signal.stop(); platform::hide(&window); finished += 1; inbox.save(None);
                     passive_window_ok &= platform::passive_window(&window, false);
                 }
-                let interval = current.as_ref().map(|active| if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { 42 } else { (1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64 }).unwrap_or(250);
+                let interval = match &current {
+                    Presentation::Preparing(_) => 42,
+                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() => 42,
+                    Presentation::Playing(active) => (1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64,
+                    Presentation::Idle => 250,
+                };
                 next_frame = now + Duration::from_millis(interval);
                 *control_flow = ControlFlow::WaitUntil(next_frame);
             }
             Event::RedrawRequested(_) => {
-                if let Some(active) = &mut current {
+                if let Presentation::Playing(active) = &mut current {
                     let size = window.inner_size();
                     if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
                         let result = (|| -> Result<(), String> {
@@ -364,8 +469,8 @@ fn run() -> Result<(), String> {
             }
             Event::LoopDestroyed => {
                 stop.store(true, Ordering::Relaxed); speech.cancel(); signal.stop();
-                if let Some(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
-                inbox.save(current.as_ref().map(|a| &a.notification));
+                if let Presentation::Playing(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
+                inbox.save(current.notification());
                 if let Some(path) = &report {
                     let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": video_frame_rates.first().copied().unwrap_or(state::VIDEO_FPS as f64), "selectedVideos": selected_videos, "videoFrameRates": video_frame_rates, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
                     let _ = std::fs::write(path, report.to_string());
@@ -411,5 +516,34 @@ mod tests {
         active.silent = true;
         active.speech_finished = false;
         assert!(active.ready_to_end(started + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn pending_presentation_stays_hidden_until_ready() {
+        let notification = Notification {
+            id: "pending".into(),
+            session_id: "test".into(),
+            presence_session_id: String::new(),
+            completed: 1,
+            text: "Done.".into(),
+            title: "Test".into(),
+            character: "opencode".into(),
+            emotion: "neutral".into(),
+        };
+        let requested = Instant::now();
+        let mut presentation = Presentation::Preparing(Pending {
+            notification,
+            requested,
+            duration: Duration::from_secs(10),
+            video: None,
+            video_path: PathBuf::new(),
+        });
+        assert!(matches!(&presentation, Presentation::Preparing(_)));
+        assert!(presentation.take_preparing(Some("other")).is_none());
+        assert!(matches!(&presentation, Presentation::Preparing(_)));
+        let pending = presentation.take_preparing(Some("pending")).unwrap();
+        assert!(matches!(presentation, Presentation::Idle));
+        let active = pending.activate(true);
+        assert!(active.started >= requested);
     }
 }
