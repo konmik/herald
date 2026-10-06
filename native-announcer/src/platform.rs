@@ -433,21 +433,15 @@ impl Preview {
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
-            if stop.load(Ordering::Relaxed) { return Ok(()); }
-            let mut speech = Speech::new(false);
-            let character = crate::characters::resolve(&settings, std::path::Path::new(""), "opencode");
-            speech.start("This is an announcement", "settings-preview", &character, &settings);
-            let started = std::time::Instant::now();
-            loop {
-                if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
-                match speech.events.recv_timeout(Duration::from_millis(50)) {
-                    Ok((_, result)) => return result,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
-            }
+            play_example_speech(&settings, "This is an announcement", &stop)
         });
+        Self { cancelled, playback: Some(playback) }
+    }
+
+    pub fn voice(settings: Settings, text: String) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let playback = std::thread::spawn(move || play_example_speech(&settings, &text, &stop));
         Self { cancelled, playback: Some(playback) }
     }
 
@@ -466,34 +460,20 @@ impl Drop for Preview {
 }
 
 #[cfg(target_os = "windows")]
-pub struct PcmPreview {
-    cancelled: Arc<AtomicBool>,
-    playback: Option<std::thread::JoinHandle<Result<(), String>>>,
-}
-
-#[cfg(target_os = "windows")]
-impl PcmPreview {
-    pub fn start(samples: Vec<i16>, settings: Settings) -> Self {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let stop = cancelled.clone();
-        let playback = std::thread::spawn(move || {
-            if stop.load(Ordering::Relaxed) { return Ok(()); }
-            crate::audio::play_pcm(&samples, 16000, &AtomicU16::new(settings.volume), settings.output_device.as_deref(), &stop)
-        });
-        Self { cancelled, playback: Some(playback) }
-    }
-
-    pub fn finished(&mut self) -> Option<Result<(), String>> {
-        if !self.playback.as_ref()?.is_finished() { return None; }
-        Some(self.playback.take()?.join().unwrap_or_else(|_| Err("Voice preview failed.".into())))
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for PcmPreview {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(playback) = self.playback.take() { let _ = playback.join(); }
+fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>) -> Result<(), String> {
+    if stop.load(Ordering::Relaxed) { return Ok(()); }
+    let mut speech = Speech::new(false);
+    let character = crate::characters::resolve(settings, std::path::Path::new(""), "opencode");
+    speech.start(text, "settings-preview", &character, settings);
+    let started = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
+        match speech.events.recv_timeout(Duration::from_millis(50)) {
+            Ok((_, result)) => return result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
     }
 }
 

@@ -66,10 +66,8 @@ pub struct Client {
 }
 
 #[derive(Clone, Debug)]
-pub struct VoicePreview {
+pub struct DesignedVoice {
     pub generated_voice_id: String,
-    pub duration_secs: f64,
-    pub samples: Vec<i16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +102,7 @@ impl Client {
         Ok(Self { base_url, api_key })
     }
 
-    pub fn design(&self, voice_description: &str, sample_text: &str) -> Result<Vec<VoicePreview>, String> {
+    pub fn design(&self, voice_description: &str, sample_text: &str) -> Result<Vec<DesignedVoice>, String> {
         if !(20..=1000).contains(&voice_description.trim().chars().count()) || invalid_prose(voice_description) {
             return Err("Voice description must be between 20 and 1000 characters.".into());
         }
@@ -122,7 +120,7 @@ impl Client {
         if response.previews.is_empty() || response.previews.len() > 12 {
             return Err("ElevenLabs returned no usable voice previews.".into());
         }
-        response.previews.into_iter().map(VoicePreview::try_from).collect()
+        response.previews.into_iter().map(DesignedVoice::try_from).collect()
     }
 
     pub fn create_voice(&self, voice_name: &str, voice_description: &str, generated_voice_id: &str) -> Result<String, String> {
@@ -277,7 +275,7 @@ struct CreateResponse {
     voice_id: String,
 }
 
-impl TryFrom<PreviewResponse> for VoicePreview {
+impl TryFrom<PreviewResponse> for DesignedVoice {
     type Error = String;
 
     fn try_from(value: PreviewResponse) -> Result<Self, Self::Error> {
@@ -292,7 +290,7 @@ impl TryFrom<PreviewResponse> for VoicePreview {
         if bytes.len() > PREVIEW_LIMIT { return Err("ElevenLabs preview audio is too large.".into()); }
         let samples = decode_pcm(&bytes)?;
         if samples.is_empty() { return Err("ElevenLabs returned empty preview audio.".into()); }
-        Ok(Self { generated_voice_id: value.generated_voice_id, duration_secs: value.duration_secs, samples })
+        Ok(Self { generated_voice_id: value.generated_voice_id })
     }
 }
 
@@ -421,7 +419,7 @@ mod tests {
         let (base, handle) = mock(response, "text-to-voice/design");
         let sample = "Hear the herald.\nListen as I deliver this announcement with warmth and clarity. Your work is ready, and every check has passed.";
         let previews = Client::new(base, "fixture-key").unwrap().design("A theatrical herald.\nWarm and clear.", sample).unwrap();
-        assert_eq!(previews[0].samples, [123, -456]);
+        assert_eq!(previews[0].generated_voice_id, "multiline");
         let request = handle.join().unwrap();
         let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["text"], sample);
