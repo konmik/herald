@@ -1,54 +1,75 @@
-import { expect, mock, test } from "bun:test"
+import { expect, mock, spyOn, test } from "bun:test"
 
-let update = () => {}
-let cleanup = () => {}
-const commands: { sessionIDs: string[]; sequence: number }[] = []
+type Presence = { type: "presence"; clientID: string; sessionIDs: string[]; sequence: number; at: number }
+const commands: Presence[] = []
 
-mock.module("@opencode/plugin/tui", () => ({ Plugin: { define: (value: unknown) => value } }))
-mock.module("solid-js", () => ({
-  createEffect: (effect: () => void) => { update = effect; effect() },
-  onCleanup: (effect: () => void) => { cleanup = effect },
-}))
-mock.module("../bridge", () => ({ send: async (command: typeof commands[number]) => { commands.push(command) } }))
+mock.module("../bridge", () => ({ send: async (command: Presence) => { commands.push(command) } }))
 
 const { default: exported } = await import("../tui")
-const plugin = exported as unknown as { setup: (context: unknown) => void }
+const plugin = exported as unknown as { setup: (context: unknown) => () => Promise<void> }
 
-test("keeps background tabs present and clears presence when the window closes", () => {
+test("keeps background tabs present, reports periodically, and clears presence when the window closes", async () => {
   commands.length = 0
+  const timer = spyOn(globalThis, "setInterval")
+  let cleanup: (() => Promise<void>) | undefined
   let tabs = [{ sessionID: "foreground" }, { sessionID: "background" }]
-  plugin.setup({
-    ui: {
-      slot: ({ render }: { render: () => void }) => render(),
-      router: { current: () => ({ type: "session", sessionID: "foreground" }) },
-      tabs: { enabled: () => true, list: () => tabs },
-    },
-  })
   try {
-    expect(commands[0]?.sessionIDs).toEqual(["foreground", "background"])
+    cleanup = plugin.setup({
+      ui: {
+        router: { current: () => ({ type: "session", sessionID: "foreground" }) },
+        tabs: { enabled: () => true, list: () => tabs },
+      },
+    })
+    expect(timer).toHaveBeenCalledWith(expect.any(Function), 2000)
+    const tick = timer.mock.calls[0]?.[0] as () => void
+    const clientID = commands[0]?.clientID
+    expect(commands).toEqual([
+      { type: "presence", clientID, sessionIDs: ["foreground", "background"], sequence: 1, at: expect.any(Number) },
+    ])
     tabs = [{ sessionID: "background" }]
-    update()
-    expect(commands.at(-1)?.sessionIDs).toEqual(["background"])
+    tick()
+    expect(commands).toEqual([
+      { type: "presence", clientID, sessionIDs: ["foreground", "background"], sequence: 1, at: expect.any(Number) },
+      { type: "presence", clientID, sessionIDs: ["background"], sequence: 2, at: expect.any(Number) },
+    ])
   } finally {
-    cleanup()
+    timer.mockRestore()
+    if (cleanup) await cleanup()
   }
-  expect(commands.at(-1)?.sessionIDs).toEqual([])
-  expect(commands.map((command) => command.sequence)).toEqual([1, 2, 3])
+  expect(commands.at(-1)).toEqual({
+    type: "presence",
+    clientID: commands[0]?.clientID,
+    sessionIDs: [],
+    sequence: 3,
+    at: expect.any(Number),
+  })
 })
 
-test("a child route keeps its owning session present without requiring focus", () => {
+test("a child route keeps its owning session present without requiring focus", async () => {
   commands.length = 0
-  plugin.setup({
-    ui: {
-      slot: ({ render }: { render: () => void }) => render(),
-      router: { current: () => ({ type: "session", sessionID: "child" }) },
-      tabs: { enabled: () => false },
-    },
-    data: { session: { root: () => "parent" } },
-  })
+  const timer = spyOn(globalThis, "setInterval")
+  let cleanup: (() => Promise<void>) | undefined
   try {
-    expect(commands[0]?.sessionIDs).toEqual(["parent"])
+    cleanup = plugin.setup({
+      ui: {
+        router: { current: () => ({ type: "session", sessionID: "child" }) },
+        tabs: { enabled: () => false, list: () => [] },
+      },
+      data: { session: { root: () => "parent" } },
+    })
+    const clientID = commands[0]?.clientID
+    expect(commands).toEqual([
+      { type: "presence", clientID, sessionIDs: ["parent"], sequence: 1, at: expect.any(Number) },
+    ])
   } finally {
-    cleanup()
+    timer.mockRestore()
+    if (cleanup) await cleanup()
   }
+  expect(commands.at(-1)).toEqual({
+    type: "presence",
+    clientID: commands[0]?.clientID,
+    sessionIDs: [],
+    sequence: 2,
+    at: expect.any(Number),
+  })
 })
