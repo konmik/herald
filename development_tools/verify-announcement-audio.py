@@ -52,7 +52,7 @@ def main():
             with device.open(format=audio.paInt16, channels=channels, rate=rate, input=True, input_device_index=output["index"], frames_per_buffer=1024) as stream:
                 process = subprocess.Popen([
                     "pwsh", "-NoProfile", "-File",
-                    str(root / ".cursor/skills/verify-civilized-agent/scripts/announce.ps1"),
+                    str(root / ".claude/skills/verify-civilized-agent/scripts/announce.ps1"),
                     "-Speech", "-Evidence", str(evidence.relative_to(root)),
                 ], cwd=root)
                 try:

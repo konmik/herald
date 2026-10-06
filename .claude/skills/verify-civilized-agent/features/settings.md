@@ -19,7 +19,7 @@ Users apply announcer preferences, discard unapplied edits, and recover saved pr
 
 Preconditions: baseline from the index; a fresh `temp/verification/settings-proof` folder.
 
-- **Apply and reopen.** Run `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof`. The helper clicks quiet/schedule controls, enters `22:30` and `08:15`, sets volume to 35, leaves CPU selected, clicks Apply, and reads the saved file. The status is `Saved. Changes apply to the next announcement.`
+- **Apply and reopen.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof`. The helper clicks quiet/schedule controls, enters `22:30` and `08:15`, sets volume to 35, leaves CPU selected, clicks Apply, and reads the saved file. The status is `Saved. Changes apply to the next announcement.`
 - **Discard.** The same run changes volume to 15 without Apply, clicks Close, and verifies the saved bytes are unchanged.
 - **Reopen.** A new settings process must load 35% and the saved checkbox values. Compare `controls-reopened.json` with `settings-after.json`; require exit zero and `result.json` passed.
 - **Additional entry points.** The installed shortcut and repeated launch are not driven by this helper. For shortcut changes, inspect and launch that actual shortcut in a disposable profile. For single-instance/GPU changes, the existing `development_tools/verify-settings.ps1` supplies the concrete Win32 recipe, but add evidence preservation and retain both process objects before repeating its launch. Mark these entries skipped until driven.

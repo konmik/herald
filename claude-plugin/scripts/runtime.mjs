@@ -11,6 +11,10 @@ export const dataDirectory = process.env.CIVILIZED_AGENT_DATA ?? (process.platfo
     : join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'CivilizedAgent'))
 
 export function boot() {
+  if (process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION === '1') {
+    if (!process.env.CIVILIZED_AGENT_DATA) throw new Error('An external companion requires CIVILIZED_AGENT_DATA')
+    return
+  }
   const suffix = process.platform === 'win32' ? '.exe' : ''
   const packaged = new URL('../native-announcer/', import.meta.url)
   const announcer = existsSync(fileURLToPath(packaged)) ? packaged : new URL('../../native-announcer/', import.meta.url)

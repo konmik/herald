@@ -9,6 +9,8 @@ Read [the feature map](features/README.md), then select the affected entry point
 
 ## Launch
 
+For local automated checks, run `npm run setup:checks` once, then `npm run check`. Setup installs locked JavaScript dependencies and project-local Python check dependencies. Checks do not deploy, reload sessions, require GitHub, or run paid host tests.
+
 Prepare the CPU speech assets and build once:
 
 ```powershell
@@ -23,7 +25,7 @@ Use the debug executable rather than `npm run build:announcer`: that command bui
 Launch and drive a disposable settings instance:
 
 ```powershell
-pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof
+pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof
 ```
 
 The helper starts `native-announcer/target/debug/civilized-announcer.exe --settings`, waits up to ten seconds for its window, runs Doctor, drives the feature, closes and reopens it, then cleans up. Readiness is the owned `Civilized Agent settings` window with `Apply` and `Close` controls.
@@ -31,7 +33,7 @@ The helper starts `native-announcer/target/debug/civilized-announcer.exe --setti
 Announcement launch and drive:
 
 ```powershell
-pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/announce.ps1 -Evidence temp/verification/announcement-proof
+pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/announce.ps1 -Evidence temp/verification/announcement-proof
 ```
 
 This starts the same executable with `--isolated --assets native-announcer/resources --test-seconds 35`, an evidence report and render snapshot. Readiness is a live owned process and initialized inbox, followed by rendered history. The helper maintains presence through the production bridge. Playback exits automatically; the helper bounds the run at 45 seconds.
@@ -78,5 +80,6 @@ After every attempt, require `cleanup.json` to report `scratchRemoved: true` and
 
 - `scripts/verify.ps1`: launch, Doctor, drive native settings, capture control/file evidence, reopen, cleanup. Invoke with `pwsh -NoProfile -File` as above.
 - `scripts/announce.ps1`: isolated native playback through the real Claude bridge, presence heartbeat, render/report/history evidence, cleanup. Invoke with `pwsh -NoProfile -File` as above.
+- `scripts/hosts.ps1`: real Claude/OpenCode generation, background work, subagents, cancellation/restart and one final main announcement. Recipes and coverage limits are in the announcement map. It sets `CIVILIZED_AGENT_EXTERNAL_COMPANION=1` with unique data so the plugins use the helper-owned companion rather than starting another process. Host tests are explicit and use real model requests; they are not part of `npm run check`.
 
 PowerShell scripts are executable through `pwsh`; no file association or Unix executable bit is needed. Existing `development_tools/verify-settings.ps1` covers additional GPU preview and single-instance checks, but deletes its scratch proof. Existing `verify-announcer.ps1` targets the deployed binary and lacks failure cleanup. Neither replaces the evidence-preserving helpers here.

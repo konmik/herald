@@ -17,8 +17,8 @@ Open settings, adjust audio preferences and choose `Play example`. Choose `Stop 
 
 Preconditions: baseline; permission to play sound for the audible branch.
 
-- **Silent preview.** Run `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Preview -Evidence temp/verification/preview-silent`. Status becomes `Preview is silent at 0% volume.` Saved settings bytes remain unchanged.
-- **Start and stop.** Run `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Preview -Audible -Evidence temp/verification/preview-audible`. At draft 35% on System default, the button changes to `Stop example`; a second click reports `Preview stopped.` Controls and unchanged persisted bytes are retained as evidence.
+- **Silent preview.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Preview -Evidence temp/verification/preview-silent`. Status becomes `Preview is silent at 0% volume.` Saved settings bytes remain unchanged.
+- **Start and stop.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Preview -Audible -Evidence temp/verification/preview-audible`. At draft 35% on System default, the button changes to `Stop example`; a second click reports `Preview stopped.` Controls and unchanged persisted bytes are retained as evidence.
 - **Finish and GPU.** The existing `development_tools/verify-settings.ps1` shows the concrete completion recipe: click control 112, poll status control 109 for `Preview finished.`, then select GPU control 113 and repeat. It can play sound and needs the prepared GPU runtime. Add evidence-preserving cleanup before using it for proof; this shipped helper does not claim those branches.
 
 ## Gotchas

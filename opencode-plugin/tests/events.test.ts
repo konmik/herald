@@ -35,8 +35,9 @@ test("reconnects after a broken subscription", async () => {
 test("reconnects after a subscription ends and cancels the retry on unload", async () => {
   const controller = new AbortController()
   let subscriptions = 0
-  const task = consumeEvents(async function* () {
+  const task = consumeEvents(() => {
     subscriptions++
+    return { async *[Symbol.asyncIterator]() { yield* [] } }
   }, async () => {}, controller.signal, () => {}, 60_000)
   await Bun.sleep(1)
   controller.abort()

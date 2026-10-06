@@ -6,15 +6,7 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["bun", "node"],
-    "typeRoots": ["C:/third-party/opencode/packages/plugin/node_modules/@types"],
-    "paths": {
-      "@opencode/client": ["C:/third-party/opencode/packages/client/src/promise/index.ts"],
-      "@opencode/client/service": ["C:/third-party/opencode/packages/client/src/promise/service.ts"],
-      "@opencode/plugin": ["C:/third-party/opencode/packages/plugin/src/promise/index.ts"],
-      "@opencode/plugin/tui": ["C:/third-party/opencode/packages/plugin/src/tui/index.ts"],
-      "solid-js": ["C:/third-party/opencode/packages/plugin/node_modules/solid-js"]
-    }
+    "types": ["bun", "node"]
   },
-  "include": ["opencode-plugin/**/*.ts"]
+  "include": ["opencode-plugin/**/*.ts", "development_tools/host-verification/*.ts", "development_tools/host-verification/opencode/**/*.ts"]
 }

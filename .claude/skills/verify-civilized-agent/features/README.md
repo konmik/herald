@@ -12,7 +12,7 @@ Read this index before choosing a proof. Each entry point remains separately acc
 
 ## Driving conventions
 
-Use `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/verify.ps1` for real native controls, or `announce.ps1` for the production transport boundary. Control IDs are stable Win32 handles, not coordinate guesses. Preserve action transcripts, resulting controls, persisted state and process identity. Additional host paths require a disposable real host session; record unavailable entries as skipped, not passed.
+Use `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1` for real native controls, or `announce.ps1` for the production transport boundary. Control IDs are stable Win32 handles, not coordinate guesses. Preserve action transcripts, resulting controls, persisted state and process identity. Additional host paths require a disposable real host session; record unavailable entries as skipped, not passed.
 
 ## Features
 

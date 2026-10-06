@@ -1,16 +1,20 @@
-import { afterAll, expect, mock, test } from "bun:test"
+import { afterAll, expect, mock, spyOn, test } from "bun:test"
 
 type Event = { type: string; id: string; created: number; data: Record<string, unknown> }
 type Session = { id: string; parentID?: string; outcome?: string; location: { directory: string }; title: string }
 const commands: Record<string, unknown>[] = []
 const generated: string[] = []
+const spawned: string[][] = []
 const binary = process.env.CIVILIZED_AGENT_BINARY
 process.env.CIVILIZED_AGENT_BINARY = process.execPath
 let stateClient: unknown
 let discovered = true
 let serverPID = process.pid
 mock.module("@opencode/plugin", () => ({ Plugin: { define: (plugin: unknown) => plugin } }))
-mock.module("node:child_process", () => ({ spawn: () => ({ on: () => {}, unref: () => {} }) }))
+mock.module("node:child_process", () => ({ spawn: (_binary: string, args: string[]) => {
+  spawned.push(args)
+  return { on: () => {}, unref: () => {} }
+} }))
 mock.module("../bridge", () => ({ send: async (command: Record<string, unknown>) => { commands.push(command) } }))
 mock.module("@opencode/client", () => ({ OpenCode: { make: () => stateClient } }))
 mock.module("@opencode/client/service", () => ({ Service: {
@@ -26,6 +30,7 @@ afterAll(() => {
 async function fixture(stored?: unknown, minimumSeconds = 0) {
   commands.length = 0
   generated.length = 0
+  spawned.length = 0
   discovered = true
   serverPID = process.pid
   const sessions = new Map<string, Session>([["root", { id: "root", title: "Root task", location: { directory: "workspace" } }]])
@@ -205,6 +210,7 @@ test("checks all pages of child sessions", async () => {
 test("missing discovery or a different server fails closed and retains the task", async () => {
   for (const mismatch of [false, true]) {
     const f = await fixture()
+    const errors = spyOn(console, "error").mockImplementation(() => {})
     try {
       await f.start()
       discovered = mismatch
@@ -213,10 +219,41 @@ test("missing discovery or a different server fails closed and retains the task"
       expect(generated).toEqual([])
       expect(f.notices()).toEqual([])
       expect(f.snapshot()).toEqual({ runs: [{ sessionID: "root", started: 0 }] })
+      expect(errors).toHaveBeenCalledTimes(1)
+      expect(String(errors.mock.calls[0]?.[0])).toContain(mismatch
+        ? "Announcement state belongs to another OpenCode server"
+        : "Cannot discover the announcement server without starting a service")
       discovered = true
       serverPID = process.pid
       await f.finish(80_000)
       expect(f.notices()).toHaveLength(1)
+    } finally { await f.cleanup(); errors.mockRestore() }
+  }
+})
+
+test("an externally owned companion requires separate data and skips automatic launch", async () => {
+  const oldExternal = process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+  const oldData = process.env.CIVILIZED_AGENT_DATA
+  const oldBinary = process.env.CIVILIZED_AGENT_BINARY
+  try {
+    process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = "1"
+    process.env.CIVILIZED_AGENT_BINARY = "not-an-executable"
+    delete process.env.CIVILIZED_AGENT_DATA
+    await expect(fixture()).rejects.toThrow("An external companion requires CIVILIZED_AGENT_DATA")
+    process.env.CIVILIZED_AGENT_DATA = "isolated-proof"
+    const f = await fixture()
+    try {
+      await f.start()
+      await f.finish()
+      expect(spawned).toEqual([])
+      expect(f.notices()).toHaveLength(1)
     } finally { await f.cleanup() }
+  } finally {
+    if (oldExternal === undefined) delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+    else process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = oldExternal
+    if (oldData === undefined) delete process.env.CIVILIZED_AGENT_DATA
+    else process.env.CIVILIZED_AGENT_DATA = oldData
+    if (oldBinary === undefined) delete process.env.CIVILIZED_AGENT_BINARY
+    else process.env.CIVILIZED_AGENT_BINARY = oldBinary
   }
 })

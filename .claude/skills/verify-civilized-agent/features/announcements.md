@@ -5,7 +5,7 @@ Completed work produces a short animated, spoken summary without stealing focus,
 ## Sub-features
 
 - Claude and OpenCode main-task completions after at least one minute.
-- Subagent completion summaries fork the existing main conversation with the completed report appended.
+- Subagents stay silent; the final main-task summary forks the existing conversation.
 - Background work delays completion; new messages reset the timer.
 - Presence gates display; rendered messages enter history and leave the queue.
 - Animation plays from the shared library, stays topmost, and preserves focus.
@@ -23,9 +23,9 @@ Completed work produces a short animated, spoken summary without stealing focus,
 
 Preconditions: baseline; shared portrait/video assets present; fresh evidence directory; no concurrent focus check.
 
-- **Native delivery boundary.** Run `pwsh -NoProfile -File .cursor/skills/verify-civilized-agent/scripts/announce.ps1 -Evidence temp/verification/announcement-proof`. The helper submits presence and notify messages through `node claude-plugin/scripts/bridge.mjs`, the actual file transport. Require a rendered title `Verification session`, decoded animation frames, one completed message, preserved focus/passive window, exact text in `history.jsonl`, and an empty final queue.
+- **Native delivery boundary.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/announce.ps1 -Evidence temp/verification/announcement-proof`. The helper submits presence and notify messages through `node claude-plugin/scripts/bridge.mjs`, the actual file transport. Require a rendered title `Verification session`, decoded animation frames, one completed message, preserved focus/passive window, exact text in `history.jsonl`, and an empty final queue.
 - **Speech.** With permission to make sound, append `-Speech` and use a new evidence directory. Require one speech start and capture actual audio separately when testing sound quality.
-- **Real host generation.** In a disposable real Claude or OpenCode session, perform a task lasting at least one minute, then wait for completion without submitting a new user message. Record the initiating user action, task completion, native notification and matching isolated history. Verify the announcement was appended as a fork of that session, not a standalone request. This repository has no safe scripted host-session launcher; record the host path as unverified if a disposable session cannot be established. Do not drive the user's current conversation as a fixture.
+- **Real host generation.** Run `npm run test:hosts -- -HostName OpenCode -Model provider/model -Scenario Background` or `npm run test:hosts -- -HostName Claude -Scenario Background`. These make real model requests using existing credentials. Run `Subagent` and `CancelRestart` separately for either host. The runner owns a silent isolated companion and scratch host state, records original-context generation/fork calls, and requires one rendered main-session announcement after background work and the final report. OpenCode uses a private server registration and scratch configuration, with the existing credential database; only its newly created sessions are removed. Its minimum duration is zero for these timing tests; unit tests cover the one-minute threshold. Claude tests keep the real one-minute threshold. Keep transcripts local. A missing credential, denied tool, or model that does not follow the recipe is a failed/unverified entry, not a pass.
 - **Other host entries.** Repeat separately for each affected main/subagent/background path, tab visibility changes, and timer reset. For Claude status/dismissal, issue `/civilized-status` and `/voice-dismiss` in that disposable session and retain the command response plus queue/visible state. Transport injection cannot prove these paths.
 - **Mouse entry points.** In owned isolated playback, click the actual companion with the left or right mouse button and record disappearance plus queue state or owned process exit. Target the owned window, not a guessed screen coordinate. The helper's automatic completion does not prove either click.
 

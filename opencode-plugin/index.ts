@@ -10,13 +10,16 @@ import { canAnnounceFromLocalServer } from "./state-client"
 export default Plugin.define({
   id: "civilized-agent",
   async setup(ctx) {
-    const suffix = process.platform === "win32" ? ".exe" : ""
-    const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
-    if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Run npm run build:announcer on this platform.`)
-    const assets = fileURLToPath(new URL("../native-announcer/resources", import.meta.url))
-    const child = spawn(binary, ["--assets", assets], { detached: true, stdio: "ignore", windowsHide: true })
-    child.on("error", console.error)
-    child.unref()
+    if (process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION === "1") {
+      if (!process.env.CIVILIZED_AGENT_DATA) throw new Error("An external companion requires CIVILIZED_AGENT_DATA")
+    } else {
+      const suffix = process.platform === "win32" ? ".exe" : ""
+      const binary = process.env.CIVILIZED_AGENT_BINARY ?? fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
+      if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Run npm run build:announcer on this platform.`)
+      const child = spawn(binary, ["--assets", fileURLToPath(new URL("../native-announcer/resources", import.meta.url))], { detached: true, stdio: "ignore", windowsHide: true })
+      child.on("error", console.error)
+      child.unref()
+    }
     const completions = new Completions(
       async (sessionID, failed) => {
         const result = await ctx.session.generate({

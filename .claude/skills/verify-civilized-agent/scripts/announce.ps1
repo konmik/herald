@@ -7,12 +7,15 @@ $binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe
 $process = $null
 $transcribing = $false
 $oldData = $env:CIVILIZED_AGENT_DATA
+. (Join-Path $PSScriptRoot 'process.ps1')
+if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
+New-Item -ItemType Directory -Path $evidencePath | Out-Null
 function Send-Bridge($Message) {
     $Message | ConvertTo-Json -Compress | & node (Join-Path $root 'claude-plugin/scripts/bridge.mjs')
     if ($LASTEXITCODE -ne 0) { throw "Bridge exited $LASTEXITCODE" }
 }
 try {
-    New-Item -ItemType Directory -Path $evidencePath, $scratch -Force | Out-Null
+    New-Item -ItemType Directory -Path $scratch | Out-Null
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $env:CIVILIZED_AGENT_DATA = $scratch
@@ -30,8 +33,7 @@ try {
     $started = [DateTime]::UtcNow
     $queued = $false
     while (-not $process.WaitForExit(1000)) {
-        $process.Refresh()
-        if ($process.Path -ne $binary -or (Test-Path (Join-Path $scratch 'errors.log'))) { throw 'Doctor failed: wrong process or runtime errors' }
+        if (-not (Test-OwnedPlaybackProcess $process $binary (Join-Path $scratch 'errors.log'))) { break }
         Send-Bridge @{ type = 'presence'; clientID = 'verification'; sessionIDs = @('claude:verification'); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
         if (-not $queued -and ([DateTime]::UtcNow - $started).TotalSeconds -ge 3) {
             if ($process.MainWindowHandle -eq [IntPtr]::Zero -and -not (Test-Path (Join-Path $scratch 'inbox'))) { throw 'Announcer not ready' }

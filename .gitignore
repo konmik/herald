@@ -4,6 +4,7 @@
 Thumbs.db
 *.log
 node_modules/
+.venv/
 /generated-assets/
 /native-announcer/resources/*
 !/native-announcer/resources/portraits/

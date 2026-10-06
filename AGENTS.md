@@ -19,6 +19,8 @@ Save every character image in the single `native-announcer/resources/portraits/`
 
 ## Deployment
 
+For playback, settings, audio, or plugin-completion changes, read `.claude/skills/verify-civilized-agent/SKILL.md` and verify each affected entry point. Run `npm run check` after code changes.
+
 When asked to rebuild and deploy on Windows, run `npm run deploy:plugins` from the repository root. It tests both plugins, rebuilds and deploys the shared executable to `native-announcer/bin/civilized-announcer-win32-<arch>.exe`, deploys the plugins to the Claude WHG profile and the existing OpenCode registration, and restarts the announcer with videos from `native-announcer/resources/videos/`. Restart Claude sessions to load new hooks. Reload OpenCode only when requested with `npm run deploy:plugins -- -ReloadOpenCode`; this reloads all loaded locations and cancels pending permissions and forms. Use `-- -WhatIf` for a dry run.
 
 ## Generate herald video

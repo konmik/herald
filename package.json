@@ -8,14 +8,29 @@
     "./tui": "./opencode-plugin/tui.ts"
   },
   "scripts": {
+    "check": "pwsh -NoProfile -File development_tools/check.ps1",
+    "setup:checks": "pwsh -NoProfile -File development_tools/setup-checks.ps1",
+    "lint": "oxlint opencode-plugin claude-plugin/hooks claude-plugin/tests development_tools --deny-warnings",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p claude-plugin/tsconfig.json",
     "test": "bun test ./opencode-plugin/tests",
+    "test:claude": "claude plugin test ./claude-plugin",
+    "test:tools": "pwsh -NoProfile -File development_tools/test-tools.ps1",
+    "test:verification": "pwsh -NoProfile -File development_tools/test-verification-process.ps1",
+    "test:hosts": "pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/hosts.ps1",
     "build:announcer": "node development_tools/build-announcer.mjs",
     "deploy:plugins": "pwsh -NoProfile -File development_tools/deploy-plugins.ps1",
     "test:companion": "cargo test --locked --manifest-path native-announcer/Cargo.toml",
     "test:windows": "pwsh -NoProfile -File development_tools/verify-announcer.ps1",
     "test:settings": "pwsh -NoProfile -File development_tools/verify-settings.ps1",
-    "test:assets": "node --test development_tools/tests/assets.test.mjs",
+    "test:assets": "node --test development_tools/tests/assets.test.mjs development_tools/tests/runtime.test.mjs",
     "profile:plugin": "bun development_tools/profile-plugin.ts"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.292",
+    "@types/bun": "1.4.2",
+    "@types/node": "^22.0.0",
+    "oxlint": "^1.0.0",
+    "typescript": "5.9.3"
   },
   "peerDependencies": {
     "@opencode/client": ">=2.0.24",
