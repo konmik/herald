@@ -51,6 +51,7 @@ const API_BASE: &str = "ELEVENLABS_API_BASE_URL";
 const DESIGN_BODY_LIMIT: u64 = 8 * 1024 * 1024;
 const AUDIO_LIMIT: usize = 8 * 1024 * 1024;
 const PREVIEW_LIMIT: usize = 4 * 1024 * 1024;
+const VOICE_USAGE_LIMIT: usize = 64 * 1024;
 static SPEECH_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 struct SpeechSlot;
@@ -68,6 +69,24 @@ pub struct Client {
 #[derive(Clone, Debug)]
 pub struct DesignedVoice {
     pub generated_voice_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct VoiceUsage {
+    pub voice_slots_used: u64,
+    pub voice_limit: u64,
+    pub voice_add_edit_counter: u64,
+    pub max_voice_add_edits: Option<u64>,
+}
+
+impl VoiceUsage {
+    pub fn remaining_voice_slots(&self) -> u64 {
+        self.voice_limit.saturating_sub(self.voice_slots_used)
+    }
+
+    pub fn voice_add_edit_allowance(&self) -> Option<(u64, u64)> {
+        self.max_voice_add_edits.map(|limit| (limit, limit.saturating_sub(self.voice_add_edit_counter)))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +161,11 @@ impl Client {
         Ok(response.voice_id)
     }
 
+    pub fn voice_usage(&self) -> Result<VoiceUsage, String> {
+        let response = self.get("/v1/user/subscription")?;
+        serde_json::from_slice(&response).map_err(|_| "ElevenLabs returned an invalid voice usage response.".to_string())
+    }
+
     pub fn synthesize_speech(&self, voice_id: &str, text: &str, model: SpeechModel, cancelled: &Arc<AtomicBool>) -> Result<Vec<i16>, SpeechError> {
         if cancelled.load(Ordering::Relaxed) { return Err(SpeechError::Cancelled); }
         validate_remote_id(voice_id, "saved voice").map_err(SpeechError::Message)?;
@@ -195,6 +219,20 @@ impl Client {
         if !(200..300).contains(&response.status()) { return Err(format!("ElevenLabs request failed with HTTP {}.", response.status())); }
         if speech { validate_pcm_type(response.header("Content-Type").unwrap_or_default())?; }
         read_limited(response.into_reader(), if speech { AUDIO_LIMIT } else { DESIGN_BODY_LIMIT as usize })
+    }
+
+    fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}{}", self.base_url, path);
+        let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(10)).build();
+        let result = agent.get(&url).set("xi-api-key", &self.api_key).call();
+        let response = match result {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, _)) if matches!(status, 401 | 403) => return Err(format!("The API key is invalid or lacks User read permission. ElevenLabs returned HTTP {status}.")),
+            Err(ureq::Error::Status(status, _)) => return Err(format!("ElevenLabs request failed with HTTP {status}.")),
+            Err(ureq::Error::Transport(_)) => return Err("Could not reach ElevenLabs.".into()),
+        };
+        if !(200..300).contains(&response.status()) { return Err(format!("ElevenLabs request failed with HTTP {}.", response.status())); }
+        read_limited(response.into_reader(), VOICE_USAGE_LIMIT)
     }
 
     fn synthesize_turbo_speech(&self, voice_id: &str, text: &str, cancelled: &AtomicBool) -> Result<Vec<i16>, String> {
@@ -409,6 +447,83 @@ mod tests {
         assert!(normalize_base_url("http://[::1]:1234").is_ok());
         assert!(normalize_base_url("http://192.168.1.4:1234").is_err());
         assert!(normalize_base_url("https://example.test").is_err());
+    }
+
+    #[test]
+    fn voice_usage_get_is_authenticated_and_calculates_remaining_limits() {
+        let body = serde_json::json!({
+            "voice_slots_used": 2,
+            "voice_limit": 10,
+            "voice_add_edit_counter": 3,
+            "max_voice_add_edits": 65
+        }).to_string();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let (base, handle) = mock(response, "GET /v1/user/subscription");
+        let usage = Client::new(base, "fixture-key").unwrap().voice_usage().unwrap();
+        assert_eq!(usage.voice_slots_used, 2);
+        assert_eq!(usage.voice_limit, 10);
+        assert_eq!(usage.voice_add_edit_counter, 3);
+        assert_eq!(usage.max_voice_add_edits, Some(65));
+        assert_eq!(usage.remaining_voice_slots(), 8);
+        assert_eq!(usage.voice_add_edit_allowance(), Some((65, 62)));
+        assert!(handle.join().unwrap().to_ascii_lowercase().contains("xi-api-key: fixture-key"));
+    }
+
+    #[test]
+    fn voice_usage_allows_missing_or_null_edit_limit() {
+        for body in [
+            r#"{"voice_slots_used":2,"voice_limit":10,"voice_add_edit_counter":3}"#,
+            r#"{"voice_slots_used":2,"voice_limit":10,"voice_add_edit_counter":3,"max_voice_add_edits":null}"#,
+        ] {
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let (base, handle) = mock(response, "GET /v1/user/subscription");
+            let usage = Client::new(base, "fixture-key").unwrap().voice_usage().unwrap();
+            assert_eq!(usage.max_voice_add_edits, None);
+            assert_eq!(usage.voice_add_edit_allowance(), None);
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn voice_usage_remaining_limits_saturate_at_zero() {
+        let body = r#"{"voice_slots_used":12,"voice_limit":10,"voice_add_edit_counter":70,"max_voice_add_edits":65}"#;
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let (base, handle) = mock(response, "GET /v1/user/subscription");
+        let usage = Client::new(base, "fixture-key").unwrap().voice_usage().unwrap();
+        assert_eq!(usage.remaining_voice_slots(), 0);
+        assert_eq!(usage.voice_add_edit_allowance(), Some((65, 0)));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn voice_usage_rejects_malformed_and_private_http_errors() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nnot valid json!!".to_string();
+        let (base, handle) = mock(response, "GET /v1/user/subscription");
+        let client = Client::new(base, "secret-api-key").unwrap();
+        assert_eq!(client.voice_usage().unwrap_err(), "ElevenLabs returned an invalid voice usage response.");
+        handle.join().unwrap();
+
+        for status in [401, 403] {
+            let response = format!("HTTP/1.1 {status} Unauthorized\r\nContent-Length: 23\r\n\r\nsecret response details");
+            let (base, handle) = mock(response, "GET /v1/user/subscription");
+            let error = Client::new(base, "secret-api-key").unwrap().voice_usage().unwrap_err();
+            assert!(error.contains(&status.to_string()));
+            assert!(error.contains("invalid") && error.contains("permission"));
+            assert!(!error.contains("secret-api-key") && !error.contains("secret response"));
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn voice_usage_does_not_follow_redirects() {
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\n\r\n", destination.local_addr().unwrap());
+        let (base, handle) = mock(response, "GET /v1/user/subscription");
+        let error = Client::new(base, "fixture-secret").unwrap().voice_usage().unwrap_err();
+        assert_eq!(error, "ElevenLabs request failed with HTTP 302.");
+        handle.join().unwrap();
+        assert_eq!(destination.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[test]

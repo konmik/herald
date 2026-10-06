@@ -1,6 +1,7 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/civilized-announcer.exe'),
-    [string]$Evidence = (Join-Path (Split-Path $PSScriptRoot -Parent) ('temp/verification/characters-' + [guid]::NewGuid()))
+    [string]$Evidence = (Join-Path (Split-Path $PSScriptRoot -Parent) ('temp/verification/characters-' + [guid]::NewGuid())),
+    [switch]$SettingsOnly
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -8,6 +9,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class CivilizedCharacterTest {
+    public struct Rect { public int Left, Top, Right, Bottom; }
     public delegate bool ChildCallback(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr window, ChildCallback callback, IntPtr parameter);
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder name, int length);
@@ -16,6 +18,8 @@ public static class CivilizedCharacterTest {
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] public static extern int GetWindowLong(IntPtr window, int index);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll", EntryPoint = "FindWindowW", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string title);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll", EntryPoint = "PostMessageW")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
@@ -81,7 +85,12 @@ function Send-Control {
 }
 function Set-Control {
     param([int]$Id, [string]$Value)
-    [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC, [IntPtr]::Zero, $Value) | Out-Null
+    if ($Id -eq 204) {
+        Send-Control $Id 0xB1 0 -1 | Out-Null
+        [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC2, [IntPtr]1, $Value) | Out-Null
+    } else {
+        [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC, [IntPtr]::Zero, $Value) | Out-Null
+    }
     Add-Content (Join-Path $Evidence 'actions.txt') "Set control $Id to $Value"
 }
 function Read-Control {
@@ -181,7 +190,37 @@ try {
     $settingsInfo.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
     Open-Settings
     Select-SettingsPage 3
+    if ((Read-Control 118) -notmatch 'key') { throw 'Voice limits must explain that an ElevenLabs key is required.' }
     Set-Control 114 'character-ui-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match '8 (left|remaining)' } "Voice limits did not show the account's eight available slots. $(Read-Control 118)"
+    if ((Read-Control 118) -notmatch '2.*10' -or (Read-Control 118) -notmatch '62 (left|remaining)') { throw 'Voice limits must distinguish remaining slots from remaining additions or edits.' }
+    @{ usage = (Read-Control 118) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'voice-usage-before.json')
+    Set-Control 114 'invalid-fixture-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match '401|unavailable|denied' } "An invalid key did not show unavailable limits. $(Read-Control 118)"
+    if ((Read-Control 118) -match '8 (left|remaining)|invalid-fixture-key|character-ui-test-key') { throw 'A changed key must not retain old account counts or expose the key.' }
+    Set-Control 114 ''
+    if ((Read-Control 118) -notmatch 'key') { throw 'Clearing the key must clear the previous account usage.' }
+    Set-Control 114 'missing-permission-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match 'User read|user_read|permission' } "Account access errors must explain the required read permission. $(Read-Control 118)"
+    Set-Control 114 'character-ui-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match '8 (left|remaining)' } 'Refreshing voice limits did not recover after correcting the API key.'
+    Set-Control 114 'unknown-limit-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match 'unknown' } "A missing account operation limit must be shown as unknown. $(Read-Control 118)"
+    if ((Read-Control 118) -match 'unlimited') { throw 'A missing limit must not be interpreted as unlimited.' }
+    Set-Control 114 'slow-usage-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Get-Content $requestsFile -Raw) -match '"usageAccount":"slow"' } 'The delayed account request did not start.'
+    Set-Control 114 'character-ui-test-key'
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match '8 (left|remaining)' } 'The new account request did not replace the delayed one.'
+    Wait-Until { (Get-Content $requestsFile -Raw) -match '"event":"usage-response"' } 'The superseded account response did not finish.'
+    Start-Sleep -Milliseconds 250
+    if ((Read-Control 118) -notmatch '8 (left|remaining)') { throw 'A response for an old key overwrote the current account usage.' }
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The Speech service page must not show character fields.' }
     Select-CharactersPage
     $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
@@ -195,6 +234,15 @@ try {
     $sample = 'I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.'
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Bundled voice example did not finish. $(Read-Control 109)"
+    if ((Read-Control 216) -ne 'saved-generated-0') { throw 'The generated voice ID must appear immediately without Apply.' }
+    if (([CivilizedCharacterTest]::GetWindowLong((Get-Control 216), -16) -band 0x800) -eq 0) { throw 'The voice ID field must be read-only.' }
+    if (-not [CivilizedCharacterTest]::IsWindowEnabled((Get-Control 216))) { throw 'The voice ID must remain enabled for selection and copying.' }
+    $idBounds = [CivilizedCharacterTest+Rect]::new()
+    $promptBounds = [CivilizedCharacterTest+Rect]::new()
+    [CivilizedCharacterTest]::GetWindowRect((Get-Control 216), [ref]$idBounds) | Out-Null
+    [CivilizedCharacterTest]::GetWindowRect((Get-Control 204), [ref]$promptBounds) | Out-Null
+    if ($idBounds.Right -le $idBounds.Left -or $idBounds.Bottom -le $idBounds.Top -or $idBounds.Bottom -ge $promptBounds.Top -or $promptBounds.Bottom -le $promptBounds.Top) { throw 'The voice ID and description must have usable, separate rows.' }
+    @{ voiceId = (Read-Control 216); idBounds = $idBounds; descriptionBounds = $promptBounds } | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $Evidence 'voice-id-controls.json')
     if ((Get-Content $settingsPath -Raw) -match 'installedBundledCharacters') { throw 'Previewing a bundled character saved unapplied installation state.' }
     foreach ($obsolete in @(205, 207, 208, 209, 211, 212, 213, 215)) {
         if ([CivilizedCharacterTest]::GetDlgItem($process.MainWindowHandle, $obsolete) -ne [IntPtr]::Zero) { throw "Obsolete character control $obsolete remains." }
@@ -202,6 +250,7 @@ try {
     if ((Read-Control 210) -ne 'Play voice example' -or (Read-Control 214) -ne 'Delete' -or (Read-Control 202) -ne 'New') { throw 'Character actions do not match the simplified interface.' }
     Send-Control 202 0xF5 | Out-Null
     if (-not [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'New did not show the character editor.' }
+    if ((Read-Control 216) -eq 'saved-generated-0') { throw 'A new character must not display the previous character voice ID.' }
     Set-Control 203 'Test herald'
     Set-Control 204 'A warm theatrical herald with a rich British baritone, clear speech, and cheerful urgency.'
     Pick-Animation
@@ -209,13 +258,18 @@ try {
     $before | Set-Content (Join-Path $Evidence 'settings-before.json')
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Voice example did not finish. $(Read-Control 109)"
+    if ((Read-Control 216) -ne 'saved-generated-0') { throw 'The custom character must show its generated voice ID.' }
     if ((Get-Content $settingsPath -Raw) -ne $before) { throw 'Playing a voice saved unapplied settings.' }
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Reused voice example did not finish. $(Read-Control 109)"
     Set-Control 204 'An elderly royal herald with a warm weathered baritone, measured pacing, clear speech, and cheerful urgency.'
+    if ((Read-Control 216) -eq 'saved-generated-0') { throw 'Changing the voice prompt must clear the invalidated voice ID.' }
     Send-Control 210 0xF5 | Out-Null
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Changed prompt did not regenerate its voice. $(Read-Control 109)"
     Select-SettingsPage 3
+    Send-Control 119 0xF5 | Out-Null
+    Wait-Until { (Read-Control 118) -match '5 (left|remaining)' } "Voice limits did not refresh after creating three voices. $(Read-Control 118)"
+    @{ usage = (Read-Control 118) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'voice-usage-after.json')
     Set-Control 114 ''
     Select-CharactersPage
     Send-Control 210 0xF5 | Out-Null
@@ -245,7 +299,7 @@ try {
     Select-CharactersPage
     $saved = Get-Content $settingsPath -Raw
     $saved | Set-Content (Join-Path $Evidence 'settings-applied.json')
-    if ($saved -match 'character-ui-test-key|audio_base_64|"previews"|sampleText') { throw 'Settings contain plaintext credentials, transient previews, or character sample text.' }
+    if ($saved -match 'character-ui-test-key|audio_base_64|"previews"|sampleText|voice_slots_used|voice_limit|voice_add_edit_counter|max_voice_add_edits') { throw 'Settings contain plaintext credentials, transient previews, account usage, or character sample text.' }
     Set-Control 203 'Unapplied name'
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Settings did not close.' }
@@ -253,7 +307,8 @@ try {
     Open-Settings
     Select-CharactersPage
     if ((Read-Control 203) -ne 'Test herald' -or (Read-Control 206) -ne $video) { throw 'The character did not survive reopening.' }
-    @{ name = (Read-Control 203); animation = (Read-Control 206); selected = (Send-Control 201 0x188) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'reopened-controls.json')
+    if ((Read-Control 216) -ne 'saved-generated-0') { throw 'The saved voice ID did not survive reopening.' }
+    @{ name = (Read-Control 203); animation = (Read-Control 206); voiceId = (Read-Control 216); selected = (Send-Control 201 0x188) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'reopened-controls.json')
     Send-Control 201 0x186 1 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne 'Second character') { throw 'The list did not select the second character.' }
@@ -269,41 +324,48 @@ try {
     if (@($settings.characters.PSObject.Properties).Count -ne 12 -or $settings.selectedCharacter -ne $characterId) { throw 'Character deletion did not persist.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened settings did not close.' }
-    $reportPath = Join-Path $temporary 'report.json'
-    $playbackInfo = [Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($Binary))
-    $playbackInfo.UseShellExecute = $false
-    foreach ($key in @('CIVILIZED_AGENT_DATA', 'CIVILIZED_AGENT_TTS', 'ELEVENLABS_API_KEY', 'ELEVENLABS_API_BASE_URL')) { $playbackInfo.Environment[$key] = $settingsInfo.Environment[$key] }
-    foreach ($argument in @('--isolated', '--assets', (Join-Path $root 'native-announcer/resources'), '--test-seconds', '20', '--report', $reportPath, '--snapshot', (Join-Path $Evidence 'render.png'))) { $playbackInfo.ArgumentList.Add($argument) }
-    $playback = [Diagnostics.Process]::Start($playbackInfo)
-    $inbox = Join-Path $data 'inbox'
-    New-Item -ItemType Directory -Path $inbox -Force | Out-Null
-    Start-Sleep -Seconds 3
-    $notification = @{ type = 'notify'; id = 'character-runtime'; sessionID = 'character-runtime-session'; completed = 1; text = 'The native voice adviser uses the selected character for this announcement.'; title = 'Custom character verification'; character = 'opencode'; emotion = 'neutral' }
-    $notification | ConvertTo-Json | Set-Content (Join-Path $Evidence 'notification.json') -Encoding utf8NoBOM
-    $notification | ConvertTo-Json | Set-Content (Join-Path $inbox 'notify.tmp') -Encoding utf8NoBOM
-    Move-Item (Join-Path $inbox 'notify.tmp') (Join-Path $inbox 'notify.json')
-    $deadline = [DateTime]::UtcNow.AddSeconds(25)
-    $lastPresence = [DateTime]::MinValue
-    while (-not $playback.WaitForExit(100)) {
-        if ([DateTime]::UtcNow -gt $deadline) { throw 'Custom character playback did not finish.' }
-        if (([DateTime]::UtcNow - $lastPresence).TotalSeconds -ge 2) {
-            $presence = @{ type = 'presence'; clientID = 'character-verification'; sessionIDs = @('character-runtime-session'); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
-            $presence | ConvertTo-Json | Set-Content (Join-Path $inbox 'presence.tmp') -Encoding utf8NoBOM
-            Move-Item (Join-Path $inbox 'presence.tmp') (Join-Path $inbox ('presence-' + [guid]::NewGuid() + '.json'))
-            $lastPresence = [DateTime]::UtcNow
+    if (-not $SettingsOnly) {
+        $reportPath = Join-Path $temporary 'report.json'
+        $playbackInfo = [Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath($Binary))
+        $playbackInfo.UseShellExecute = $false
+        foreach ($key in @('CIVILIZED_AGENT_DATA', 'CIVILIZED_AGENT_TTS', 'ELEVENLABS_API_KEY', 'ELEVENLABS_API_BASE_URL')) { $playbackInfo.Environment[$key] = $settingsInfo.Environment[$key] }
+        foreach ($argument in @('--isolated', '--assets', (Join-Path $root 'native-announcer/resources'), '--test-seconds', '20', '--report', $reportPath, '--snapshot', (Join-Path $Evidence 'render.png'))) { $playbackInfo.ArgumentList.Add($argument) }
+        $playback = [Diagnostics.Process]::Start($playbackInfo)
+        $inbox = Join-Path $data 'inbox'
+        New-Item -ItemType Directory -Path $inbox -Force | Out-Null
+        Start-Sleep -Seconds 3
+        $notification = @{ type = 'notify'; id = 'character-runtime'; sessionID = 'character-runtime-session'; completed = 1; text = 'The native voice adviser uses the selected character for this announcement.'; title = 'Custom character verification'; character = 'opencode'; emotion = 'neutral' }
+        $notification | ConvertTo-Json | Set-Content (Join-Path $Evidence 'notification.json') -Encoding utf8NoBOM
+        $notification | ConvertTo-Json | Set-Content (Join-Path $inbox 'notify.tmp') -Encoding utf8NoBOM
+        Move-Item (Join-Path $inbox 'notify.tmp') (Join-Path $inbox 'notify.json')
+        $deadline = [DateTime]::UtcNow.AddSeconds(25)
+        $lastPresence = [DateTime]::MinValue
+        while (-not $playback.WaitForExit(100)) {
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'Custom character playback did not finish.' }
+            if (([DateTime]::UtcNow - $lastPresence).TotalSeconds -ge 2) {
+                $presence = @{ type = 'presence'; clientID = 'character-verification'; sessionIDs = @('character-runtime-session'); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+                $presence | ConvertTo-Json | Set-Content (Join-Path $inbox 'presence.tmp') -Encoding utf8NoBOM
+                Move-Item (Join-Path $inbox 'presence.tmp') (Join-Path $inbox ('presence-' + [guid]::NewGuid() + '.json'))
+                $lastPresence = [DateTime]::UtcNow
+            }
         }
+        if ($playback.ExitCode -ne 0) { throw "Custom character playback exited with $($playback.ExitCode)." }
+        $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+        Copy-Item $reportPath (Join-Path $Evidence 'playback-report.json')
+        if ($report.selectedVideos.Count -ne 1 -or [IO.Path]::GetFullPath($report.selectedVideos[0]) -ne [IO.Path]::GetFullPath($video) -or $report.decodedVideoFrames -lt 16 -or $report.speechStarted -ne 1) { throw 'Playback did not decode the chosen animation and start speech.' }
+        if (-not $report.passiveWindow -or -not $report.focusUnchanged -or $report.finished -ne 1) { throw 'The character did not finish without taking focus.' }
+    } else {
+        Add-Content (Join-Path $Evidence 'actions.txt') 'Skipped normal announcement playback. This run verifies settings controls and voice examples only.'
     }
-    if ($playback.ExitCode -ne 0) { throw "Custom character playback exited with $($playback.ExitCode)." }
-    $report = Get-Content $reportPath -Raw | ConvertFrom-Json
-    Copy-Item $reportPath (Join-Path $Evidence 'playback-report.json')
-    if ($report.selectedVideos.Count -ne 1 -or [IO.Path]::GetFullPath($report.selectedVideos[0]) -ne [IO.Path]::GetFullPath($video) -or $report.decodedVideoFrames -lt 16 -or $report.speechStarted -ne 1) { throw 'Playback did not decode the chosen animation and start speech.' }
-    if (-not $report.passiveWindow -or -not $report.focusUnchanged -or $report.finished -ne 1) { throw 'The character did not finish without taking focus.' }
     $requests = @(Get-Content $requestsFile | ForEach-Object { $_ | ConvertFrom-Json })
     $design = @($requests | Where-Object { $_.url -like '/v1/text-to-voice/design*' })
     $create = @($requests | Where-Object { $_.url -eq '/v1/text-to-voice' })
     $examples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $sample })
-    $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
-    if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[1].body.text -ne $sample -or $design[2].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $examples.Count -ne 4 -or $speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Bundled and custom voice creation, shared example reuse, prompt changes, and runtime speech did not match user actions.' }
+    if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[1].body.text -ne $sample -or $design[2].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $examples.Count -ne 4) { throw 'Bundled and custom voice creation, shared example reuse, and prompt changes did not match user actions.' }
+    if (-not $SettingsOnly) {
+        $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
+        if ($speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Runtime speech did not match the announcement.' }
+    }
     if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used local speech.' }
     Copy-Item $requestsFile (Join-Path $Evidence 'requests.jsonl')
     Open-Settings
@@ -328,8 +390,9 @@ try {
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened character settings did not close.' }
     if (Test-Path (Join-Path $data 'history.jsonl')) { Copy-Item (Join-Path $data 'history.jsonl') (Join-Path $Evidence 'history.jsonl') }
-    Add-Content (Join-Path $Evidence 'actions.txt') 'Verified preinstalled and custom profiles, Apply, Close, reopen, tombstones, actual runtime animation, and speech requests.'
-    Write-Output 'Preinstalled profiles, shared voice examples, custom voice creation, deletion, tombstones, Apply, Close, reopen, custom video decoding, and ElevenLabs runtime speech passed.'
+    @{ passed = $true; settingsOnly = [bool]$SettingsOnly; runtimePlaybackVerified = -not $SettingsOnly } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
+    Add-Content (Join-Path $Evidence 'actions.txt') 'Verified voice IDs and limits, preinstalled and custom profiles, Apply, Close, reopen, tombstones, and voice example requests.'
+    Write-Output 'Voice IDs and limits, preinstalled profiles, voice examples, voice creation, deletion, tombstones, Apply, Close, and reopen passed.'
     Write-Output "Evidence saved to $Evidence"
 } catch {
     $_ | Out-String | Set-Content (Join-Path $Evidence 'failure.txt')

@@ -7,7 +7,7 @@ pub fn run(_data: &std::path::Path, _assets: &std::path::Path) -> Result<(), Str
 mod native {
     use crate::audio::OutputDevice;
     use crate::characters::{validate_registry, Character, CharacterVoice};
-    use crate::elevenlabs::{Client, SpeechModel};
+    use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
     use crate::settings::{format_time, parse_time, Settings};
     use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
@@ -39,12 +39,16 @@ mod native {
     const API_KEY: i32 = 114;
     const API_KEY_LABEL: i32 = 116;
     const API_KEY_HINT: i32 = 117;
+    const VOICE_USAGE: i32 = 118;
+    const USAGE_REFRESH: i32 = 119;
     const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
     const CHARACTER_NAME: i32 = 203;
     const VOICE_PROMPT: i32 = 204;
     const VIDEO_PATH: i32 = 206;
+    const VOICE_ID: i32 = 216;
+    const VOICE_ID_LABEL: i32 = 217;
     const PLAY_VOICE: i32 = 210;
     const REMOVE_CHARACTER: i32 = 214;
     const CHARACTER_EMPTY: i32 = 402;
@@ -92,6 +96,8 @@ mod native {
         CHARACTER_NAME,
         PROMPT_LABEL,
         VOICE_PROMPT,
+        VOICE_ID_LABEL,
+        VOICE_ID,
         VIDEO_LABEL,
         VIDEO_PATH,
         PLAY_VOICE,
@@ -122,6 +128,8 @@ mod native {
         API_KEY_LABEL,
         API_KEY,
         API_KEY_HINT,
+        VOICE_USAGE,
+        USAGE_REFRESH,
     ];
 
     static PAGE_SPECS: [PageSpec; 4] = [
@@ -171,6 +179,14 @@ mod native {
         id: String,
         receiver: Receiver<Result<String, String>>,
         cancelled: Arc<AtomicBool>,
+    }
+
+    enum VoiceUsageState {
+        NoKey,
+        NotLoaded,
+        Loading(Receiver<Result<VoiceUsage, String>>),
+        Ready(VoiceUsage),
+        Failed(String),
     }
 
     struct UiResources {
@@ -232,6 +248,7 @@ mod native {
         character_ids: Vec<String>,
         removed_characters: std::collections::BTreeSet<String>,
         voice_job: Option<VoiceJob>,
+        voice_usage: VoiceUsageState,
         updating: bool,
         active_page: Page,
         ui: UiResources,
@@ -289,12 +306,19 @@ mod native {
         for id in [APPLY, CLOSE, STATUS] { set_font(window, id, form.ui.body); }
         set_font(window, PAGE_TITLE, form.ui.heading);
         set_font(window, PAGE_HINT, form.ui.muted);
-        for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, CHARACTER_EMPTY, STATUS] {
+        for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS] {
             set_font(window, id, form.ui.muted);
         }
     }
 
     fn empty_draft() -> Character { Character::default() }
+
+    fn voice_id_text(voice: &CharacterVoice) -> &str {
+        match voice {
+            CharacterVoice::Local { .. } => "",
+            CharacterVoice::ElevenLabs { voice_id } => voice_id,
+        }
+    }
 
     unsafe fn draft_for<'a>(form: &'a mut Form, id: &str) -> &'a mut Character {
         if !form.drafts.contains_key(id) {
@@ -317,6 +341,7 @@ mod native {
             draft.voice = CharacterVoice::default();
             draft.voice_description = voice_description;
         }
+        let voice_id = voice_id_text(&draft.voice).to_owned();
         let video = PathBuf::from(video);
         draft.animation_path = if video.as_os_str().is_empty() || video == PathBuf::from("Choose video…") {
             None
@@ -333,6 +358,7 @@ mod native {
             SendMessageW(list, LB_INSERTSTRING, index, wide(&name).as_ptr() as isize);
             SendMessageW(list, LB_SETCURSEL, index, 0);
         }
+        label(window, VOICE_ID, &voice_id);
     }
 
     unsafe fn refresh_page_visibility(window: HWND, form: &Form) {
@@ -344,7 +370,7 @@ mod native {
             for id in page.controls { ShowWindow(GetDlgItem(window, *id), visibility); }
         }
         let show_editor = form.active_page == Page::Characters && form.active_draft.is_some();
-        for id in [NAME_LABEL, CHARACTER_NAME, PROMPT_LABEL, VOICE_PROMPT, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER] {
+        for id in [NAME_LABEL, CHARACTER_NAME, PROMPT_LABEL, VOICE_PROMPT, VOICE_ID_LABEL, VOICE_ID, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER] {
             ShowWindow(GetDlgItem(window, id), if show_editor { SW_SHOW } else { SW_HIDE });
         }
         ShowWindow(GetDlgItem(window, CHARACTER_EMPTY), if form.active_page == Page::Characters && !show_editor { SW_SHOW } else { SW_HIDE });
@@ -357,9 +383,10 @@ mod native {
             let draft = draft_for(form, &id);
             label(window, CHARACTER_NAME, &draft.name);
             label(window, VOICE_PROMPT, &draft.voice_description);
+            label(window, VOICE_ID, voice_id_text(&draft.voice));
             label(window, VIDEO_PATH, &draft.animation_path.as_ref().map_or_else(|| "Choose video…".into(), |path| crate::characters::animation_path(&id, path, &assets).to_string_lossy().into_owned()));
         } else {
-            for id in [CHARACTER_NAME, VOICE_PROMPT, VIDEO_PATH] { label(window, id, ""); }
+            for id in [CHARACTER_NAME, VOICE_PROMPT, VOICE_ID, VIDEO_PATH] { label(window, id, ""); }
         }
         form.updating = false;
         refresh_page_visibility(window, form);
@@ -414,13 +441,15 @@ mod native {
     }
 
     unsafe fn select_page(window: HWND, form: &mut Form, page: Page) {
-        if form.active_page != page {
+        let entering = form.active_page != page;
+        if entering {
             capture_current_draft(window, form);
             stop_previews(window, form);
             form.active_page = page;
         }
         SendMessageW(GetDlgItem(window, SIDEBAR), LB_SETCURSEL, page.index(), 0);
         refresh_page_visibility(window, form);
+        if entering && page == Page::SpeechService { refresh_voice_usage(window, form, false); }
     }
 
     unsafe fn populate_pages(window: HWND, form: &Form) {
@@ -509,6 +538,87 @@ mod native {
         }
     }
 
+    fn initial_voice_usage_state(api_key: Option<&str>) -> VoiceUsageState {
+        if api_key.is_some_and(|key| !key.trim().is_empty()) { VoiceUsageState::NotLoaded } else { VoiceUsageState::NoKey }
+    }
+
+    fn voice_usage_text(state: &VoiceUsageState) -> String {
+        match state {
+            VoiceUsageState::NoKey => "Enter an ElevenLabs key to load voice usage.".into(),
+            VoiceUsageState::NotLoaded => "Refresh to load ElevenLabs voice usage.".into(),
+            VoiceUsageState::Loading(_) => "Loading ElevenLabs voice usage…".into(),
+            VoiceUsageState::Failed(error) => format!("Voice usage unavailable: {error}"),
+            VoiceUsageState::Ready(usage) => {
+                let slots = format!("Voice slots: {} of {} used; {} remaining.", usage.voice_slots_used, usage.voice_limit, usage.remaining_voice_slots());
+                let edits = match usage.voice_add_edit_allowance() {
+                    Some((limit, remaining)) => format!("Voice additions and edits: {} of {} used; {} remaining this billing period.", usage.voice_add_edit_counter, limit, remaining),
+                    None => format!("Voice additions and edits: {} used; limit unknown; remaining unknown.", usage.voice_add_edit_counter),
+                };
+                format!("{slots}\r\n{edits}")
+            }
+        }
+    }
+
+    unsafe fn render_voice_usage(window: HWND, form: &Form) {
+        label(window, VOICE_USAGE, &voice_usage_text(&form.voice_usage));
+        let has_key = !text(window, API_KEY).trim().is_empty();
+        let loading = matches!(form.voice_usage, VoiceUsageState::Loading(_));
+        EnableWindow(GetDlgItem(window, USAGE_REFRESH), (has_key && !loading) as i32);
+    }
+
+    unsafe fn clear_voice_usage(window: HWND, form: &mut Form) {
+        KillTimer(window, 4);
+        form.voice_usage = initial_voice_usage_state(Some(text(window, API_KEY).trim()));
+        render_voice_usage(window, form);
+    }
+
+    unsafe fn refresh_voice_usage(window: HWND, form: &mut Form, force: bool) {
+        let key = text(window, API_KEY).trim().to_owned();
+        if key.is_empty() {
+            KillTimer(window, 4);
+            form.voice_usage = VoiceUsageState::NoKey;
+            render_voice_usage(window, form);
+            return;
+        }
+        if !force && matches!(form.voice_usage, VoiceUsageState::Loading(_)) { return; }
+        if let Err(error) = crate::elevenlabs::validate_api_key(&key) {
+            KillTimer(window, 4);
+            form.voice_usage = VoiceUsageState::Failed(error);
+            render_voice_usage(window, form);
+            return;
+        }
+        let mut settings = read_speech_settings(window, form);
+        settings.elevenlabs_api_key = Some(key);
+        let (sender, receiver) = mpsc::channel();
+        form.voice_usage = VoiceUsageState::Loading(receiver);
+        render_voice_usage(window, form);
+        SetTimer(window, 4, 100, None);
+        std::thread::spawn(move || {
+            let result: Result<VoiceUsage, String> = (|| {
+                let client = Client::from_settings(&settings)?.ok_or_else(|| "Enter an ElevenLabs key to load voice usage.".to_string())?;
+                client.voice_usage()
+            })();
+            let _ = sender.send(result);
+        });
+    }
+
+    unsafe fn poll_voice_usage(window: HWND, form: &mut Form) {
+        let result = match &form.voice_usage {
+            VoiceUsageState::Loading(receiver) => match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => Err("Voice usage request stopped unexpectedly.".into()),
+            },
+            _ => return,
+        };
+        KillTimer(window, 4);
+        form.voice_usage = match result {
+            Ok(usage) => VoiceUsageState::Ready(usage),
+            Err(error) => VoiceUsageState::Failed(error),
+        };
+        render_voice_usage(window, form);
+    }
+
     unsafe fn set_cloud_controls(window: HWND, enabled: bool) {
         EnableWindow(GetDlgItem(window, APPLY), enabled as i32);
         for id in [CHARACTER_LIST, NEW_CHARACTER, CHARACTER_NAME, VOICE_PROMPT, VIDEO_PATH, REMOVE_CHARACTER] {
@@ -527,9 +637,12 @@ mod native {
         KillTimer(window, 2);
         set_cloud_controls(window, true);
         label(window, PLAY_VOICE, "Play voice example");
+        let created = result.is_ok();
         if let Ok(voice_id) = &result {
             if let Some(draft) = form.drafts.get_mut(&job.id) { draft.voice = CharacterVoice::ElevenLabs { voice_id: voice_id.clone() }; }
+            set_draft_controls(window, form);
         }
+        if created { refresh_voice_usage(window, form, true); }
         if job.cancelled.load(Ordering::Relaxed) { return; }
         let mut settings = read_speech_settings(window, form);
         if let Err(error) = result {
@@ -659,10 +772,13 @@ mod native {
         move_control(CHARACTER_NAME, character_editor_x, character_list_y + 28, character_editor_width, 34);
         move_control(VIDEO_LABEL, character_editor_x, character_list_y + 78, character_editor_width, 24);
         move_control(VIDEO_PATH, character_editor_x, character_list_y + 106, character_editor_width, 36);
-        move_control(PROMPT_LABEL, character_editor_x, character_list_y + 158, character_editor_width, 24);
         let character_actions_y = footer_y - 42;
-        let prompt_height = character_actions_y - (character_list_y + 186) - 16;
-        move_control(VOICE_PROMPT, character_editor_x, character_list_y + 186, character_editor_width, prompt_height);
+        move_control(VOICE_ID_LABEL, character_editor_x, character_list_y + 158, character_editor_width, 24);
+        move_control(VOICE_ID, character_editor_x, character_list_y + 186, character_editor_width, 34);
+        move_control(PROMPT_LABEL, character_editor_x, character_list_y + 236, character_editor_width, 24);
+        let prompt_y = character_list_y + 264;
+        let prompt_height = character_actions_y - prompt_y - 16;
+        move_control(VOICE_PROMPT, character_editor_x, prompt_y, character_editor_width, prompt_height);
         move_control(PLAY_VOICE, character_editor_x, character_actions_y, 160, 34);
         move_control(REMOVE_CHARACTER, main_right - 92, character_actions_y, 92, 34);
 
@@ -688,6 +804,11 @@ mod native {
         move_control(API_KEY_LABEL, main_left, 224, main_width, 24);
         move_control(API_KEY, main_left, 252, main_width, 34);
         move_control(API_KEY_HINT, main_left, 294, main_width, 54);
+        let usage_y = 366;
+        let usage_button_y = footer_y - 42;
+        let usage_height = (usage_button_y - usage_y - 10).max(40);
+        move_control(VOICE_USAGE, main_left, usage_y, main_width, usage_height);
+        move_control(USAGE_REFRESH, main_right - 120, usage_button_y, 120, 34);
 
         move_control(STATUS, 24, height - 96, width - 268, 80);
         move_control(APPLY, width - 228, height - 48, 100, 32);
@@ -722,7 +843,7 @@ mod native {
                 let dc = wparam as HDC;
                 let control = lparam as HWND;
                 SetBkMode(dc, 1);
-                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
+                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
                     SetTextColor(dc, color(92, 101, 112));
                 } else {
                     SetTextColor(dc, color(32, 37, 43));
@@ -768,6 +889,7 @@ mod native {
                     API_KEY if code == EN_CHANGE => {
                         let status = api_key_status(Some(text(window, API_KEY).trim()));
                         label(window, API_KEY_HINT, &status);
+                        clear_voice_usage(window, &mut *form);
                     }
                     APPLY => match save(window, &mut *form) {
                         Ok(()) => {}
@@ -782,6 +904,7 @@ mod native {
                         let selected = selected_output(window, &*form);
                         populate_outputs(window, &mut *form, selected.as_deref());
                     }
+                    USAGE_REFRESH => refresh_voice_usage(window, &mut *form, false),
                     PREVIEW => {
                         if (*form).voice_preview.take().is_some() {
                             KillTimer(window, 3);
@@ -876,8 +999,12 @@ mod native {
                 }
                 0
             }
+            WM_TIMER if !form.is_null() && wparam == 4 => {
+                poll_voice_usage(window, &mut *form);
+                0
+            }
             WM_CLOSE => { DestroyWindow(window); 0 }
-            WM_DESTROY => { if !form.is_null() { stop_previews(window, &mut *form); } KillTimer(window, 2); PostQuitMessage(0); 0 }
+            WM_DESTROY => { if !form.is_null() { stop_previews(window, &mut *form); } KillTimer(window, 2); KillTimer(window, 4); PostQuitMessage(0); 0 }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
     }
@@ -907,6 +1034,7 @@ mod native {
 
     pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
         let settings = Settings::load(data)?;
+        let voice_usage = initial_voice_usage_state(settings.elevenlabs_api_key.as_deref());
         let mut form = Box::new(Form {
             data: data.into(),
             assets: assets.into(),
@@ -920,6 +1048,7 @@ mod native {
             active_draft: None,
             character_ids: Vec::new(),
             voice_job: None,
+            voice_usage,
             removed_characters: std::collections::BTreeSet::new(),
             updating: false,
             active_page: Page::Audio,
@@ -990,6 +1119,8 @@ mod native {
                 control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (252, 252, 676, 34))?;
                 SendMessageW(GetDlgItem(window, API_KEY), EM_SETLIMITTEXT, 4096, 0);
                 control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (252, 294, 676, 54))?;
+                control(window, "STATIC", &voice_usage_text(&form.voice_usage), VOICE_USAGE, 0, (252, 366, 676, 128))?;
+                control(window, "BUTTON", "Refresh", USAGE_REFRESH, WS_TABSTOP, (808, 526, 120, 34))?;
 
                 control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
                 control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
@@ -998,8 +1129,10 @@ mod native {
                 control(window, "EDIT", "", CHARACTER_NAME, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (502, 154, 426, 34))?;
                 control(window, "STATIC", "Video", VIDEO_LABEL, 0, (502, 204, 426, 24))?;
                 control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (502, 232, 426, 36))?;
-                control(window, "STATIC", "Voice description", PROMPT_LABEL, 0, (502, 284, 426, 24))?;
-                control(window, "EDIT", "", VOICE_PROMPT, WS_BORDER | WS_TABSTOP | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL, (502, 312, 426, 180))?;
+                control(window, "STATIC", "ElevenLabs voice ID", VOICE_ID_LABEL, 0, (502, 284, 426, 24))?;
+                control(window, "EDIT", "", VOICE_ID, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_READONLY as u32, (502, 312, 426, 34))?;
+                control(window, "STATIC", "Voice description", PROMPT_LABEL, 0, (502, 362, 426, 24))?;
+                control(window, "EDIT", "", VOICE_PROMPT, WS_BORDER | WS_TABSTOP | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL, (502, 390, 426, 102))?;
                 control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (502, 518, 160, 34))?;
                 control(window, "BUTTON", "Delete", REMOVE_CHARACTER, WS_TABSTOP, (836, 518, 92, 34))?;
 
@@ -1022,6 +1155,7 @@ mod native {
             populate_outputs(window, &mut form, selected.as_deref());
             refresh_characters(window, &mut form);
             refresh_page_visibility(window, &form);
+            render_voice_usage(window, &form);
             let mut client = RECT::default();
             GetClientRect(window, &mut client);
             layout(window, client.right, client.bottom);
