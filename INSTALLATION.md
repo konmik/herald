@@ -1,12 +1,12 @@
 # Windows bundle
 
-PowerShell 7 is required. Build on Windows with Node and Cargo matching the machine architecture:
+PowerShell 7 is required. Build on Windows with Bun, Node and Cargo matching the machine architecture:
 
 ```powershell
 npm run build:bundle
 ```
 
-The release ZIP is written to `temp/bundles`. Building prepares speech assets and compiles into a disposable target directory; it does not replace the checkout executable or install anything.
+The release ZIP is written to `temp/bundles`. Building prepares speech assets and reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The separate build cache keeps release builds away from the running checkout executable.
 
 To repackage an already extracted complete bundle without rebuilding native code or downloading assets:
 

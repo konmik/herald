@@ -12,7 +12,7 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'temp/bundles' }
 Assert-NoLinks $OutputDirectory
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $stage = Join-Path $OutputDirectory ('.civilized-stage-' + [guid]::NewGuid())
-$target = Join-Path $OutputDirectory ('.civilized-build-' + [guid]::NewGuid())
+$target = Join-Path $root 'native-announcer/target/bundle'
 $archive = Join-Path $OutputDirectory ('.civilized-archive-' + [guid]::NewGuid() + '.zip')
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -96,6 +96,5 @@ try {
     Write-Output $zip
 } finally {
     Remove-DeploymentDirectory $stage
-    Remove-DeploymentDirectory $target
     if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 }
