@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_the_integration_video_without_a_shared_library() {
+    fn uses_the_integration_video_without_a_shared_library() {
         let assets = Path::new("missing-announcer-test-assets");
         assert_eq!(select_path(assets, "claude"), assets.join("claude/neutral.mp4"));
     }

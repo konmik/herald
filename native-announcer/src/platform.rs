@@ -1,4 +1,5 @@
 use crate::state::{log, MeetingStatus};
+use crate::characters::{ResolvedCharacter, ResolvedVoice};
 use crate::settings::Settings;
 use crate::window::Window;
 use std::path::{Path, PathBuf};
@@ -207,10 +208,10 @@ impl SpeechPlayback<'_> {
 struct SpeechCommand {
     text: String,
     id: String,
-    character: String,
-    preferred: Option<String>,
-    output_device: Option<String>,
-    use_gpu: bool,
+    voice: ResolvedVoice,
+    source_character: String,
+    local_speaker: Option<String>,
+    settings: Settings,
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
     gate: Arc<SpeechGate>,
@@ -225,23 +226,21 @@ pub struct Speech {
 }
 
 impl Speech {
-    pub fn new(preload: bool, use_gpu: bool) -> Self {
-        #[cfg(not(target_os = "windows"))]
-        let _ = use_gpu;
+    pub fn new(preload: bool) -> Self {
         let (sender, commands) = mpsc::channel::<SpeechCommand>();
         let (events, receiver) = mpsc::channel::<SpeechEvent>();
         std::thread::spawn(move || {
             if preload {
                 #[cfg(target_os = "windows")]
-                if let Err(error) = crate::tts::prepare(use_gpu) { log(&data_directory(), error); }
+                if let Err(error) = crate::tts::prepare() { log(&data_directory(), error); }
             }
             for SpeechCommand {
                 text,
                 id,
-                character,
-                preferred,
-                output_device,
-                use_gpu,
+                voice,
+                source_character,
+                local_speaker,
+                settings,
                 volume,
                 cancelled,
                 gate,
@@ -256,7 +255,7 @@ impl Speech {
                     let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone() });
                 };
                 let playback = SpeechPlayback { gate: &gate, ready: &ready };
-                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu, Some(&playback));
+                let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback));
                 let _ = events.send(SpeechEvent::Finished { id, result });
             }
         });
@@ -269,7 +268,7 @@ impl Speech {
         }
     }
 
-    pub fn start(&mut self, text: &str, id: &str, character: &str, settings: &Settings) {
+    pub fn start(&mut self, text: &str, id: &str, character: &ResolvedCharacter, settings: &Settings) {
         self.cancel();
         self.set_volume(settings.volume);
         self.cancelled = Arc::new(AtomicBool::new(false));
@@ -278,10 +277,10 @@ impl Speech {
         let _ = self.sender.send(SpeechCommand {
             text: text.into(),
             id: id.into(),
-            character: character.into(),
-            preferred: settings.voices.get(character).cloned(),
-            output_device: settings.output_device.clone(),
-            use_gpu: settings.use_gpu,
+            voice: character.voice.clone(),
+            source_character: character.source_character.clone(),
+            local_speaker: character.local_speaker.clone(),
+            settings: settings.clone(),
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
             gate,
@@ -314,25 +313,29 @@ use crate::tts::speak;
 #[cfg(not(target_os = "windows"))]
 fn speak(
     text: &str,
-    character: &str,
-    preferred: Option<&str>,
-    _output_device: Option<&str>,
+    voice: &ResolvedVoice,
+    source_character: &str,
+    local_speaker: Option<&str>,
     volume: &AtomicU16,
     cancelled: &AtomicBool,
-    _use_gpu: bool,
+    _settings: &Settings,
     playback: Option<&SpeechPlayback<'_>>,
 ) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
+    let preferred = match voice {
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
+        ResolvedVoice::ElevenLabs { .. } => local_speaker,
+    };
     let mut command = if cfg!(target_os = "macos") {
         let mut command = hidden_command("say");
-        command.args(["-r", if character == "claude" { "180" } else { "160" }]);
+        command.args(["-r", if source_character == "claude" { "180" } else { "160" }]);
         let available = Command::new("say")
             .args(["-v", "?"])
             .output()
             .map_err(|e| e.to_string())?;
         let available = String::from_utf8_lossy(&available.stdout);
         let names = preferred.map(|p| vec![p]).unwrap_or_else(|| {
-            if character == "claude" {
+            if source_character == "claude" {
                 vec!["Alex", "Daniel"]
             } else {
                 vec!["Daniel", "Alex"]
@@ -356,13 +359,13 @@ fn speak(
         command.args(["-a", &(crate::settings::volume_gain(volume.load(Ordering::Relaxed)) * 100.0).round().to_string()]);
         command.args([
             "-v",
-            preferred.unwrap_or(if character == "claude" {
+            preferred.unwrap_or(if source_character == "claude" {
                 "en-us+m2"
             } else {
                 "en-us+m3"
             }),
             "-s",
-            if character == "claude" { "180" } else { "160" },
+            if source_character == "claude" { "180" } else { "160" },
         ]);
         command
     };
@@ -507,13 +510,14 @@ pub struct Preview {
 
 #[cfg(target_os = "windows")]
 impl Preview {
-    pub fn start(data: PathBuf, settings: Settings) -> Self {
+    pub fn start(data: PathBuf, settings: Settings, assets: PathBuf) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
-            let mut speech = Speech::new(false, settings.use_gpu);
-            speech.start("This is an announcement", "settings-preview", "opencode", &settings);
+            let mut speech = Speech::new(false);
+            let character = crate::characters::resolve(&settings, &assets, "opencode");
+            speech.start("This is an announcement", "settings-preview", &character, &settings);
             let started = std::time::Instant::now();
             loop {
                 if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
@@ -534,6 +538,13 @@ impl Preview {
         Self { cancelled, playback: Some(playback) }
     }
 
+    pub fn voice(settings: Settings, text: String, assets: PathBuf) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let playback = std::thread::spawn(move || play_example_speech(&settings, &text, &stop, &assets));
+        Self { cancelled, playback: Some(playback) }
+    }
+
     pub fn finished(&mut self) -> Option<Result<(), String>> {
         if !self.playback.as_ref()?.is_finished() { return None; }
         Some(self.playback.take()?.join().unwrap_or_else(|_| Err("Audio preview failed.".into())))
@@ -545,6 +556,25 @@ impl Drop for Preview {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
         if let Some(playback) = self.playback.take() { let _ = playback.join(); }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
+    if stop.load(Ordering::Relaxed) { return Ok(()); }
+    let mut speech = Speech::new(false);
+    let character = crate::characters::resolve(settings, assets, "opencode");
+    speech.start(text, "settings-preview", &character, settings);
+    let started = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
+        match speech.events.recv_timeout(Duration::from_millis(50)) {
+            Ok(SpeechEvent::Ready { id }) => speech.release(&id),
+            Ok(SpeechEvent::Finished { result, .. }) => return result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
     }
 }
 
@@ -695,7 +725,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
-        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false, None).unwrap();
+        let settings = Settings { output_device: Some("unavailable-test-device".into()), ..Default::default() };
+        speak("This is an announcement", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(75), &cancelled, &settings, None).unwrap();
         assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
     }
 

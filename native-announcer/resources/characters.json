@@ -1,0 +1,57 @@
+{
+  "hatted-herald-01": {
+    "name": "Crimson Court Herald",
+    "voiceDescription": "A male voice in his late twenties. A bright, warm tenor with a smooth youthful texture and a light southern English accent. Clear consonants, nimble phrasing, and an easy smile in the voice. He delivers news with courteous confidence and a little courtly flourish. Energetic but never rushed or shouted. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-01.mp4"
+  },
+  "hatted-herald-02": {
+    "name": "Blue Feather Herald",
+    "voiceDescription": "A male voice in his seventies. A deep, rounded bass-baritone with an aged, slightly husky texture and a restrained English accent. Deliberate pacing, clear English diction, and firm sentence endings. His delivery is formal, patient, and reassuring, with quiet authority rather than volume. Let a small note of pleasure enter good news. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-02.mp4"
+  },
+  "hatted-herald-03": {
+    "name": "Emerald Court Herald",
+    "voiceDescription": "A male voice in his thirties. A resonant mid-low baritone with a smooth chest tone, crisp consonants, and clear international English diction. Steady medium pacing and direct, confident emphasis. His voice is composed and alert, with warm enthusiasm when announcing a success. Keep the theatrical character restrained and the speech conversational, never booming. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-03.mp4"
+  },
+  "hatted-herald-04": {
+    "name": "Burgundy Messenger",
+    "voiceDescription": "A male voice in his late twenties. A light, slightly breathy tenor with a gentle northern English accent and a fine grain in the voice. Brisk but clear phrasing, quick changes in intonation, and friendly urgency. He sounds eager to bring useful news, not anxious or breathless. Keep each sentence easy to follow and soften the finish with a modest smile. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-04.mp4"
+  },
+  "hatted-herald-05": {
+    "name": "Ruby Seal Herald",
+    "voiceDescription": "A male voice in his forties. A focused, velvety baritone with a dry edge and precise standard English diction. Measured medium pacing, crisp articulation, and controlled emphasis on the important words. His manner is serious and assured, with understated warmth. A formal announcement spoken at a comfortable conversational level, never stern, threatening, or exaggerated. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-05.mp4"
+  },
+  "hatted-herald-06": {
+    "name": "Violet Elder Herald",
+    "voiceDescription": "A male voice in his late seventies. A soft, rounded baritone with a papery, gently weathered texture and clear English diction. Unhurried pacing, short natural pauses, and a kind smile in the voice. He sounds thoughtful and quietly pleased to share news. Preserve enough projection to hear every word, without becoming a whisper or an exaggerated elderly voice. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-06.mp4"
+  },
+  "hatted-herald-07": {
+    "name": "Amber Road Herald",
+    "voiceDescription": "A male voice in his forties. A warm, textured low baritone with an earthy rasp and relaxed English diction. Medium pacing, open vowels, and lively, slightly wry emphasis. He sounds experienced, practical, and pleased to bring an update. Use a friendly storyteller's rhythm while keeping the message concise. No shouting, growling, or cartoon performance. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-07.mp4"
+  },
+  "hatted-herald-08": {
+    "name": "Azure Royal Herald",
+    "voiceDescription": "A male voice in his early thirties. A clear, bright baritone with a polished, smooth tone and precise international English diction. Confident medium-fast pacing, clean consonants, and upbeat emphasis. He sounds poised and welcoming, with a restrained ceremonial flourish. Enthusiastic news at conversational volume, never a booming proclamation. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-08.mp4"
+  },
+  "hatted-herald-09": {
+    "name": "Copper Beard Herald",
+    "voiceDescription": "A male voice in his fifties. A hearty mid-low baritone with a warm, grainy texture and a light Scottish accent. Clear English words, a gentle rhythmic lilt, and moderate pacing. His manner is good-humoured, candid, and welcoming, with a little amused warmth. Keep the accent natural and intelligible. No broad comic imitation, roaring, or forced gruffness. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-09.mp4"
+  },
+  "hatted-herald-10": {
+    "name": "Chinese Herald",
+    "voiceDescription": "A 70-year-old male voice. A warm, resonant baritone with a lightly weathered, gently gravelly texture. Clear English diction, measured pacing, crisp consonants, and lively emphasis. Wise and authoritative, yet approachable, with a faint smile and gentle urgency when delivering news. Restrained theatrical delivery, never booming or cartoonish. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-10.mp4"
+  },
+  "hatted-herald-11": {
+    "name": "Golden Cap Herald",
+    "voiceDescription": "A male voice in his sixties. A sturdy, rounded bass-baritone with a coarse, gently husky texture and a mild western English accent. Plain, clear words, steady pacing, and deliberate emphasis. His delivery is earnest and dependable, with a dry touch of humour and quiet satisfaction in good news. Speak comfortably rather than bellowing or performing a comic rustic voice. Natural breath and clean studio audio.",
+    "animationPath": "videos/hatted-herald-11.mp4"
+  }
+}

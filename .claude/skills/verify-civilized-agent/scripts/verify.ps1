@@ -81,12 +81,12 @@ try {
     Launch
     $before = Snapshot 'controls-before'
     if ($Feature -eq 'Output') {
-        Write-Output 'Check unavailable device fallback; Refresh devices; Apply.'
-        if ($before.output -ne 'Selected device unavailable (using system default)') { throw 'Missing unavailable-device fallback' }
+        Write-Output 'Check unavailable device uses system default; Refresh devices; Apply.'
+        if ($before.output -ne 'Selected device unavailable (using system default)') { throw 'Unavailable device did not use system default' }
         Send-Control 111 0xF5 | Out-Null
         Send-Control 107 0xF5 | Out-Null
         if ((Get-Content $settingsPath -Raw | ConvertFrom-Json).outputDevice -ne 'unavailable-verification-device') { throw 'Apply lost unavailable device' }
-        Copy-Item $settingsPath (Join-Path $evidencePath 'settings-fallback.json')
+        Copy-Item $settingsPath (Join-Path $evidencePath 'settings-unavailable-device.json')
         Write-Output 'Choose System default; Apply.'
         Send-Control 106 0x14E 0 | Out-Null
         Send-Control 107 0xF5 | Out-Null

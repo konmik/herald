@@ -1,1 +1,1 @@
-export function sessionTitle(path: string, fallback?: string): string
+export function sessionTitle(path: string, defaultTitle?: string): string

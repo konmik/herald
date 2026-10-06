@@ -14,6 +14,21 @@ from development_tools.asset_library import clean_assets
 
 
 class AssetTests(unittest.TestCase):
+    def test_cleanup_preserves_bundled_character_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory) / "generated"
+            runtime = Path(directory) / "runtime"
+            runtime.mkdir()
+            catalog = runtime / "characters.json"
+            catalog.write_text('{"herald":{"name":"Herald"}}')
+            (runtime / "old-job.json").write_text('{}')
+            result = clean_assets(assets, runtime)
+            self.assertEqual(catalog.read_text(), '{"herald":{"name":"Herald"}}')
+            self.assertEqual(result, {"portraits": 0, "videos": 0, "removed": 1})
+            self.assertFalse((runtime / "old-job.json").exists())
+            self.assertEqual(clean_assets(assets, runtime), {"portraits": 0, "videos": 0, "removed": 0})
+            self.assertEqual(catalog.read_text(), '{"herald":{"name":"Herald"}}')
+
     def test_cleanup_keeps_portraits_and_videos_but_removes_prompts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

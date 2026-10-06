@@ -3,6 +3,8 @@
 mod capture;
 #[cfg(any(target_os = "windows", test))]
 mod audio;
+mod characters;
+mod elevenlabs;
 mod history;
 mod platform;
 mod private;
@@ -12,8 +14,6 @@ mod settings;
 mod settings_app;
 #[cfg(target_os = "windows")]
 mod tts;
-#[cfg(target_os = "windows")]
-mod gpu;
 mod video;
 mod window;
 
@@ -34,6 +34,7 @@ use window::{
 
 struct Active {
     notification: Notification,
+    character: characters::ResolvedCharacter,
     started: Instant,
     expires: Instant,
     end: Option<Instant>,
@@ -47,6 +48,7 @@ struct Active {
 
 struct Pending {
     notification: Notification,
+    character: characters::ResolvedCharacter,
     requested: Instant,
     duration: Duration,
     video: Option<video::Video>,
@@ -87,6 +89,7 @@ impl Pending {
         let started = Instant::now();
         Active {
             notification: self.notification,
+            character: self.character,
             started,
             expires: started + self.duration,
             end: None,
@@ -118,8 +121,6 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if std::env::args().any(|argument| argument == "--gpu-speech-worker") { return tts::gpu_worker(); }
     let mut assets = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
@@ -169,7 +170,7 @@ fn run() -> Result<(), String> {
         }
     }
     let data = platform::data_directory();
-    if open_settings { return settings_app::run(&data); }
+    if open_settings { return settings_app::run(&data, &assets); }
     if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
         return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
     }
@@ -231,7 +232,7 @@ fn run() -> Result<(), String> {
     let preload_speech = settings_store.current.volume > 0
         && !settings_store.current.quiet_at(local.hour() * 60 + local.minute())
         && !platform::meeting_override(&data);
-    let mut speech = Speech::new(preload_speech, settings_store.current.use_gpu);
+    let mut speech = Speech::new(preload_speech);
     let mut signal = Signal::new(&data);
     let meeting = Arc::new(MeetingStatus::new());
     let stop = Arc::new(AtomicBool::new(false));
@@ -285,8 +286,6 @@ fn run() -> Result<(), String> {
                         Ok(true) => {
                             speech.set_volume(settings_store.current.volume);
                             signal.stop();
-                            #[cfg(target_os = "windows")]
-                            if !settings_store.current.use_gpu { std::thread::spawn(gpu::release); }
                         }
                         Err(error) => state::log(&data, format!("Settings: {error}")),
                         _ => {}
@@ -354,17 +353,32 @@ fn run() -> Result<(), String> {
                             let position = monitor.position();
                             window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
                         }
-                        let path = video::select_path(&assets, notification.character());
+                        let mut character = characters::resolve(settings, &assets, notification.character());
+                        if let Some(warning) = &character.video_warning { state::log(&data, warning); }
+                        let mut path = character.video_path.clone();
                         let video = match video::Video::open(&path) {
                             Ok(video) => Some(video),
-                            Err(error) => { state::log(&data, format!("Video: {error}")); None }
+                            Err(error) => {
+                                state::log(&data, format!("Video: {error}"));
+                                let default_video = video::select_path(&assets, notification.character());
+                                if character.id.is_some() && default_video != path {
+                                    match video::Video::open(&default_video) {
+                                        Ok(video) => {
+                                            path = default_video;
+                                            character.video_path = path.clone();
+                                            Some(video)
+                                        }
+                                        Err(error) => { state::log(&data, format!("Default video: {error}")); None }
+                                    }
+                                } else { None }
+                            }
                         };
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
-                        let pending = Pending { notification, requested: Instant::now(), duration, video, video_path: path };
+                        let pending = Pending { notification, character, requested: Instant::now(), duration, video, video_path: path };
                         if muted {
                             activation = Some((pending, true));
                         } else {
-                            speech.start(&pending.notification.text, &pending.notification.id, pending.notification.character(), settings);
+                            speech.start(&pending.notification.text, &pending.notification.id, &pending.character, settings);
                             speech_started += 1;
                             current = Presentation::Preparing(pending);
                         }
@@ -456,7 +470,12 @@ fn run() -> Result<(), String> {
                             }
                             buffer.present().map_err(|e| e.to_string())?;
                             if !active.history_recorded {
-                                match history::record(&data, &active.notification, &active.video_path, chrono::Utc::now()) {
+                                let result = if active.character.id.is_some() {
+                                    history::record_with_identity(&data, &active.notification, active.character.history_identity(), &active.video_path, chrono::Utc::now())
+                                } else {
+                                    history::record(&data, &active.notification, &active.video_path, chrono::Utc::now())
+                                };
+                                match result {
                                     Ok(()) => active.history_recorded = true,
                                     Err(error) => state::log(&data, format!("History: {error}")),
                                 }
@@ -499,6 +518,7 @@ mod tests {
                 character: "opencode".into(),
                 emotion: "neutral".into(),
             },
+            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode"),
             started,
             expires: started + Duration::from_secs(10),
             end: None,
@@ -533,6 +553,7 @@ mod tests {
         let requested = Instant::now();
         let mut presentation = Presentation::Preparing(Pending {
             notification,
+            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode"),
             requested,
             duration: Duration::from_secs(10),
             video: None,

@@ -1,5 +1,6 @@
+use crate::characters::{validate_registry, Character};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -11,22 +12,87 @@ pub struct Settings {
     pub quiet_end: u32,
     pub volume: u16,
     pub output_device: Option<String>,
-    pub use_gpu: bool,
+    #[serde(with = "api_key_storage")]
+    pub elevenlabs_api_key: Option<String>,
+    pub speech_model: crate::elevenlabs::SpeechModel,
     pub voices: HashMap<String, String>,
+    pub characters: BTreeMap<String, Character>,
+    pub selected_character: Option<String>,
+    #[serde(default)]
+    pub installed_bundled_characters: BTreeSet<String>,
+}
+
+mod api_key_storage {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(key: &Option<String>, serializer: S) -> Result<S::Ok, S::Error> {
+        key.as_deref().map(protect).transpose().map_err(serde::ser::Error::custom)?.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+        Option::<String>::deserialize(deserializer)?.map(|key| unprotect(&key).map_err(serde::de::Error::custom)).transpose()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
+        use windows_sys::Win32::Security::Cryptography::*;
+        let input = CRYPT_INTEGER_BLOB { cbData: bytes.len() as u32, pbData: bytes.as_ptr() as *mut u8 };
+        let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        unsafe {
+            let result = if encrypt {
+                CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            };
+            if result == 0 { return Err("Could not access the saved ElevenLabs key for this Windows user.".into()); }
+            let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            windows_sys::Win32::Foundation::LocalFree(output.pbData as *mut _);
+            Ok(bytes)
+        }
+    }
+
+    fn protect(key: &str) -> Result<String, String> {
+        #[cfg(target_os = "windows")]
+        {
+            use base64::Engine;
+            Ok(format!("dpapi:{}", base64::engine::general_purpose::STANDARD.encode(crypt(key.as_bytes(), true)?)))
+        }
+        #[cfg(not(target_os = "windows"))]
+        { Ok(key.to_owned()) }
+    }
+
+    fn unprotect(key: &str) -> Result<String, String> {
+        if let Some(encoded) = key.strip_prefix("dpapi:") {
+            #[cfg(target_os = "windows")]
+            {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "Invalid saved ElevenLabs key.".to_string())?;
+                String::from_utf8(crypt(&bytes, false)?).map_err(|_| "Invalid saved ElevenLabs key.".into())
+            }
+            #[cfg(not(target_os = "windows"))]
+            { let _ = encoded; Err("This saved key belongs to a Windows user. Enter a new key.".into()) }
+        } else { Ok(key.to_owned()) }
+    }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
+        let mut settings = Self {
             quiet_mode: false,
             schedule_enabled: true,
             quiet_start: 22 * 60,
             quiet_end: 8 * 60,
             volume: 100,
             output_device: None,
-            use_gpu: false,
+            elevenlabs_api_key: None,
+            speech_model: crate::elevenlabs::SpeechModel::default(),
             voices: HashMap::new(),
-        }
+            characters: BTreeMap::new(),
+            selected_character: None,
+            installed_bundled_characters: BTreeSet::new(),
+        };
+        settings.reconcile_bundled_characters();
+        settings
     }
 }
 
@@ -40,7 +106,22 @@ impl Settings {
             return Err("Enter a valid daily quiet schedule.".into());
         }
         if self.volume > 100 { return Err("Volume must be between 0 and 100%.".into()); }
+        if let Some(key) = &self.elevenlabs_api_key {
+            crate::elevenlabs::validate_api_key(key)?;
+        }
+        for id in &self.installed_bundled_characters {
+            crate::characters::validate_id(id)?;
+        }
+        validate_registry(&self.characters, self.selected_character.as_deref())?;
         Ok(())
+    }
+
+    pub fn reconcile_bundled_characters(&mut self) {
+        for (id, character) in crate::characters::bundled_characters() {
+            if self.installed_bundled_characters.insert(id.clone()) {
+                self.characters.entry(id.clone()).or_insert_with(|| character.clone());
+            }
+        }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
@@ -52,7 +133,8 @@ impl Settings {
                 }
             }
         }
-        let settings: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let mut settings: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        settings.reconcile_bundled_characters();
         settings.validate()?;
         Ok(settings)
     }
@@ -125,10 +207,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gpu_defaults_off_and_persists_when_selected() {
-        assert!(!Settings::decode(b"{}").unwrap().use_gpu);
-        let settings = Settings { use_gpu: true, ..Settings::default() };
-        assert!(Settings::decode(&serde_json::to_vec(&settings).unwrap()).unwrap().use_gpu);
+    fn defaults_seed_the_bundled_character_catalog() {
+        let settings = Settings::default();
+        let ids: BTreeSet<_> = crate::characters::bundled_characters().keys().cloned().collect();
+        assert_eq!(ids.len(), 11);
+        assert_eq!(settings.installed_bundled_characters, ids);
+        assert_eq!(settings.characters.keys().cloned().collect::<BTreeSet<_>>(), ids);
+        assert!(settings.characters.values().all(|character| matches!(character.voice, crate::characters::CharacterVoice::Local { speaker: None }) && character.animation_path.as_ref().is_some_and(|path| !path.is_absolute())));
+    }
+
+    #[test]
+    fn legacy_sample_text_is_ignored_and_dropped_when_saved() {
+        let custom = serde_json::json!({
+            "name": "My herald",
+            "voiceDescription": "A saved custom voice",
+            "sampleText": "This is my saved character sample text.",
+            "animationPath": "C:\\Videos\\my-herald.mp4",
+            "voice": {"type": "elevenLabs", "voiceId": "saved-voice"}
+        });
+        let bytes = serde_json::json!({
+            "characters": {"hatted-herald-01": custom},
+            "selectedCharacter": "hatted-herald-01",
+            "voices": {"opencode": "Luna"}
+        });
+        let settings = Settings::decode(&serde_json::to_vec(&bytes).unwrap()).unwrap();
+        let saved = &settings.characters["hatted-herald-01"];
+        assert_eq!(saved.name, "My herald");
+        assert_eq!(saved.voice_description, "A saved custom voice");
+        assert_eq!(saved.animation_path, Some(PathBuf::from("C:\\Videos\\my-herald.mp4")));
+        assert_eq!(saved.voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
+        assert_eq!(settings.selected_character.as_deref(), Some("hatted-herald-01"));
+        assert_eq!(settings.characters.len(), 11);
+        assert_eq!(settings.installed_bundled_characters.len(), 11);
+        let serialized = serde_json::to_value(&settings).unwrap();
+        assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
+        let data = std::env::temp_dir().join(format!("civilized-legacy-sample-{}", crate::state::timestamp()));
+        settings.save(&data).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+        let saved_character = &saved_json["characters"]["hatted-herald-01"];
+        assert!(saved_character.get("sampleText").is_none());
+        assert_eq!(saved_character["name"], "My herald");
+        assert_eq!(saved_character["voiceDescription"], "A saved custom voice");
+        assert_eq!(saved_character["animationPath"], "C:\\Videos\\my-herald.mp4");
+        assert_eq!(saved_character["voice"]["voiceId"], "saved-voice");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_bundled_character_survives_save_load_and_reload() {
+        let data = std::env::temp_dir().join(format!("civilized-bundled-delete-{}", crate::state::timestamp()));
+        let deleted = "hatted-herald-01";
+        let mut settings = Settings::default();
+        settings.characters.remove(deleted);
+        settings.save(&data).unwrap();
+        assert!(!Settings::load(&data).unwrap().characters.contains_key(deleted));
+        let mut store = Store::new(&data).unwrap();
+        assert!(!store.current.characters.contains_key(deleted));
+        settings.quiet_mode = true;
+        settings.save(&data).unwrap();
+        assert!(store.reload().unwrap());
+        assert!(!store.current.characters.contains_key(deleted));
+        drop(store);
+        assert!(!Store::new(&data).unwrap().current.characters.contains_key(deleted));
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn speech_preferences_persist_and_legacy_gpu_is_ignored() {
+        let defaults = Settings::decode(br#"{"useGpu":true}"#).unwrap();
+        assert_eq!(defaults.speech_model, crate::elevenlabs::SpeechModel::Flash);
+        let settings = Settings { elevenlabs_api_key: Some("test-key".into()), speech_model: crate::elevenlabs::SpeechModel::V4Turbo, ..Settings::default() };
+        assert_eq!(Settings::decode(&serde_json::to_vec(&settings).unwrap()).unwrap(), settings);
+        #[cfg(target_os = "windows")]
+        {
+            let json = serde_json::to_string(&settings).unwrap();
+            assert!(json.contains("dpapi:"));
+            assert!(!json.contains("test-key"));
+            assert!(Settings::decode(br#"{"elevenlabsApiKey":"dpapi:not-base64"}"#).is_err());
+        }
+        assert!(Settings::decode(br#"{"elevenlabsApiKey":"bad\nkey"}"#).is_err());
+        assert!(Settings::decode(br#"{"speechModel":"unknown"}"#).is_err());
+        assert!(Settings::decode(br#"{"installedBundledCharacters":["bad id"]}"#).is_err());
+        assert!(serde_json::to_value(defaults).unwrap().get("useGpu").is_none());
     }
 
     #[test]
@@ -174,6 +334,28 @@ mod tests {
         assert_eq!(parse_time("24:00", true).unwrap(), 1440);
         assert!(parse_time("08:60", true).is_err());
         assert_eq!(format_time(495), "08:15");
+    }
+
+    #[test]
+    fn character_registry_and_selected_profile_persist_with_legacy_preferences() {
+        let settings = Settings::decode(br#"{
+            "voices":{"opencode":"Luna"},
+            "characters":{"herald":{"name":"Herald","voiceDescription":"A warm herald","animationPath":"C:\\Videos\\herald.mp4","voice":{"type":"elevenLabs","voiceId":"saved-herald"}}},
+            "selectedCharacter":"herald"
+        }"#).unwrap();
+        assert_eq!(settings.voices["opencode"], "Luna");
+        assert_eq!(settings.selected_character.as_deref(), Some("herald"));
+        assert_eq!(settings.characters["herald"].name, "Herald");
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        let restored = Settings::decode(&bytes).unwrap();
+        assert_eq!(restored, settings);
+    }
+
+    #[test]
+    fn selected_profile_must_exist() {
+        let mut settings = Settings::default();
+        settings.selected_character = Some("missing".into());
+        assert!(settings.validate().is_err());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::characters::ResolvedVoice;
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKittenModelConfig, OfflineTtsModelConfig};
 use crate::platform::SpeechPlayback;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ pub(crate) fn model_directory() -> Result<PathBuf, String> {
     Ok(std::env::current_exe().map_err(|error| error.to_string())?.parent().ok_or("Missing executable directory")?.join("../resources/tts/kitten-nano-en-v0_8-int8"))
 }
 
-fn create(directory: &Path, threads: i32, provider: &str) -> Result<OfflineTts, String> {
+fn create_cpu_engine(directory: &Path, threads: i32) -> Result<OfflineTts, String> {
     if !(1..=32).contains(&threads) { return Err("TTS thread count must be between 1 and 32".into()); }
     for file in ["model.int8.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/en_dict"] {
         if !directory.join(file).is_file() { return Err(format!("Missing Kitten TTS asset: {}. Run node development_tools/prepare-tts.mjs", directory.join(file).display())); }
@@ -33,7 +34,7 @@ fn create(directory: &Path, threads: i32, provider: &str) -> Result<OfflineTts, 
                 ..Default::default()
             },
             num_threads: threads,
-            provider: Some(provider.into()),
+            provider: Some("cpu".into()),
             ..Default::default()
         },
         max_num_sentences: 1,
@@ -47,15 +48,11 @@ fn create(directory: &Path, threads: i32, provider: &str) -> Result<OfflineTts, 
 
 fn with_engine<T>(action: impl FnOnce(&OfflineTts) -> Result<T, String>) -> Result<T, String> {
     let mut engine = ENGINE.lock().map_err(|_| "Kitten TTS worker failed")?;
-    if engine.is_none() { *engine = Some(create(&model_directory()?, THREADS, "cpu")?); }
+    if engine.is_none() { *engine = Some(create_cpu_engine(&model_directory()?, THREADS)?); }
     action(engine.as_ref().unwrap())
 }
 
-pub fn prepare(use_gpu: bool) -> Result<(), String> {
-    if use_gpu {
-        if let Err(error) = crate::gpu::prepare() { crate::state::log(&crate::platform::data_directory(), format!("GPU speech unavailable, using CPU: {error}")); }
-        else { return Ok(()); }
-    } else { crate::gpu::release(); }
+pub fn prepare() -> Result<(), String> {
     with_engine(|_| Ok(()))
 }
 
@@ -68,39 +65,46 @@ fn pcm(samples: &[f32]) -> Vec<i16> {
     samples.iter().map(|sample| if sample.is_finite() { (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16 } else { 0 }).collect()
 }
 
-pub fn gpu_worker() -> Result<(), String> {
-    use std::io::{BufRead, BufReader};
-    use crate::gpu::{Request, Response, respond};
-    let engine = create(&model_directory()?, THREADS, "cuda")?;
-    respond(&Response::Ready)?;
-    for line in BufReader::new(std::io::stdin().lock()).lines() {
-        let request: Request = serde_json::from_str(&line.map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-        if request.text.contains('\0') || !(0..8).contains(&request.sid) { return Err("Invalid GPU speech request".into()); }
-        let config = GenerationConfig { sid: request.sid, ..Default::default() };
-        let audio = engine.generate_with_config(&request.text, &config, Some(|samples: &[f32], _| respond(&Response::Audio { samples: pcm(samples) }).is_ok()));
-        match audio {
-            Some(audio) if !audio.samples().is_empty() => respond(&Response::Done)?,
-            _ => respond(&Response::Error { message: "GPU generated no audio".into() })?,
-        }
-    }
-    Ok(())
-}
-
-pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool, playback: Option<&SpeechPlayback<'_>>) -> Result<(), String> {
+pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_speaker: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, settings: &crate::settings::Settings, playback: Option<&SpeechPlayback<'_>>) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) || text.trim().is_empty() { return Ok(()); }
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
+    let voice_id = match voice {
+        ResolvedVoice::ElevenLabs { voice_id } => voice_id.as_str(),
+        ResolvedVoice::Local { .. } => crate::elevenlabs::DEFAULT_VOICE_ID,
+    };
+    let remote = match crate::elevenlabs::Client::from_settings(settings) {
+        Ok(Some(client)) => Some(client.synthesize_speech(voice_id, text, settings.speech_model, cancelled)),
+        Ok(None) => None,
+        Err(error) => Some(Err(crate::elevenlabs::SpeechError::Message(error))),
+    };
+    if let Some(remote) = remote {
+        match remote {
+            Ok(samples) => {
+                if let Some(playback) = playback {
+                    if !playback.begin(cancelled) { return Ok(()); }
+                }
+                return crate::audio::play_pcm(&samples, 16000, volume, settings.output_device.as_deref(), cancelled);
+            }
+            Err(crate::elevenlabs::SpeechError::Cancelled) => return Ok(()),
+            Err(error) => {
+                crate::state::log(&crate::platform::data_directory(), format!("ElevenLabs speech unavailable; using local voice: {error}"));
+            }
+        }
+    }
+    let preferred = match voice {
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
+        ResolvedVoice::ElevenLabs { .. } => local_speaker,
+    };
+    local_speak(text, source_character, preferred, settings.output_device.as_deref(), volume, cancelled, playback)
+}
+
+fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, playback: Option<&SpeechPlayback<'_>>) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let text = text.to_owned();
     let config = GenerationConfig { sid: speaker(character, preferred), ..Default::default() };
     let stop = cancelled.clone();
     let (sender, chunks) = mpsc::sync_channel(1);
     let generator = std::thread::spawn(move || {
-        if use_gpu {
-            match crate::gpu::generate(&text, config.sid, &stop, &sender) {
-                Ok(()) => return Ok(()),
-                Err((error, true)) => return Err(error),
-                Err((error, false)) => crate::state::log(&crate::platform::data_directory(), format!("GPU speech unavailable, using CPU: {error}")),
-            }
-        } else { crate::gpu::release(); }
         with_engine(|engine| {
             if stop.load(Ordering::Relaxed) { return Ok(()); }
             let audio = engine.generate_with_config(&text, &config, Some(move |samples: &[f32], _| {
@@ -136,7 +140,7 @@ pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device
 #[cfg(test)]
 fn benchmark(output: &Path, threads: i32) -> Result<(), String> {
     let started = Instant::now();
-    let engine = create(&model_directory()?, threads, "cpu")?;
+    let engine = create_cpu_engine(&model_directory()?, threads)?;
     let loading_ms = started.elapsed().as_secs_f64() * 1000.0;
     let config = GenerationConfig { sid: 0, ..Default::default() };
     let first = Instant::now();
@@ -176,7 +180,7 @@ mod tests {
     #[test]
     #[ignore = "Requires installed Kitten model assets"]
     fn native_synthesis_streams_each_sentence_once_and_can_stop_early() {
-        let engine = create(&model_directory().unwrap(), THREADS, "cpu").unwrap();
+        let engine = create_cpu_engine(&model_directory().unwrap(), THREADS).unwrap();
         let config = GenerationConfig::default();
         let sizes = Arc::new(Mutex::new(Vec::new()));
         let chunks = sizes.clone();
@@ -214,14 +218,15 @@ mod tests {
 
     #[test]
     fn cancelled_or_empty_speech_never_loads_the_model() {
-        assert!(speak("Hello", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), false, None).is_ok());
-        assert!(speak(" ", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false, None).is_ok());
-        assert!(speak("a\0b", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false, None).is_err());
+        let settings = crate::settings::Settings::default();
+        assert!(speak("Hello", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), &settings, None).is_ok());
+        assert!(speak(" ", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), &settings, None).is_ok());
+        assert!(speak("a\0b", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), &settings, None).is_err());
     }
 
     #[test]
     fn missing_assets_and_invalid_thread_counts_return_errors() {
-        assert!(create(Path::new("missing-kitten-model"), 4, "cpu").is_err());
-        assert!(create(Path::new("."), 0, "cpu").is_err());
+        assert!(create_cpu_engine(Path::new("missing-kitten-model"), 4).is_err());
+        assert!(create_cpu_engine(Path::new("."), 0).is_err());
     }
 }

@@ -6,11 +6,6 @@ import { join, resolve } from 'node:path'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const release = process.argv.includes('--release')
 if (process.platform === 'win32') await import('./prepare-tts.mjs')
-if (process.platform === 'win32' && process.arch === 'x64') {
-  const preparation = spawnSync('pwsh', ['-NoProfile', '-File', join(root, 'development_tools', 'prepare-gpu-tts.ps1')], { stdio: 'inherit', timeout: 1200000 })
-  if (preparation.error) throw preparation.error
-  if (preparation.status !== 0) throw new Error('GPU runtime preparation failed')
-}
 const args = ['build', '--locked', '-j', '6', '--manifest-path', join(root, 'native-announcer', 'Cargo.toml')]
 if (release) args.push('--release')
 const child = spawn('cargo', args, { cwd: root, stdio: 'inherit', detached: process.platform !== 'win32' })
@@ -35,9 +30,6 @@ await copyFile(join(target, release ? 'release' : 'debug', `civilized-announcer$
 if (process.platform === 'win32') {
   for (const name of ['sherpa-onnx-c-api.dll', 'onnxruntime.dll']) {
     await copyFile(join(target, release ? 'release' : 'debug', name), join(directory, name))
-  }
-  if (process.arch === 'x64') {
-    await copyFile(binary, join(directory, 'gpu', 'civilized-announcer.exe'))
   }
 }
 await chmod(binary, 0o755)

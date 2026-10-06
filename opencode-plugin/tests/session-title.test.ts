@@ -10,7 +10,7 @@ test("reads the latest renamed Claude session title", async () => {
   try {
     const path = join(directory, "session.jsonl")
     await writeFile(path, '{"type":"custom-title","customTitle":"Old title"}\n{"type":"custom-title","customTitle":"Native adviser"}\n')
-    expect(sessionTitle(path, "Fallback")).toBe("Native adviser")
+    expect(sessionTitle(path, "Default title")).toBe("Native adviser")
   } finally {
     await rm(directory, { recursive: true })
   }
