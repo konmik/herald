@@ -62,6 +62,7 @@ $addressFile = Join-Path $temporary 'address.txt'
 $requestsFile = Join-Path $temporary 'requests.jsonl'
 $settingsPath = Join-Path $data 'settings.json'
 $video = Join-Path $temporary 'test-character.mp4'
+$configuredDefault = 'configured-default'
 $process = $null
 $server = $null
 $playback = $null
@@ -222,6 +223,14 @@ try {
     Wait-Until { (Get-Content $requestsFile -Raw) -match '"event":"usage-response"' } 'The superseded account response did not finish.'
     Start-Sleep -Milliseconds 250
     if ((Read-Control 118) -notmatch '8 (left|remaining)') { throw 'A response for an old key overwrote the current account usage.' }
+    Set-Control 121 $configuredDefault
+    $beforeDefaultPreview = Get-Content $settingsPath -Raw
+    Select-SettingsPage 1
+    Send-Control 112 0xF5 | Out-Null
+    Wait-Until { (Read-Control 109) -eq 'Preview finished.' } "Audio preview with the configured default did not finish. $(Read-Control 109)"
+    Wait-Until { (Get-Content $requestsFile -Raw) -match [regex]::Escape('/v1/text-to-speech/configured-default?output_format=pcm_16000') } 'Audio preview did not request the configured default voice ID.'
+    if ((Get-Content $settingsPath -Raw) -ne $beforeDefaultPreview) { throw 'Audio preview saved the unapplied default voice draft.' }
+    Select-SettingsPage 3
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The Speech service page must not show character fields.' }
     Select-CharactersPage
     $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
@@ -280,6 +289,7 @@ try {
     Select-CharactersPage
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if ($settings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not persist the configured default voice ID.' }
     $characterId = $settings.selectedCharacter
     if (-not $characterId) { throw 'The chosen character was not activated.' }
     $character = $settings.characters.$characterId
@@ -293,7 +303,7 @@ try {
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 13 -or $settings.selectedCharacter -ne $characterId) { throw 'Apply did not save both drafts and preserve the chosen character.' }
+    if (@($settings.characters.PSObject.Properties).Count -ne 13 -or $settings.selectedCharacter -ne $characterId -or $settings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not save both drafts, preserve the chosen character, and retain the configured default voice ID.' }
     Select-SettingsPage 1
     Send-Control 107 0xF5 | Out-Null
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Apply on the Audio page exposed character controls.' }
@@ -361,11 +371,13 @@ try {
     $requests = @(Get-Content $requestsFile | ForEach-Object { $_ | ConvertFrom-Json })
     $design = @($requests | Where-Object { $_.url -like '/v1/text-to-voice/design*' })
     $create = @($requests | Where-Object { $_.url -eq '/v1/text-to-voice' })
+    $defaultRequests = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/configured-default*' })
     $examples = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $sample })
+    if ($defaultRequests.Count -ne 1 -or $defaultRequests[0].url -notmatch 'output_format=pcm_16000' -or $defaultRequests[0].body.text -ne 'This is an announcement') { throw 'Audio preview did not use the configured default voice request path.' }
     if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[1].body.text -ne $sample -or $design[2].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $examples.Count -ne 4) { throw 'Bundled and custom voice creation, shared example reuse, and prompt changes did not match user actions.' }
     if (-not $SettingsOnly) {
         $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
-        if ($speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Runtime speech did not match the announcement.' }
+        if ($speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Runtime speech did not use the custom character voice.' }
     }
     if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used local speech.' }
     Copy-Item $requestsFile (Join-Path $Evidence 'requests.jsonl')

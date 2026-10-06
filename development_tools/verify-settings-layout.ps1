@@ -31,7 +31,12 @@ public static class CivilizedSettingsLayoutNative {
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, StringBuilder lparam);
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)] public static extern IntPtr SetText(IntPtr window, uint message, IntPtr wparam, string text);
+    [DllImport("user32.dll", EntryPoint = "PostMessageW")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "FindWindowW", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string title);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", EntryPoint = "GetWindowTextLengthW")] public static extern int GetWindowTextLength(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "GetWindowTextW", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, StringBuilder text, int length);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr window);
@@ -50,6 +55,8 @@ public static class CivilizedSettingsLayoutNative {
         try { Marshal.StructureToPtr(new MinMaxInfo(), memory, false); SendMessage(window, 0x24, IntPtr.Zero, memory); var info = Marshal.PtrToStructure<MinMaxInfo>(memory); return new[] { info.MinTrackSize.X, info.MinTrackSize.Y }; }
         finally { Marshal.FreeHGlobal(memory); }
     }
+    public static string WindowText(IntPtr window) { var text = new StringBuilder(GetWindowTextLength(window) + 1); GetWindowText(window, text, text.Capacity); return text.ToString(); }
+    public static string ChildText(IntPtr parent) { var result = new StringBuilder(); EnumChildWindows(parent, (window, parameter) => { var text = WindowText(window); if (text.Length > 0) result.AppendLine(text); return true; }, IntPtr.Zero); return result.ToString(); }
     public static string[] ListBoxItems(IntPtr list) {
         var count = SendMessage(list, 0x18B, IntPtr.Zero, IntPtr.Zero).ToInt64();
         if (count <= 0) return new string[0];
@@ -68,9 +75,9 @@ public static class CivilizedSettingsLayoutNative {
 '@
 
 $pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service')
-$pageControls = @{ Characters = @(201, 202); Audio = @(105, 106, 111, 112); 'Quiet hours' = @(101, 102, 103, 104); 'Speech service' = @(113, 114) }
+$pageControls = @{ Characters = @(201, 202); Audio = @(105, 106, 111, 112); 'Quiet hours' = @(101, 102, 103, 104); 'Speech service' = @(113, 114, 121, 122, 123) }
 $editorControls = @(203, 204, 206)
-$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 200, 201, 202, 203, 204, 206, 400)
+$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 121, 122, 123, 200, 201, 202, 203, 204, 206, 400)
 $wmKeyDown = 0x100
 $wmKeyUp = 0x101
 $wmCommand = 0x111
@@ -84,6 +91,8 @@ $bmClick = 0xF5
 $tbmGetPos = 0x400
 $tbmSetPos = 0x405
 $enChange = 0x300
+$configuredDefault = 'configured-default'
+$existingDefault = 'JBFqnCBsd6RMkjVDRZzb'
 
 function Control([int]$Id) {
     $handle = [CivilizedSettingsLayoutNative]::GetDlgItem($script:windowHandle, $Id)
@@ -110,6 +119,38 @@ function Set-Control([int]$Id, [string]$Value) {
 function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$Seconds = 10) {
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     while (-not (& $Condition)) { if ([DateTime]::UtcNow -ge $deadline) { throw $Failure }; Start-Sleep -Milliseconds 50 }
+}
+function Dismiss-ApplyError {
+    Wait-Until {
+        $candidate = [CivilizedSettingsLayoutNative]::FindWindow('#32770', 'Civilized Agent settings')
+        if ($candidate -eq [IntPtr]::Zero) { return $false }
+        $owner = [uint32]0
+        [CivilizedSettingsLayoutNative]::GetWindowThreadProcessId($candidate, [ref]$owner) | Out-Null
+        if ($owner -ne $script:process.Id) { return $false }
+        $script:errorDialog = $candidate
+        return $true
+    } 'Apply did not report the invalid default voice ID.'
+    $dialog = $script:errorDialog
+    if (([CivilizedSettingsLayoutNative]::ChildText($dialog)) -notmatch 'ElevenLabs voice ID is invalid') { throw 'Apply did not show the existing invalid ElevenLabs voice ID error.' }
+    $controls = @([CivilizedSettingsLayoutNative]::Children($dialog) | ForEach-Object {
+        [pscustomobject]@{ id = $_.Id; visible = $_.Visible; enabled = $_.Enabled; text = [CivilizedSettingsLayoutNative]::WindowText([CivilizedSettingsLayoutNative]::GetDlgItem($dialog, $_.Id)) }
+    })
+    $controls | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'apply-error-controls.json') -Encoding utf8NoBOM
+    $buttons = @($controls | Where-Object { $_.visible -and $_.enabled -and $_.text.Replace('&', '') -eq 'OK' })
+    if ($buttons.Count -ne 1) { throw 'The invalid default voice ID error has no unique OK button.' }
+    $button = [CivilizedSettingsLayoutNative]::GetDlgItem($dialog, $buttons[0].id)
+    [CivilizedSettingsLayoutNative]::SendMessage($button, $bmClick, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Wait-Until { -not [CivilizedSettingsLayoutNative]::IsWindowVisible($dialog) } 'The invalid default voice ID error did not close.'
+}
+function Assert-NoVisibleOverlaps([string]$Name) {
+    $children = @([CivilizedSettingsLayoutNative]::Children($script:windowHandle) | Where-Object Visible)
+    for ($first = 0; $first -lt $children.Count; $first++) {
+        for ($second = $first + 1; $second -lt $children.Count; $second++) {
+            $left = $children[$first]
+            $right = $children[$second]
+            if ($left.Right -gt $right.Left -and $right.Right -gt $left.Left -and $left.Bottom -gt $right.Top -and $right.Bottom -gt $left.Top) { throw "$Name controls $($left.Id) and $($right.Id) overlap" }
+        }
+    }
 }
 function Page-Index { [int](Send-Control 200 $lbGetCurSel) }
 function Page-Title { Read-Control 400 }
@@ -227,6 +268,9 @@ try {
     Capture-Page 1 'page-audio'
     Select-Page 2; Capture-Page 2 'page-quiet-hours'
     Select-Page 3; Capture-Page 3 'page-speech-service'
+    if ((Read-Control 121) -ne $existingDefault) { throw "An old settings file did not show the existing default voice ID '$existingDefault'." }
+    if ((Read-Control 122) -ne 'Default voice ID' -or (Read-Control 123) -notmatch 'custom ElevenLabs voice') { throw 'The default voice controls do not explain their purpose.' }
+    Set-Control 121 $configuredDefault
     Select-Page 0; Assert-Page 0 $false
     if ((Send-Control 201 $lbGetCount) -le 0) { throw 'The Characters page has no native list entries' }
     $characterList = Control 201
@@ -256,17 +300,26 @@ try {
     Send-Control 107 $bmClick | Out-Null
     Wait-Until { (Get-Content -LiteralPath $settingsPath -Raw) -ne $beforePreview } 'Apply did not write the isolated settings file.'
     $appliedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    if ($appliedSettings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not persist the configured default voice ID.' }
     if (@($appliedSettings.characters.PSObject.Properties | Where-Object { $_.Value.name -eq $draftName }).Count -ne 1) { throw 'Apply did not persist the new character draft' }
     if ([int]$appliedSettings.volume -ne 37 -or [int](Send-Control 105 $tbmGetPos) -ne 37) { throw 'Apply did not persist the audio draft' }
     $appliedSettings | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $evidencePath 'settings-applied.json') -Encoding utf8NoBOM
     $appliedBytes = Get-Content -LiteralPath $settingsPath -Raw
+    Select-Page 3; Assert-Page 3
+    Set-Control 121 'bad voice'
+    [CivilizedSettingsLayoutNative]::PostMessage((Control 107), $bmClick, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Dismiss-ApplyError
+    if ((Get-Content -LiteralPath $settingsPath -Raw) -ne $appliedBytes) { throw 'An invalid default voice ID replaced the saved settings.' }
     Select-Page 0; Assert-Page 0 $true; Set-Control 203 ($draftName + ' unapplied')
+    Select-Page 3; Assert-Page 3; Set-Control 121 ($configuredDefault + '-unapplied')
     Select-Page 1; Assert-Page 1 $false; Send-Control 105 $tbmSetPos 1 11 | Out-Null
     Close-Settings
     if ((Get-Content -LiteralPath $settingsPath -Raw) -ne $appliedBytes) { throw 'Close saved an unapplied settings edit' }
     Launch-Settings
     Doctor
     if ((Page-Index) -ne 1 -or (Page-Title) -ne 'Audio' -or [int](Send-Control 105 $tbmGetPos) -ne 37) { throw 'Reopening did not restore the applied Audio settings' }
+    Select-Page 3; Assert-Page 3
+    if ((Read-Control 121) -ne $configuredDefault) { throw 'Reopening did not restore the applied default voice ID.' }
     Select-Page 0; Assert-Page 0 $true
     if ((Read-Control 203) -ne $draftName) { throw 'Applied character draft did not survive reopening' }
     Save-ControlSnapshot 'page-characters-reopened' | Out-Null; Save-WindowPng 'page-characters-reopened'
@@ -278,6 +331,7 @@ try {
     foreach ($index in @(1, 2, 3)) {
         Select-Page $index
         Assert-Page $index
+        if ($index -eq 3) { Assert-NoVisibleOverlaps 'speech-service-minimum' }
         Save-ControlSnapshot ('minimum-page-' + $index) | Out-Null
     }
     Select-Page 0

@@ -101,7 +101,7 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
     let voice_id = match voice {
         ResolvedVoice::ElevenLabs { voice_id } => voice_id.as_str(),
-        ResolvedVoice::Local { .. } => crate::elevenlabs::DEFAULT_VOICE_ID,
+        ResolvedVoice::Local { .. } => settings.default_voice_id.as_str(),
     };
     let remote = match crate::elevenlabs::Client::from_settings(settings) {
         Ok(Some(client)) => Some(client.synthesize_speech(voice_id, text, settings.speech_model, cancelled)),

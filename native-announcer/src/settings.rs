@@ -15,6 +15,7 @@ pub struct Settings {
     #[serde(with = "api_key_storage")]
     pub elevenlabs_api_key: Option<String>,
     pub speech_model: crate::elevenlabs::SpeechModel,
+    pub default_voice_id: String,
     pub voices: HashMap<String, String>,
     pub characters: BTreeMap<String, Character>,
     pub selected_character: Option<String>,
@@ -86,6 +87,7 @@ impl Default for Settings {
             output_device: None,
             elevenlabs_api_key: None,
             speech_model: crate::elevenlabs::SpeechModel::default(),
+            default_voice_id: crate::elevenlabs::DEFAULT_VOICE_ID.into(),
             voices: HashMap::new(),
             characters: BTreeMap::new(),
             selected_character: None,
@@ -109,6 +111,7 @@ impl Settings {
         if let Some(key) = &self.elevenlabs_api_key {
             crate::elevenlabs::validate_api_key(key)?;
         }
+        crate::characters::validate_voice_id(&self.default_voice_id)?;
         for id in &self.installed_bundled_characters {
             crate::characters::validate_id(id)?;
         }
@@ -289,6 +292,48 @@ mod tests {
         assert!(Settings::decode(br#"{"speechModel":"unknown"}"#).is_err());
         assert!(Settings::decode(br#"{"installedBundledCharacters":["bad id"]}"#).is_err());
         assert!(serde_json::to_value(defaults).unwrap().get("useGpu").is_none());
+    }
+
+    #[test]
+    fn default_voice_id_migrates_persists_and_validates_with_saved_preferences() {
+        let data = std::env::temp_dir().join(format!("civilized-default-voice-{}-{}", std::process::id(), crate::state::timestamp()));
+        std::fs::create_dir_all(&data).unwrap();
+        let old = serde_json::json!({
+            "voices": {"claude": "Mark", "opencode": "Luna"},
+            "characters": {
+                "saved-herald": {
+                    "name": "Saved herald",
+                    "voiceDescription": "A warm saved voice",
+                    "animationPath": "C:\\Videos\\saved-herald.mp4",
+                    "voice": {"type": "elevenLabs", "voiceId": "saved-voice"}
+                }
+            },
+            "selectedCharacter": "saved-herald"
+        });
+        std::fs::write(data.join("settings.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+
+        let mut settings = Settings::load(&data).unwrap();
+        assert_eq!(settings.default_voice_id, "JBFqnCBsd6RMkjVDRZzb");
+        assert_eq!(settings.voices.get("claude").map(String::as_str), Some("Mark"));
+        assert_eq!(settings.voices.get("opencode").map(String::as_str), Some("Luna"));
+        assert_eq!(settings.characters["saved-herald"].voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
+
+        settings.default_voice_id = "configured-default".into();
+        settings.save(&data).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["defaultVoiceId"], "configured-default");
+
+        let restored = Settings::load(&data).unwrap();
+        assert_eq!(restored.default_voice_id, "configured-default");
+        assert_eq!(restored.voices.get("claude").map(String::as_str), Some("Mark"));
+        assert_eq!(restored.voices.get("opencode").map(String::as_str), Some("Luna"));
+        assert_eq!(restored.characters["saved-herald"].voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
+
+        for invalid in [serde_json::json!({"defaultVoiceId": ""}), serde_json::json!({"defaultVoiceId": "bad voice"})] {
+            std::fs::write(data.join("settings.json"), serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(Settings::load(&data).is_err());
+        }
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[test]

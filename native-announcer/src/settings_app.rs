@@ -42,6 +42,9 @@ mod native {
     const VOICE_USAGE: i32 = 118;
     const USAGE_REFRESH: i32 = 119;
     const MY_VOICES: i32 = 120;
+    const DEFAULT_VOICE_ID: i32 = 121;
+    const DEFAULT_VOICE_ID_LABEL: i32 = 122;
+    const DEFAULT_VOICE_ID_HINT: i32 = 123;
     const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
@@ -126,6 +129,9 @@ mod native {
     const SPEECH_SERVICE_PAGE_CONTROLS: &[i32] = &[
         MODEL_LABEL,
         MODEL,
+        DEFAULT_VOICE_ID_LABEL,
+        DEFAULT_VOICE_ID,
+        DEFAULT_VOICE_ID_HINT,
         API_KEY_LABEL,
         API_KEY,
         API_KEY_HINT,
@@ -308,7 +314,7 @@ mod native {
         for id in [APPLY, CLOSE, STATUS] { set_font(window, id, form.ui.body); }
         set_font(window, PAGE_TITLE, form.ui.heading);
         set_font(window, PAGE_HINT, form.ui.muted);
-        for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS] {
+        for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS] {
             set_font(window, id, form.ui.muted);
         }
     }
@@ -498,6 +504,7 @@ mod native {
         settings.output_device = selected_output(window, form);
         let index = SendMessageW(GetDlgItem(window, MODEL), CB_GETCURSEL, 0, 0);
         settings.speech_model = SpeechModel::ALL.get(index.max(0) as usize).copied().unwrap_or_default();
+        settings.default_voice_id = text(window, DEFAULT_VOICE_ID).trim().to_owned();
         let key = text(window, API_KEY).trim().to_owned();
         settings.elevenlabs_api_key = if key.is_empty() { None } else { Some(key) };
         settings
@@ -801,12 +808,18 @@ mod native {
         move_control(END, main_left + 190, 256, 84, 34);
         move_control(TIME_HINT, main_left + 304, 260, main_width - 304, 24);
 
-        move_control(MODEL_LABEL, main_left, 128, main_width, 24);
-        move_control(MODEL, main_left, 158, main_width, 220);
-        move_control(API_KEY_LABEL, main_left, 224, main_width, 24);
-        move_control(API_KEY, main_left, 252, main_width, 34);
-        move_control(API_KEY_HINT, main_left, 294, main_width, 54);
-        let usage_y = 366;
+        let speech_gap = 24;
+        let speech_column_width = (main_width - speech_gap) / 2;
+        let default_voice_x = main_left + speech_column_width + speech_gap;
+        move_control(MODEL_LABEL, main_left, 128, speech_column_width, 24);
+        move_control(MODEL, main_left, 158, speech_column_width, 220);
+        move_control(DEFAULT_VOICE_ID_LABEL, default_voice_x, 128, main_right - default_voice_x, 24);
+        move_control(DEFAULT_VOICE_ID, default_voice_x, 158, main_right - default_voice_x, 34);
+        move_control(DEFAULT_VOICE_ID_HINT, main_left, 198, main_width, 24);
+        move_control(API_KEY_LABEL, main_left, 230, main_width, 24);
+        move_control(API_KEY, main_left, 258, main_width, 34);
+        move_control(API_KEY_HINT, main_left, 300, main_width, 54);
+        let usage_y = 372;
         let usage_button_y = footer_y - 42;
         let usage_height = (usage_button_y - usage_y - 10).max(40);
         move_control(VOICE_USAGE, main_left, usage_y, main_width, usage_height);
@@ -846,7 +859,7 @@ mod native {
                 let dc = wparam as HDC;
                 let control = lparam as HWND;
                 SetBkMode(dc, 1);
-                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
+                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
                     SetTextColor(dc, color(92, 101, 112));
                 } else {
                     SetTextColor(dc, color(32, 37, 43));
@@ -1124,18 +1137,22 @@ mod native {
                 control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (252, 324, 150, 34))?;
                 control(window, "STATIC", "Previews your selected settings without saving.", PREVIEW_HINT, 0, (426, 326, 502, 48))?;
 
-                control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (252, 128, 676, 24))?;
-                control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 158, 676, 220))?;
+                control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (252, 128, 318, 24))?;
+                control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 158, 318, 220))?;
                 for model in SpeechModel::ALL {
                     SendMessageW(GetDlgItem(window, MODEL), CB_ADDSTRING, 0, wide(model.label()).as_ptr() as isize);
                 }
                 let selected = SpeechModel::ALL.iter().position(|model| *model == form.settings.speech_model).unwrap_or(0);
                 SendMessageW(GetDlgItem(window, MODEL), CB_SETCURSEL, selected, 0);
-                control(window, "STATIC", "ElevenLabs key", API_KEY_LABEL, 0, (252, 224, 676, 24))?;
-                control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (252, 252, 676, 34))?;
+                control(window, "STATIC", "Default voice ID", DEFAULT_VOICE_ID_LABEL, 0, (594, 128, 318, 24))?;
+                control(window, "EDIT", &form.settings.default_voice_id, DEFAULT_VOICE_ID, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (594, 158, 318, 34))?;
+                SendMessageW(GetDlgItem(window, DEFAULT_VOICE_ID), EM_SETLIMITTEXT, 256, 0);
+                control(window, "STATIC", "Characters without a custom ElevenLabs voice use this ID.", DEFAULT_VOICE_ID_HINT, 0, (252, 198, 660, 24))?;
+                control(window, "STATIC", "ElevenLabs key", API_KEY_LABEL, 0, (252, 230, 660, 24))?;
+                control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (252, 258, 660, 34))?;
                 SendMessageW(GetDlgItem(window, API_KEY), EM_SETLIMITTEXT, 4096, 0);
-                control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (252, 294, 676, 54))?;
-                control(window, "STATIC", &voice_usage_text(&form.voice_usage), VOICE_USAGE, 0, (252, 366, 676, 128))?;
+                control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (252, 300, 660, 54))?;
+                control(window, "STATIC", &voice_usage_text(&form.voice_usage), VOICE_USAGE, 0, (252, 372, 660, 128))?;
                 control(window, "BUTTON", "Refresh", USAGE_REFRESH, WS_TABSTOP, (808, 526, 120, 34))?;
                 control(window, "BUTTON", "Open My Voices", MY_VOICES, WS_TABSTOP, (252, 526, 180, 34))?;
 
