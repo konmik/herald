@@ -191,6 +191,7 @@ try {
     Open-Settings
     Select-SettingsPage 3
     if ((Read-Control 118) -notmatch 'key') { throw 'Voice limits must explain that an ElevenLabs key is required.' }
+    if ((Read-Control 120) -ne 'Open My Voices' -or -not [CivilizedCharacterTest]::IsWindowVisible((Get-Control 120)) -or -not [CivilizedCharacterTest]::IsWindowEnabled((Get-Control 120))) { throw 'Speech service must offer My Voices without requiring an API key.' }
     Set-Control 114 'character-ui-test-key'
     Send-Control 119 0xF5 | Out-Null
     Wait-Until { (Read-Control 118) -match '8 (left|remaining)' } "Voice limits did not show the account's eight available slots. $(Read-Control 118)"

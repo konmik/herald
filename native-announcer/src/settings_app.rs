@@ -41,6 +41,7 @@ mod native {
     const API_KEY_HINT: i32 = 117;
     const VOICE_USAGE: i32 = 118;
     const USAGE_REFRESH: i32 = 119;
+    const MY_VOICES: i32 = 120;
     const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
@@ -130,6 +131,7 @@ mod native {
         API_KEY_HINT,
         VOICE_USAGE,
         USAGE_REFRESH,
+        MY_VOICES,
     ];
 
     static PAGE_SPECS: [PageSpec; 4] = [
@@ -809,6 +811,7 @@ mod native {
         let usage_height = (usage_button_y - usage_y - 10).max(40);
         move_control(VOICE_USAGE, main_left, usage_y, main_width, usage_height);
         move_control(USAGE_REFRESH, main_right - 120, usage_button_y, 120, 34);
+        move_control(MY_VOICES, main_left, usage_button_y, 180, 34);
 
         move_control(STATUS, 24, height - 96, width - 268, 80);
         move_control(APPLY, width - 228, height - 48, 100, 32);
@@ -905,6 +908,19 @@ mod native {
                         populate_outputs(window, &mut *form, selected.as_deref());
                     }
                     USAGE_REFRESH => refresh_voice_usage(window, &mut *form, false),
+                    MY_VOICES => {
+                        let result = windows_sys::Win32::UI::Shell::ShellExecuteW(
+                            window,
+                            wide("open").as_ptr(),
+                            wide("https://elevenlabs.io/app/voice-lab").as_ptr(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            SW_SHOWNORMAL,
+                        );
+                        if result as isize <= 32 {
+                            label(window, STATUS, "Could not open ElevenLabs My Voices in your browser.");
+                        }
+                    }
                     PREVIEW => {
                         if (*form).voice_preview.take().is_some() {
                             KillTimer(window, 3);
@@ -1121,6 +1137,7 @@ mod native {
                 control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (252, 294, 676, 54))?;
                 control(window, "STATIC", &voice_usage_text(&form.voice_usage), VOICE_USAGE, 0, (252, 366, 676, 128))?;
                 control(window, "BUTTON", "Refresh", USAGE_REFRESH, WS_TABSTOP, (808, 526, 120, 34))?;
+                control(window, "BUTTON", "Open My Voices", MY_VOICES, WS_TABSTOP, (252, 526, 180, 34))?;
 
                 control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
                 control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
