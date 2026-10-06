@@ -24,7 +24,7 @@ class CharacterTests(unittest.TestCase):
             root = Path(directory)
             source = root / "source.png"
             Image.new("RGB", (256, 256), "red").save(source)
-            with patch.object(generate_assets, "ASSETS", root), patch.object(generate_assets, "run_graph", return_value=[source]) as render:
+            with patch.object(generate_assets, "ASSETS", root), patch.object(generate_assets, "RUNTIME_ASSETS", root), patch.object(generate_assets, "run_graph", return_value=[source]) as render:
                 portrait, original = generate_assets.portrait("new-character", size=256, prompt_override="A new character.", seed=123, retain_native=True)
             generate_character.verify_portrait(portrait)
             self.assertEqual(original, source)
@@ -73,7 +73,7 @@ class CharacterTests(unittest.TestCase):
         sources = []
 
         def portrait(character, **kwargs):
-            output = generate_assets.ASSETS / "character-portraits" / f"{character}.png"
+            output = generate_assets.RUNTIME_ASSETS / "portraits" / f"{character}.png"
             output.parent.mkdir(parents=True)
             Image.new("RGB", (256, 256), "red").save(output)
             source = comfy / "output" / "portrait.png"
@@ -103,7 +103,7 @@ class CharacterTests(unittest.TestCase):
             stack.enter_context(patch.object(generate_assets, "release_idle_models"))
             image_call = stack.enter_context(patch.object(generate_assets, "portrait", side_effect=portrait))
             video_call = stack.enter_context(patch.object(generate_assets, "video", side_effect=video))
-            previous = generate_assets.ASSETS, generate_assets.COMFY
+            previous = generate_assets.ASSETS, generate_assets.COMFY, generate_assets.RUNTIME_ASSETS
             if video_error:
                 with self.assertRaisesRegex(RuntimeError, "Generation failed"):
                     generate_character.generate("herald", "A herald.", comfy, audio, resume)
@@ -113,7 +113,7 @@ class CharacterTests(unittest.TestCase):
                 self.assertEqual(video_call.call_args.kwargs["frames"], 65)
                 self.assertEqual(video_call.call_args.kwargs["output_frames"], 64)
                 self.assertFalse(video_call.call_args.kwargs["publish"])
-            self.assertEqual((generate_assets.ASSETS, generate_assets.COMFY), previous)
+            self.assertEqual((generate_assets.ASSETS, generate_assets.COMFY, generate_assets.RUNTIME_ASSETS), previous)
             cancel.assert_called_once()
             self.assertTrue(all(not source.exists() for source in sources))
             self.assertEqual(list((root / "scratch").iterdir()), [])

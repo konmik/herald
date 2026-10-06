@@ -53,7 +53,7 @@ class AssetTests(unittest.TestCase):
             leftover.write_bytes(b"unused")
             clean_assets(assets, Path(directory) / "runtime")
             self.assertFalse(leftover.exists())
-            self.assertTrue((assets / "character-portraits" / "original.png").exists())
+            self.assertTrue((Path(directory) / "runtime" / "portraits" / "original.png").exists())
 
     def test_cleanup_consolidates_portraits_without_overwriting_sources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,7 +64,7 @@ class AssetTests(unittest.TestCase):
                 Image.new("RGB", (size, size)).save(image)
                 image.with_suffix(".md").write_text(f"Prompt for {name}.")
             clean_assets(assets, Path(directory) / "runtime")
-            library = assets / "character-portraits"
+            library = Path(directory) / "runtime" / "portraits"
             with Image.open(library / "claude.png") as image:
                 self.assertEqual(image.size, (128, 128))
             with Image.open(library / "claude-source.png") as image:
@@ -78,7 +78,8 @@ class AssetTests(unittest.TestCase):
             root = Path(directory)
             (root / "recordings").mkdir()
             (root / "input").mkdir()
-            Image.new("RGB", (128, 128)).save(root / "portrait-source.png")
+            (root / "runtime" / "portraits").mkdir(parents=True)
+            Image.new("RGB", (128, 128)).save(root / "runtime" / "portraits" / "original-source.png")
             with wave.open(str(root / "recordings" / "neutral.wav"), "wb") as audio:
                 audio.setnchannels(1)
                 audio.setsampwidth(2)
@@ -99,7 +100,8 @@ class AssetTests(unittest.TestCase):
             (root / "recordings").mkdir()
             (root / "input").mkdir()
             (root / "monty").mkdir()
-            Image.new("RGB", (128, 128)).save(root / "monty" / "portrait-source.png")
+            (root / "runtime" / "portraits").mkdir(parents=True)
+            Image.new("RGB", (128, 128)).save(root / "runtime" / "portraits" / "monty-source.png")
             with wave.open(str(root / "recordings" / "neutral.wav"), "wb") as audio:
                 audio.setnchannels(1)
                 audio.setsampwidth(2)
@@ -142,8 +144,8 @@ class AssetTests(unittest.TestCase):
             root = Path(directory)
             (root / "recordings").mkdir()
             (root / "input").mkdir()
-            (root / "character-portraits").mkdir()
-            Image.new("RGB", (128, 128)).save(root / "character-portraits" / "royal-herald-04.png")
+            (root / "runtime" / "portraits").mkdir(parents=True)
+            Image.new("RGB", (128, 128)).save(root / "runtime" / "portraits" / "royal-herald-04.png")
             audio_path = root / "recordings" / "proclamation.wav"
             with wave.open(str(audio_path), "wb") as audio:
                 audio.setnchannels(1)

@@ -150,7 +150,7 @@ def portrait(character=None, size=512, steps=20, prompt_override=None, seed=None
         prompt = f"An original fictional medieval announcer from a low-budget 1970s British absurdist comedy, Monty Python and the Holy Grail atmosphere: {MEDIEVAL_IDENTITIES[character]}. Realistic photographed actor, faintly ridiculous practical theatrical costume, earthy muted colors, old film aesthetic. Very tight head and shoulders portrait, entire hat visible, face large and centered, perfectly front facing, direct eye contact, eyes open, mouth closed. Fixed soft even studio lighting, plain dark charcoal background, crisp recognizable facial features. No modern objects, no props, no text, no watermark."
     collection = character in MEDIEVAL_IDENTITIES
     prompt = prompt_override or prompt
-    destination = ASSETS / "character-portraits"
+    destination = RUNTIME_ASSETS / "portraits"
     destination.mkdir(parents=True, exist_ok=True)
     graph = {
         "1": node("UNETLoader", unet_name="flux1-dev-fp8.safetensors", weight_dtype="default"),
@@ -187,14 +187,9 @@ def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=
     length = frames if frames is not None else max(77, 4 * math.ceil(duration * 16 / 4) + 1)
     image_name = f"civilized-{character or 'original'}-portrait.png"
     audio_name = f"civilized-{character or 'original'}-{emotion}.wav"
-    reference = destination / "portrait-source.png"
-    library_source = ASSETS / "character-portraits" / f"{character or 'original'}-source.png"
-    if not reference.exists() and library_source.exists():
-        reference = library_source
-    if not reference.exists() and character:
-        reference = ASSETS / "character-portraits" / f"{character}.png"
-    if not reference.exists() and not character:
-        reference = ASSETS / "character-portraits" / "original.png"
+    reference = RUNTIME_ASSETS / "portraits" / f"{character or 'original'}-source.png"
+    if not reference.exists():
+        reference = RUNTIME_ASSETS / "portraits" / f"{character or 'original'}.png"
     shutil.copyfile(reference, COMFY / "input" / image_name)
     shutil.copyfile(audio_path, COMFY / "input" / audio_name)
     expressions = {

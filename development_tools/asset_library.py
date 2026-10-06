@@ -9,10 +9,14 @@ def clean_assets(assets, runtime_assets):
     targets = {}
     for resource in resources:
         target = resource
-        if resource.suffix == ".png" and resource.parent not in (assets / "character-portraits", runtime_assets / "portraits"):
-            character = "original" if resource.parent == assets else resource.parent.name
-            suffix = "-source" if resource.stem == "portrait-source" else ""
-            target = assets / "character-portraits" / f"{character}{suffix}.png"
+        if resource.suffix == ".png" and resource.parent != runtime_assets / "portraits":
+            if resource.parent == assets / "character-portraits":
+                name = resource.name
+            else:
+                character = "original" if resource.parent == assets else resource.parent.name
+                suffix = "-source" if resource.stem == "portrait-source" else "-native" if resource.stem == "portrait-native" else "" if resource.stem == "portrait" else "-" + resource.stem
+                name = f"{character}{suffix}.png"
+            target = runtime_assets / "portraits" / name
             if target.exists():
                 raise FileExistsError(f"Cannot move {resource}: {target} already exists")
         if target in targets.values():

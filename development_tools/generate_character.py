@@ -205,8 +205,8 @@ def generate(name, description, comfy, audio=None, resume=False, seed=None):
     with lock.open("x"):
         pass
     work = Path(tempfile.mkdtemp(prefix="civilized-character-", dir=scratch))
-    previous = generator.ASSETS, generator.COMFY
-    generator.ASSETS, generator.COMFY = work, comfy
+    previous = generator.ASSETS, generator.COMFY, generator.RUNTIME_ASSETS
+    generator.ASSETS, generator.COMFY, generator.RUNTIME_ASSETS = work, comfy, work
     label = work.name
     outputs = []
     clean = False
@@ -217,7 +217,7 @@ def generate(name, description, comfy, audio=None, resume=False, seed=None):
             try:
                 if portrait.exists():
                     verify_portrait(portrait)
-                    reference = work / "character-portraits" / f"{label}.png"
+                    reference = work / "portraits" / f"{label}.png"
                     reference.parent.mkdir(parents=True)
                     shutil.copyfile(portrait, reference)
                 else:
@@ -254,7 +254,7 @@ def generate(name, description, comfy, audio=None, resume=False, seed=None):
                     (comfy / "input" / filename).unlink(missing_ok=True)
                 shutil.rmtree(work)
         finally:
-            generator.ASSETS, generator.COMFY = previous
+            generator.ASSETS, generator.COMFY, generator.RUNTIME_ASSETS = previous
             lock.unlink(missing_ok=True)
 
 
