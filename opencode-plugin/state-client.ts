@@ -1,6 +1,6 @@
-import { ready } from "./work-state"
+import { canAnnounce } from "./work-state"
 
-export async function currentState(sessionID: string, failed: boolean) {
+export async function canAnnounceFromLocalServer(sessionID: string, failed: boolean) {
   const { OpenCode } = await import("@opencode/client")
   const { Service } = await import("@opencode/client/service")
   const endpoint = await Service.discover()
@@ -11,5 +11,5 @@ export async function currentState(sessionID: string, failed: boolean) {
   })
   const info = await client.server.info({ signal: AbortSignal.timeout(10_000) })
   if (info.pid !== process.pid) throw new Error("Announcement state belongs to another OpenCode server")
-  return ready(client, sessionID, failed)
+  return canAnnounce(client, sessionID, failed)
 }

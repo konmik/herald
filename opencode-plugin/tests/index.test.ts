@@ -115,6 +115,7 @@ test("queries nested cross-location work even when its start events were missed"
     await f.finish(120_000)
     expect(generated).toEqual(["root"])
     expect(f.notices()[0]?.completed).toBe(120_000)
+    expect(f.notices()[0]?.presenceSessionID).toBe("root")
   } finally { await f.cleanup() }
 })
 

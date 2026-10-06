@@ -1,7 +1,7 @@
 import { Completions } from "../opencode-plugin/completions"
 
 const baseline = process.memoryUsage().rss
-const completions = new Completions(async () => "The task completed.", async () => {})
+const completions = new Completions(async () => "The task completed.", async () => {}, async () => true)
 for (let index = 0; index < 10000; index++) {
   completions.start(`session-${index}`, 0)
   await completions.finish(`event-${index}`, `session-${index}`, 60001)

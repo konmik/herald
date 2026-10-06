@@ -11,11 +11,11 @@ export class Completions {
   private pending = new Map<string, object>()
 
   constructor(
-    private summarize: (sessionID: string, failed: boolean) => Promise<string>,
-    private publish: (completion: Completion) => Promise<void>,
-    private minimum = 60_000,
-    private report: (sessionID: string, reason: string) => void = () => {},
-    private ready: (sessionID: string, failed: boolean) => Promise<boolean> = async () => true,
+    private onSummarize: (sessionID: string, failed: boolean) => Promise<string>,
+    private onPublish: (completion: Completion) => Promise<void>,
+    private onCheckReady: (sessionID: string, failed: boolean) => Promise<boolean>,
+    private minimumDuration = 60_000,
+    private onReport: (sessionID: string, reason: string) => void = () => {},
   ) {}
 
   start(sessionID: string, started: number) {
@@ -24,9 +24,7 @@ export class Completions {
   }
 
   resume(sessionID: string, started: number) {
-    const run = this.runs.get(sessionID)
-    if (run && this.pending.has(sessionID)) this.runs.set(sessionID, { started: run.started, token: {} })
-    this.pending.delete(sessionID)
+    this.invalidateSummary(sessionID)
     if (!this.runs.has(sessionID)) this.start(sessionID, started)
   }
 
@@ -43,12 +41,14 @@ export class Completions {
     }
   }
 
-  view(sessionID: string) {
+  invalidateSummary(sessionID: string) {
+    const run = this.runs.get(sessionID)
+    if (run && this.pending.has(sessionID)) this.runs.set(sessionID, { started: run.started, token: {} })
     this.pending.delete(sessionID)
   }
 
   cancel(sessionID: string) {
-    this.view(sessionID)
+    this.invalidateSummary(sessionID)
     this.runs.delete(sessionID)
   }
 
@@ -58,22 +58,22 @@ export class Completions {
     this.pending.set(sessionID, run.token)
     let consumed = false
     try {
-      if (!(await this.ready(sessionID, failed))) {
-        this.report(sessionID, "waiting-for-background-work")
+      if (!(await this.onCheckReady(sessionID, failed))) {
+        this.onReport(sessionID, "waiting-for-background-work")
         return
       }
       if (this.pending.get(sessionID) !== run.token) return
-      if (completed - run.started < this.minimum) {
+      if (completed - run.started < this.minimumDuration) {
         consumed = true
-        this.report(sessionID, "below-minimum-duration")
+        this.onReport(sessionID, "below-minimum-duration")
         return
       }
-      const text = (await this.summarize(sessionID, failed)).replace(/\s+/g, " ").trim()
+      const text = (await this.onSummarize(sessionID, failed)).replace(/\s+/g, " ").trim()
       if (!text || this.pending.get(sessionID) !== run.token) return
-      if (!(await this.ready(sessionID, failed)) || this.pending.get(sessionID) !== run.token) return
-      await this.publish({ id, sessionID, completed, text, emotion: "neutral" })
+      if (!(await this.onCheckReady(sessionID, failed)) || this.pending.get(sessionID) !== run.token) return
+      await this.onPublish({ id, sessionID, completed, text, emotion: "neutral" })
       consumed = true
-      this.report(sessionID, "announcement-sent")
+      this.onReport(sessionID, "announcement-sent")
     } finally {
       if (this.pending.get(sessionID) === run.token) this.pending.delete(sessionID)
       if (consumed && this.runs.get(sessionID)?.token === run.token) this.runs.delete(sessionID)

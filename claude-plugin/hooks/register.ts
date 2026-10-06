@@ -120,11 +120,6 @@ export const register: Register = (on) => {
     return next(e)
   }).catch(async ($, e, next) => next(e))
 
-  on('classic.SubagentStop', async ($, e, next) => {
-    background.set(await keyFor($, e.agent_id), (e.background_tasks ?? []).some((task) => task.id !== e.agent_id && task.type !== 'monitor' && ['running', 'pending'].includes(task.status)))
-    return next(e)
-  }).catch(async ($, e, next) => next(e))
-
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId != null) return result

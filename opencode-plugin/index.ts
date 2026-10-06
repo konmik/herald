@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { Completions } from "./completions"
 import { send } from "./bridge"
 import { consumeEvents } from "./events"
-import { currentState } from "./state-client"
+import { canAnnounceFromLocalServer } from "./state-client"
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -27,17 +27,11 @@ export default Plugin.define({
       },
       async (completion) => {
         const session = await ctx.session.get({ sessionID: completion.sessionID })
-        let root = session
-        const visited = new Set([root.id])
-        while (root.parentID && !visited.has(root.parentID)) {
-          visited.add(root.parentID)
-          root = await ctx.session.get({ sessionID: root.parentID })
-        }
-        await send({ type: "notify", ...completion, presenceSessionID: root.id, character: "opencode", title: session.title })
+        await send({ type: "notify", ...completion, presenceSessionID: completion.sessionID, character: "opencode", title: session.title })
       },
+      canAnnounceFromLocalServer,
       typeof ctx.options.minimumSeconds === "number" ? ctx.options.minimumSeconds * 1000 : 60_000,
       (sessionID, reason) => console.info(JSON.stringify({ plugin: "civilized-agent", sessionID, reason })),
-      currentState,
     )
     const controller = new AbortController()
     const owned = new Set<string>()
@@ -48,33 +42,12 @@ export default Plugin.define({
       saved = saved.then(() => ctx.storage.set("completion-tasks", completions.snapshot())).catch(console.error)
       return saved
     }
-    const rootFor = async (sessionID: string) => {
+    const rootFor = async (sessionID: string): Promise<string> => {
       const known = roots.get(sessionID)
       if (known) return known
-      const path: string[] = []
-      const visited = new Set<string>()
-      let current = sessionID
-      let root: string | undefined
-      while (!visited.has(current)) {
-        const cached = roots.get(current)
-        if (cached) {
-          root = cached
-          break
-        }
-        visited.add(current)
-        path.push(current)
-        const session = await ctx.session.get({ sessionID: current })
-        if (!session?.parentID || visited.has(session.parentID)) {
-          root = current
-          break
-        }
-        current = session.parentID
-      }
-      root ??= current
-      roots.set(root, root)
-      for (const id of path) {
-        roots.set(id, root)
-      }
+      const session = await ctx.session.get({ sessionID })
+      const root = session.parentID ? await rootFor(session.parentID) : sessionID
+      roots.set(sessionID, root)
       return root
     }
     const owns = async (sessionID: string) => {
@@ -105,10 +78,7 @@ export default Plugin.define({
           const info = event.data.info
           const sessionID = info.metadata.sessionID
           if (typeof sessionID !== "string" || !(await owns(sessionID))) return
-          completions.view(await rootFor(sessionID))
-          return
-        }
-        if (event.type === "shell.exited" || event.type === "shell.deleted") {
+          completions.invalidateSummary(await rootFor(sessionID))
           return
         }
         if (!["session.created", "session.inbox.enqueued", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)) return
@@ -117,7 +87,7 @@ export default Plugin.define({
         if (typeof sessionID !== "string") return
         if (event.type === "session.created") {
           if (typeof event.data.parentID !== "string" || !(await owns(event.data.parentID)) || !(await owns(sessionID))) return
-          completions.view(await rootFor(sessionID))
+          completions.invalidateSummary(await rootFor(sessionID))
           return
         }
         if (event.type === "session.deleted") {
@@ -138,15 +108,15 @@ export default Plugin.define({
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "synthetic") {
-          completions.view(rootID)
+          completions.invalidateSummary(rootID)
         }
         if (event.type === "session.execution.started") {
-          if (!isRoot) completions.view(rootID)
+          if (!isRoot) completions.invalidateSummary(rootID)
           if (isRoot) completions.resume(rootID, event.created)
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.deleted" || event.type === "session.execution.interrupted") {
-          completions.view(rootID)
+          completions.invalidateSummary(rootID)
           if (isRoot && (event.type === "session.deleted" || event.data.reason !== "shutdown")) completions.cancel(rootID)
           await send({ type: "discard", sessionID, at: event.created })
           if (event.type === "session.deleted") {
@@ -168,7 +138,7 @@ export default Plugin.define({
     )
     return async () => {
       controller.abort()
-      owned.forEach((sessionID) => completions.view(sessionID))
+      owned.forEach((sessionID) => completions.invalidateSummary(sessionID))
       await subscription
       await Promise.allSettled(tasks)
       await persist()
