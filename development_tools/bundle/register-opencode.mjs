@@ -1,42 +1,21 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree } from 'jsonc-parser'
 
 export function parseJSONC(text) {
-  const tokens = [...text.matchAll(/\s+|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true\b|false\b|null\b|[{}[\]:,]|./g)]
-    .filter(([token]) => !/^\s|^\/\//.test(token) && !token.startsWith('/*'))
-  let index = 0
-  function take(expected) {
-    const token = tokens[index++]
-    if (!token || (expected && token[0] !== expected)) throw new Error('Invalid JSONC configuration')
-    return token
+  const errors = []
+  const tree = parseTree(text.replace(/^\ufeff/, ' '), errors, { allowTrailingComma: true })
+  if (!tree || errors.length) throw new Error('Invalid JSONC configuration')
+  function check(node) {
+    if (node.type === 'object') {
+      const keys = node.children.map(property => property.children[0].value)
+      if (new Set(keys).size !== keys.length) throw new Error('Duplicate JSONC key')
+    }
+    for (const child of node.children ?? []) check(child)
   }
-  function value() {
-    const token = take()
-    const node = { start: token.index, end: token.index + token[0].length, value: undefined, children: [] }
-    if (token[0] === '{' || token[0] === '[') {
-      const object = token[0] === '{'
-      const close = object ? '}' : ']'
-      node.value = object ? Object.create(null) : []
-      while (tokens[index]?.[0] !== close) {
-        let key
-        if (object) { key = JSON.parse(take()[0]); if (typeof key !== 'string' || Object.hasOwn(node.value, key)) throw new Error('Duplicate or invalid JSONC key'); take(':') }
-        const child = value()
-        child.key = key
-        node.children.push(child)
-        if (object) node.value[key] = child.value
-        else node.value.push(child.value)
-        if (tokens[index]?.[0] !== ',') break
-        child.comma = take(',').index
-      }
-      const end = take(close)
-      node.end = end.index + 1
-    } else { node.value = JSON.parse(token[0]) }
-    return node
-  }
-  const node = value()
-  if (index !== tokens.length) throw new Error('Invalid JSONC configuration')
-  return node
+  check(tree)
+  return { value: getNodeValue(tree) }
 }
 
 function ownedPackage(reference, directory, installed) {
@@ -63,7 +42,9 @@ function mergeOptions(previous, next) {
 }
 
 function registrations(root, directory, installed) {
-  return root.children.find(child => child.key === 'plugins')?.children.filter(child => ownedPackage(typeof child.value === 'string' ? child.value : child.value?.package, directory, installed)) ?? []
+  const plugins = root.value?.plugins
+  if (plugins !== undefined && !Array.isArray(plugins)) throw new Error('Expected plugins to be an array')
+  return (plugins ?? []).filter(value => ownedPackage(typeof value === 'string' ? value : value?.package, directory, installed)).map(value => ({ value }))
 }
 
 function combinedRegistration(entries, installed) {
@@ -75,64 +56,50 @@ function combinedRegistration(entries, installed) {
   return result
 }
 
-function editValue(node, value, edits) {
-  if (node.value && value && !Array.isArray(node.value) && !Array.isArray(value) && typeof node.value === 'object' && typeof value === 'object') {
-    const missing = []
+function editValue(text, path, value) {
+  const current = path.reduce((node, key) => node?.[key], parseJSONC(text).value)
+  if (current && value && !Array.isArray(current) && !Array.isArray(value) && typeof current === 'object' && typeof value === 'object') {
     for (const [key, item] of Object.entries(value)) {
-      const child = node.children.find(child => child.key === key)
-      if (child) editValue(child, item, edits)
-      else missing.push(`${JSON.stringify(key)}: ${JSON.stringify(item)}`)
+      text = editValue(text, [...path, key], item)
     }
-    if (missing.length) {
-      const last = node.children.at(-1)
-      edits.push({ start: node.end - 1, end: node.end - 1, text: `${last && last.comma === undefined ? ',' : ''}${missing.join(',')}` })
-    }
-  } else if (JSON.stringify(node.value) !== JSON.stringify(value)) edits.push({ start: node.start, end: node.end, text: JSON.stringify(value) })
+    return text
+  }
+  if (JSON.stringify(current) === JSON.stringify(value)) return text
+  if (value === undefined) {
+    const array = findNodeAtLocation(parseTree(text.replace(/^\ufeff/, ' '), [], { allowTrailingComma: true }), path.slice(0, -1))
+    const index = path.at(-1)
+    const node = array.children[index]
+    const next = array.children[index + 1]
+    const previous = array.children[index - 1]
+    const start = !next && previous ? previous.offset + previous.length : node.offset
+    const end = next ? next.offset : array.offset + array.length - 1
+    return applyEdits(text, [{ offset: start, length: end - start, content: '' }])
+  }
+  return applyEdits(text, modify(text.replace(/^\ufeff/, ' '), path, value, { formattingOptions: { insertSpaces: true, tabSize: 2, eol: text.includes('\r\n') ? '\r\n' : '\n' } }))
 }
 
 export function updateRegistration(text, configDirectory, installed, remove = false, registration) {
+  const bom = text.startsWith('\ufeff') ? '\ufeff' : ''
+  return bom + renderRegistration(text.slice(bom.length), configDirectory, installed, remove, registration)
+}
+
+function renderRegistration(text, configDirectory, installed, remove, registration) {
   const root = parseJSONC(text)
   if (!root.value || Array.isArray(root.value) || typeof root.value !== 'object') throw new Error('Expected a JSONC configuration object')
-  const plugins = root.children.find(child => child.key === 'plugins')
+  const plugins = root.value.plugins
   const owned = registrations(root, configDirectory, installed)
   registration ??= combinedRegistration(owned, installed)
-  const targetEntry = owned.findLast(child => typeof child.value === 'object') ?? owned.at(-1)
-  const edits = []
-  if (!plugins) {
-    if (remove) return text
-    const last = root.children.at(-1)
-    edits.push({ start: root.end - 1, end: root.end - 1, text: `${last && last.comma === undefined ? ',' : ''}\n  "plugins": [${JSON.stringify(registration)}]\n` })
-  } else {
-    if (!Array.isArray(plugins.value)) throw new Error('Expected plugins to be an array')
-    let retained = false
-    for (const [index, child] of plugins.children.entries()) {
-      const reference = typeof child.value === 'string' ? child.value : child.value?.package
-      if (!ownedPackage(reference, configDirectory, installed)) continue
-      if (child === targetEntry && !remove) {
-        retained = true
-        editValue(child, registration, edits)
-      } else {
-        const previous = plugins.children[index - 1]
-        edits.push(child.comma !== undefined
-          ? { start: child.start, end: child.comma + 1, text: '' }
-          : { start: previous?.comma ?? child.start, end: child.end, text: '' })
-      }
-    }
-    if (!retained && !remove) {
-      const last = plugins.children.at(-1)
-      edits.push({ start: plugins.end - 1, end: plugins.end - 1, text: `${last && last.comma === undefined ? ',' : ''}\n    ${JSON.stringify(registration)}\n  ` })
-    }
+  if (!plugins) return remove ? text : editValue(text, ['plugins'], [registration])
+  const target = owned.findLast(child => child.value && typeof child.value === 'object') ?? owned.at(-1)
+  const targetIndex = target ? plugins.lastIndexOf(target.value) : -1
+  if (!remove && targetIndex >= 0) text = editValue(text, ['plugins', targetIndex], registration)
+  for (let index = plugins.length - 1; index >= 0; index--) {
+    if (!owned.some(child => child.value === plugins[index]) || (!remove && index === targetIndex)) continue
+    text = editValue(text, ['plugins', index], undefined)
   }
-  const merged = []
-  for (const edit of edits.sort((a, b) => a.start - b.start)) {
-    const previous = merged.at(-1)
-    if (previous && !previous.text && !edit.text && edit.start <= previous.end) previous.end = Math.max(previous.end, edit.end)
-    else merged.push(edit)
-  }
-  let result = text
-  for (const edit of merged.reverse()) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end)
-  parseJSONC(result)
-  return result
+  if (!remove && targetIndex < 0) text = editValue(text, ['plugins', plugins.length], registration)
+  parseJSONC(text)
+  return text
 }
 
 export function updateRegistrations(documents, installed) {

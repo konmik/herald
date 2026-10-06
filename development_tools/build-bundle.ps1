@@ -78,7 +78,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination (Join-Path $stage "claude-plugin/$name") -Force
     }
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
-    foreach ($name in @('install.ps1', 'shortcut.ps1', 'register-opencode.mjs')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
+    foreach ($name in @('install.ps1', 'shortcut.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
+    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', '--outdir', $stage)
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
     $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported architecture' } }
     $files = @(Get-PayloadFiles $stage | Sort-Object FullName | ForEach-Object { @{ path = [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/'); sha256 = Get-PayloadHash $_.FullName; size = $_.Length } })
