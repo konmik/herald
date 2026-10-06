@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { Completions } from "./completions"
 import { send } from "./bridge"
 import { consumeEvents } from "./events"
+import { currentState } from "./state-client"
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -36,6 +37,7 @@ export default Plugin.define({
       },
       typeof ctx.options.minimumSeconds === "number" ? ctx.options.minimumSeconds * 1000 : 60_000,
       (sessionID, reason) => console.info(JSON.stringify({ plugin: "civilized-agent", sessionID, reason })),
+      currentState,
     )
     const controller = new AbortController()
     const owned = new Set<string>()
@@ -72,7 +74,6 @@ export default Plugin.define({
       roots.set(root, root)
       for (const id of path) {
         roots.set(id, root)
-        completions.reparent(id, root)
       }
       return root
     }
@@ -88,13 +89,10 @@ export default Plugin.define({
     }
     completions.restore(await ctx.storage.get("completion-tasks"))
     const restored = completions.snapshot()
-    const restoredSessions = new Set([
-      ...restored.runs.map((run) => run.sessionID),
-      ...restored.jobs.map((job) => job.sessionID),
-    ])
+    const restoredSessions = new Set(restored.runs.map((run) => run.sessionID))
     for (const sessionID of restoredSessions) {
       try {
-        await rootFor(sessionID)
+        if (await rootFor(sessionID) !== sessionID) completions.cancel(sessionID)
       } catch (error) {
         console.error(error)
       }
@@ -107,13 +105,10 @@ export default Plugin.define({
           const info = event.data.info
           const sessionID = info.metadata.sessionID
           if (typeof sessionID !== "string" || !(await owns(sessionID))) return
-          completions.jobStarted(info.id, await rootFor(sessionID), info.time.started)
-          await persist()
+          completions.view(await rootFor(sessionID))
           return
         }
         if (event.type === "shell.exited" || event.type === "shell.deleted") {
-          completions.jobFinished(event.data.id)
-          await persist()
           return
         }
         if (!["session.created", "session.inbox.enqueued", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)) return
@@ -122,12 +117,11 @@ export default Plugin.define({
         if (typeof sessionID !== "string") return
         if (event.type === "session.created") {
           if (typeof event.data.parentID !== "string" || !(await owns(event.data.parentID)) || !(await owns(sessionID))) return
-          completions.jobStarted(sessionID, await rootFor(sessionID), event.created)
-          await persist()
+          completions.view(await rootFor(sessionID))
           return
         }
         if (event.type === "session.deleted") {
-          if (!owned.has(sessionID) && !roots.has(sessionID) && !completions.tracks(sessionID)) return
+          if (!owned.has(sessionID) && !roots.has(sessionID) && !restoredSessions.has(sessionID)) return
         } else if (!(await owns(sessionID))) return
         let rootID = roots.get(sessionID)
         if (!rootID) {
@@ -135,7 +129,7 @@ export default Plugin.define({
             rootID = await rootFor(sessionID)
           } catch (error) {
             if (event.type !== "session.deleted") throw error
-            rootID = completions.sessionForJob(sessionID) ?? sessionID
+            rootID = sessionID
           }
         }
         const isRoot = rootID === sessionID
@@ -144,30 +138,21 @@ export default Plugin.define({
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.inbox.enqueued" && event.data.item.type === "synthetic") {
-          completions.notice(rootID, event.data.item.payload.metadata, event.created)
+          completions.view(rootID)
         }
         if (event.type === "session.execution.started") {
-          if (!isRoot) completions.jobStarted(sessionID, rootID, event.created)
-          if (completions.hasJobs(rootID)) {
-            const messages = await ctx.session.context({ sessionID })
-            for (const message of messages) {
-              if (message.type === "synthetic") completions.notice(rootID, message.metadata, message.time?.created)
-            }
-          }
+          if (!isRoot) completions.view(rootID)
           if (isRoot) completions.resume(rootID, event.created)
           await send({ type: "discard", sessionID, at: event.created })
         }
         if (event.type === "session.deleted" || event.type === "session.execution.interrupted") {
-          completions.jobFinished(sessionID)
-          completions.cancel(isRoot ? rootID : sessionID)
+          completions.view(rootID)
+          if (isRoot && (event.type === "session.deleted" || event.data.reason !== "shutdown")) completions.cancel(rootID)
           await send({ type: "discard", sessionID, at: event.created })
           if (event.type === "session.deleted") {
             owned.delete(sessionID)
             roots.delete(sessionID)
           }
-        }
-        if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") {
-          completions.jobFinished(sessionID)
         }
         await persist()
         if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") return

@@ -1,264 +1,221 @@
 import { afterAll, expect, mock, test } from "bun:test"
 
-type Command = Record<string, unknown>
 type Event = { type: string; id: string; created: number; data: Record<string, unknown> }
-type Session = { id: string; parentID?: string; location: { directory: string }; title: string }
-type QueueItem = { event: Event; resolve: () => void }
-
-const commands: Command[] = []
-const generated: { sessionID: string; prompt: string }[] = []
+type Session = { id: string; parentID?: string; outcome?: string; location: { directory: string }; title: string }
+const commands: Record<string, unknown>[] = []
+const generated: string[] = []
 const binary = process.env.CIVILIZED_AGENT_BINARY
 process.env.CIVILIZED_AGENT_BINARY = process.execPath
-
+let stateClient: unknown
+let discovered = true
+let serverPID = process.pid
 mock.module("@opencode/plugin", () => ({ Plugin: { define: (plugin: unknown) => plugin } }))
-mock.module("node:child_process", () => ({
-  spawn: () => ({ on: () => {}, unref: () => {} }),
-}))
-mock.module("../bridge", () => ({
-  send: async (command: Command) => { commands.push(command) },
-}))
-
+mock.module("node:child_process", () => ({ spawn: () => ({ on: () => {}, unref: () => {} }) }))
+mock.module("../bridge", () => ({ send: async (command: Record<string, unknown>) => { commands.push(command) } }))
+mock.module("@opencode/client", () => ({ OpenCode: { make: () => stateClient } }))
+mock.module("@opencode/client/service", () => ({ Service: {
+  discover: async () => discovered ? { url: "http://localhost:12345" } : undefined,
+  headers: () => ({ authorization: "test" }),
+} }))
 const { default: plugin } = await import("../index")
-
 afterAll(() => {
   if (binary === undefined) delete process.env.CIVILIZED_AGENT_BINARY
   else process.env.CIVILIZED_AGENT_BINARY = binary
 })
 
-function event(id: string, type: string, created: number, data: Record<string, unknown>): Event {
-  return { id, type, created, data }
-}
-
-function sessionCreated(id: string, created: number, parentID?: string, directory = "workspace") {
-  return event(`${id}-created`, "session.created", created, {
-    sessionID: id,
-    ...(parentID ? { parentID } : {}),
-    location: { directory },
-  })
-}
-
-function userMessage(id: string, created: number) {
-  return event(`${id}-user`, "session.inbox.enqueued", created, {
-    sessionID: id,
-    inboxID: `${id}-inbox`,
-    item: { type: "user", payload: { text: "continue" }, delivery: "queue" },
-  })
-}
-
-function syntheticNotice(sessionID: string, childID: string, created: number) {
-  return event(`${sessionID}-${childID}-notice`, "session.inbox.enqueued", created, {
-    sessionID,
-    inboxID: `${sessionID}-${childID}-notice-inbox`,
-    item: {
-      type: "synthetic",
-      payload: { metadata: { source: "subagent", childID, state: "completed" } },
-      delivery: "queue",
-    },
-  })
-}
-
-function executionStarted(id: string, created: number) {
-  return event(`${id}-started`, "session.execution.started", created, { sessionID: id })
-}
-
-function executionSucceeded(id: string, created: number, eventID = `${id}-succeeded`) {
-  return event(eventID, "session.execution.succeeded", created, { sessionID: id })
-}
-
-function shellCreated(id: string, sessionID: string, created: number) {
-  return event(`${id}-created`, "shell.created", created, {
-    info: { id, time: { started: created }, metadata: { sessionID } },
-  })
-}
-
-function shellExited(id: string, created: number) {
-  return event(`${id}-exited`, "shell.exited", created, { id })
-}
-
-function eventStream() {
-  const queue: QueueItem[] = []
-  let take: ((item: QueueItem | undefined) => void) | undefined
-
-  const subscribe = (signal: AbortSignal) => (async function* () {
-    while (!signal.aborted) {
-      const item = queue.shift() ?? await new Promise<QueueItem | undefined>((resolve) => {
-        take = resolve
-        signal.addEventListener("abort", () => {
-          if (take === resolve) {
-            take = undefined
-            resolve(undefined)
-          }
-        }, { once: true })
-      })
-      if (!item || signal.aborted) return
-      yield item.event
-      item.resolve()
-    }
-  })()
-
-  const emit = (event: Event) => new Promise<void>((resolve) => {
-    const item = { event, resolve }
-    if (take) {
-      const deliver = take
-      take = undefined
-      deliver(item)
-    } else {
-      queue.push(item)
-    }
-  })
-
-  return { subscribe, emit }
-}
-
-function notificationCommands() {
-  return commands.filter((command) => command.type === "notify")
-}
-
-test("announces only the completed root after child sessions and jobs finish", async () => {
+async function fixture(stored?: unknown, minimumSeconds = 0) {
   commands.length = 0
   generated.length = 0
-
-  const sessions = new Map<string, Session>([
-    ["root", { id: "root", location: { directory: "workspace" }, title: "Root task" }],
-    ["child-one", { id: "child-one", parentID: "root", location: { directory: "workspace" }, title: "Child one" }],
-    ["child-two", { id: "child-two", parentID: "root", location: { directory: "other-workspace" }, title: "Child two" }],
-    ["nested", { id: "nested", parentID: "child-two", location: { directory: "other-workspace" }, title: "Nested child" }],
-  ])
-  const messages: { type: "synthetic"; time: { created: number }; metadata: Record<string, unknown> }[] = []
-  const stream = eventStream()
-  const cleanup = await (plugin as unknown as { setup: (context: unknown) => Promise<() => Promise<void>> }).setup({
-    location: { directory: "workspace" },
-    options: { minimumSeconds: 0 },
-    event: { subscribe: ({ signal }: { signal: AbortSignal }) => stream.subscribe(signal) },
+  discovered = true
+  serverPID = process.pid
+  const sessions = new Map<string, Session>([["root", { id: "root", title: "Root task", location: { directory: "workspace" } }]])
+  const active = new Set<string>()
+  const shells = new Map<string, { id: string; status: string; directory: string; metadata: { sessionID: string } }>()
+  const inbox = new Map<string, unknown[]>()
+  let finalReply = true
+  let pageSize = 100
+  let snapshot: unknown
+  const queue: { event: Event; resolve: () => void }[] = []
+  let take: ((item: typeof queue[number] | undefined) => void) | undefined
+  const client = {
+    server: { info: async () => ({ pid: serverPID }) },
     session: {
-      get: async ({ sessionID }: { sessionID: string }) => sessions.get(sessionID),
-      context: async ({ sessionID }: { sessionID: string }) => sessionID === "root" ? messages : [],
-      generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }) => {
-        generated.push({ sessionID, prompt })
-        return { text: sessionID === "root" ? "Root completed." : `${sessionID} completed.` }
+      get: async ({ sessionID }: { sessionID: string }) => {
+        const session = sessions.get(sessionID)
+        if (!session) throw new Error("Session not found")
+        return session
       },
+      list: async ({ parentID, cursor }: { parentID: string; cursor?: string }) => {
+        const children = [...sessions.values()].filter((session) => session.parentID === parentID)
+        const offset = Number(cursor ?? 0)
+        return { data: children.slice(offset, offset + pageSize), cursor: { next: offset + pageSize < children.length ? String(offset + pageSize) : undefined } }
+      },
+      active: async () => Object.fromEntries([...active].map((id) => [id, { type: "running" }])),
+      inbox: { list: async ({ sessionID }: { sessionID: string }) => inbox.get(sessionID) ?? [] },
+      context: async () => finalReply ? [{ type: "assistant", finish: "stop", content: [{ type: "text", text: "Done." }] }] : [],
+      generate: async ({ sessionID }: { sessionID: string }) => { generated.push(sessionID); return { text: "Root completed." } },
     },
-    storage: {
-      get: async () => undefined,
-      set: async () => {},
-    },
-  })
-
-  try {
-    await stream.emit(userMessage("root", 0))
-    await stream.emit(executionStarted("root", 1))
-    await stream.emit(sessionCreated("child-one", 10, "root"))
-    await stream.emit(userMessage("child-one", 11))
-    await stream.emit(executionStarted("child-one", 12))
-    await stream.emit(executionSucceeded("child-one", 60_000))
-    await Bun.sleep(0)
-    expect(generated).toEqual([])
-    expect(notificationCommands()).toEqual([])
-
-    await stream.emit(syntheticNotice("root", "child-one", 60_001))
-    messages.push({ type: "synthetic", time: { created: 60_001 }, metadata: { source: "subagent", childID: "child-one", state: "completed" } })
-    await stream.emit(executionStarted("child-one", 60_002))
-    await stream.emit(executionStarted("root", 64_000))
-    await stream.emit(executionSucceeded("root", 65_000, "root-reused-child-early"))
-    await Bun.sleep(0)
-    expect(generated).toEqual([])
-    expect(notificationCommands()).toEqual([])
-    await stream.emit(executionSucceeded("child-one", 68_000))
-    await stream.emit(sessionCreated("child-two", 70_000, "root", "other-workspace"))
-    await stream.emit(userMessage("child-two", 70_001))
-    await stream.emit(executionStarted("child-two", 70_002))
-    await stream.emit(shellCreated("child-shell", "child-two", 70_003))
-    await stream.emit(sessionCreated("nested", 70_004, "child-two", "other-workspace"))
-    await stream.emit(userMessage("nested", 70_005))
-    await stream.emit(executionStarted("nested", 70_006))
-    await stream.emit(executionSucceeded("nested", 80_000))
-    await stream.emit(syntheticNotice("child-two", "nested", 80_001))
-    await stream.emit(executionSucceeded("child-two", 90_000))
-    await stream.emit(syntheticNotice("root", "child-two", 90_001))
-    await stream.emit(executionSucceeded("root", 100_000, "root-early"))
-    await Bun.sleep(0)
-    expect(generated).toEqual([])
-    expect(notificationCommands()).toEqual([])
-
-    await stream.emit(shellExited("child-shell", 110_000))
-    await stream.emit(syntheticNotice("root", "child-two", 110_001))
-    await stream.emit(executionSucceeded("root", 120_000, "root-completed"))
-    await Bun.sleep(0)
-  } finally {
-    await cleanup()
+    shell: { list: async ({ location }: { location: { directory: string } }) => ({ data: [...shells.values()].filter((shell) => shell.directory === location.directory) }) },
   }
+  stateClient = client
+  const cleanup = await (plugin as unknown as { setup: (context: unknown) => Promise<() => Promise<void>> }).setup({
+    location: { directory: "workspace" }, options: { minimumSeconds }, session: client.session,
+    storage: { get: async () => stored, set: async (_: string, value: unknown) => { snapshot = value } },
+    event: { subscribe: ({ signal }: { signal: AbortSignal }) => (async function* () {
+      while (!signal.aborted) {
+        const item = queue.shift() ?? await new Promise<typeof queue[number] | undefined>((resolve) => {
+          take = resolve
+          signal.addEventListener("abort", () => resolve(undefined), { once: true })
+        })
+        if (!item || signal.aborted) return
+        yield item.event
+        item.resolve()
+      }
+    })() },
+  })
+  const emit = async (type: string, sessionID: string, created: number, extra: Record<string, unknown> = {}) => {
+    if (type === "session.execution.started") active.add(sessionID)
+    if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].includes(type)) {
+      active.delete(sessionID)
+      const session = sessions.get(sessionID)
+      if (session) session.outcome = type.split(".").at(-1)
+    }
+    await new Promise<void>((resolve) => {
+      const item = { event: { type, id: `${sessionID}-${created}`, created, data: { sessionID, ...extra } }, resolve }
+      if (take) { const deliver = take; take = undefined; deliver(item) } else queue.push(item)
+    })
+    await Bun.sleep(0)
+  }
+  const child = (id: string, parentID = "root", directory = "other-workspace") => {
+    sessions.set(id, { id, parentID, title: id, location: { directory } })
+    active.add(id)
+  }
+  const start = () => emit("session.inbox.enqueued", "root", 0, { item: { type: "user" } })
+  const finish = (at = 70_000) => emit("session.execution.succeeded", "root", at)
+  const notices = () => commands.filter((command) => command.type === "notify")
+  return { sessions, active, shells, inbox, emit, child, start, finish, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, paginate: () => { pageSize = 1 } }
+}
 
-  expect(generated.map((item) => item.sessionID)).toEqual(["root"])
-  expect(notificationCommands()).toEqual([{
-    type: "notify",
-    id: "root-completed",
-    sessionID: "root",
-    completed: 120_000,
-    text: "Root completed.",
-    emotion: "neutral",
-    presenceSessionID: "root",
-    character: "opencode",
-    title: "Root task",
-  }])
+test("queries nested cross-location work even when its start events were missed", async () => {
+  const f = await fixture()
+  try {
+    await f.start()
+    f.child("child")
+    f.child("nested", "child", "third-workspace")
+    f.shells.set("shell", { id: "shell", status: "running", directory: "third-workspace", metadata: { sessionID: "nested" } })
+    await f.finish()
+    expect(generated).toEqual([])
+    await f.emit("session.execution.succeeded", "nested", 80_000)
+    await f.emit("session.execution.succeeded", "child", 90_000)
+    await f.finish(100_000)
+    expect(f.notices()).toEqual([])
+    f.shells.delete("shell")
+    await f.emit("shell.exited", "nested", 110_000, { id: "shell" })
+    expect(f.notices()).toEqual([])
+    await f.finish(120_000)
+    expect(generated).toEqual(["root"])
+    expect(f.notices()[0]?.completed).toBe(120_000)
+  } finally { await f.cleanup() }
 })
 
-test("restored child jobs in another location block the main task without resetting its timer", async () => {
-  commands.length = 0
-  generated.length = 0
-  const sessions = new Map<string, Session>([
-    ["root", { id: "root", location: { directory: "workspace" }, title: "Restored task" }],
-    ["child", { id: "child", parentID: "root", location: { directory: "other-workspace" }, title: "Child task" }],
-  ])
-  const stream = eventStream()
-  const cleanup = await (plugin as unknown as { setup: (context: unknown) => Promise<() => Promise<void>> }).setup({
-    location: { directory: "workspace" },
-    options: {},
-    event: { subscribe: ({ signal }: { signal: AbortSignal }) => stream.subscribe(signal) },
-    session: {
-      get: async ({ sessionID }: { sessionID: string }) => sessions.get(sessionID),
-      context: async () => [],
-      generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }) => {
-        generated.push({ sessionID, prompt })
-        return { text: "The restored task finished." }
-      },
-    },
-    storage: {
-      get: async () => ({
-        runs: [{ sessionID: "root", started: 0 }, { sessionID: "child", started: 10_000 }],
-        jobs: [{ id: "child", sessionID: "root" }, { id: "child-shell", sessionID: "child" }],
-      }),
-      set: async () => {},
-    },
-  })
+test("main interruption does not hide surviving work from a new task", async () => {
+  const f = await fixture()
   try {
-    await stream.emit(userMessage("child", 68_000))
-    await stream.emit(executionStarted("child", 68_001))
-    await stream.emit(executionSucceeded("child", 69_000))
-    await stream.emit(syntheticNotice("root", "child", 69_001))
-    await stream.emit(executionStarted("root", 70_000))
-    await stream.emit(executionSucceeded("root", 70_001, "restored-early"))
-    await Bun.sleep(0)
-    expect(generated).toEqual([])
-    expect(notificationCommands()).toEqual([])
-    await stream.emit(shellExited("child-shell", 80_000))
-    await Bun.sleep(0)
-    expect(notificationCommands()).toEqual([])
-    await stream.emit(executionStarted("root", 81_000))
-    await stream.emit(executionSucceeded("root", 82_000, "restored-final"))
-    await Bun.sleep(0)
-  } finally {
-    await cleanup()
+    await f.start()
+    f.child("child")
+    await f.emit("session.execution.interrupted", "root", 20_000, { reason: "user" })
+    await f.emit("session.inbox.enqueued", "root", 30_000, { item: { type: "user" } })
+    await f.finish(100_000)
+    expect(f.notices()).toEqual([])
+    f.active.delete("child")
+    await f.finish(110_000)
+    expect(f.notices()).toHaveLength(1)
+  } finally { await f.cleanup() }
+})
+
+test("late cancellation notices cannot release a restarted child or its shell", async () => {
+  const f = await fixture()
+  try {
+    await f.start()
+    f.child("child")
+    await f.emit("session.execution.interrupted", "child", 20_000, { reason: "user" })
+    await f.emit("session.execution.started", "child", 30_000)
+    await f.emit("session.inbox.enqueued", "root", 40_000, { item: { type: "synthetic", payload: { metadata: { source: "subagent", childID: "child", state: "cancelled" } } } })
+    await f.finish()
+    expect(f.notices()).toEqual([])
+    f.shells.set("shell", { id: "shell", status: "running", directory: "other-workspace", metadata: { sessionID: "child" } })
+    await f.emit("session.execution.interrupted", "child", 80_000, { reason: "user" })
+    await f.finish(90_000)
+    expect(f.notices()).toEqual([])
+  } finally { await f.cleanup() }
+})
+
+test("shutdown and old persisted jobs do not reset the task timer or block recovered work", async () => {
+  const f = await fixture({ runs: [{ sessionID: "root", started: 0 }], jobs: [{ id: "stale", sessionID: "root" }] }, 60)
+  try {
+    await f.emit("session.execution.interrupted", "root", 65_000, { reason: "shutdown" })
+    await f.emit("session.execution.started", "root", 70_000)
+    await f.finish(80_000)
+    expect(f.notices()).toHaveLength(1)
+  } finally { await f.cleanup() }
+})
+
+test("queued input and missing final replies block a main completion", async () => {
+  const f = await fixture()
+  try {
+    await f.start()
+    f.inbox.set("root", [{}])
+    await f.finish()
+    expect(f.notices()).toEqual([])
+    f.inbox.clear()
+    f.noFinalReply()
+    await f.finish(80_000)
+    expect(f.notices()).toEqual([])
+  } finally { await f.cleanup() }
+})
+
+test("unrelated sessions and shells do not block the task", async () => {
+  const f = await fixture()
+  try {
+    await f.start()
+    f.active.add("unrelated")
+    f.shells.set("other", { id: "other", status: "running", directory: "workspace", metadata: { sessionID: "unrelated" } })
+    await f.finish()
+    expect(f.notices()).toHaveLength(1)
+  } finally { await f.cleanup() }
+})
+
+test("checks all pages of child sessions", async () => {
+  const f = await fixture()
+  try {
+    await f.start()
+    f.paginate()
+    f.child("first")
+    f.active.delete("first")
+    f.child("second")
+    await f.finish()
+    expect(f.notices()).toEqual([])
+    f.active.delete("second")
+    await f.finish(80_000)
+    expect(f.notices()).toHaveLength(1)
+  } finally { await f.cleanup() }
+})
+
+test("missing discovery or a different server fails closed and retains the task", async () => {
+  for (const mismatch of [false, true]) {
+    const f = await fixture()
+    try {
+      await f.start()
+      discovered = mismatch
+      serverPID = process.pid + 1
+      await f.finish()
+      expect(generated).toEqual([])
+      expect(f.notices()).toEqual([])
+      expect(f.snapshot()).toEqual({ runs: [{ sessionID: "root", started: 0 }] })
+      discovered = true
+      serverPID = process.pid
+      await f.finish(80_000)
+      expect(f.notices()).toHaveLength(1)
+    } finally { await f.cleanup() }
   }
-  expect(generated.map((item) => item.sessionID)).toEqual(["root"])
-  expect(notificationCommands()).toEqual([{
-    type: "notify",
-    id: "restored-final",
-    sessionID: "root",
-    completed: 82_000,
-    text: "The restored task finished.",
-    emotion: "neutral",
-    presenceSessionID: "root",
-    character: "opencode",
-    title: "Restored task",
-  }])
 })

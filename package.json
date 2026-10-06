@@ -18,6 +18,7 @@
     "profile:plugin": "bun development_tools/profile-plugin.ts"
   },
   "peerDependencies": {
+    "@opencode/client": ">=2.0.24",
     "@opencode/plugin": ">=2.0.23",
     "solid-js": ">=1.9.0"
   }

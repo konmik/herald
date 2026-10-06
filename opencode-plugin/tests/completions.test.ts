@@ -3,240 +3,113 @@ import { Completions, type Completion } from "../completions"
 
 test("announces independent main sessions after one minute", async () => {
   const results: Completion[] = []
-  const completions = new Completions(async (id) => `Finished ${id}.`, async (item) => { results.push(item) })
-  completions.start("first", 0)
-  completions.start("second", 10)
-  await completions.finish("a", "second", 60_010)
-  await completions.finish("b", "first", 80_000)
+  const c = new Completions(async (id) => `Finished ${id}.`, async (item) => { results.push(item) })
+  c.start("first", 0)
+  c.start("second", 10)
+  await c.finish("a", "second", 60_010)
+  await c.finish("b", "first", 80_000)
   expect(results.map((item) => item.sessionID)).toEqual(["second", "first"])
-  expect(results.every((item) => item.emotion === "neutral")).toBe(true)
 })
 
 test("ignores short, interrupted, and duplicate completions", async () => {
   const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.start("short", 0)
-  await completions.finish("a", "short", 59_999)
-  completions.start("cancelled", 0)
-  completions.cancel("cancelled")
-  await completions.finish("b", "cancelled", 90_000)
-  completions.start("long", 0)
-  await completions.finish("c", "long", 60_000)
-  await completions.finish("c", "long", 60_000)
+  const c = new Completions(async () => "Done.", async (item) => { results.push(item) })
+  c.start("short", 0)
+  await c.finish("a", "short", 59_999)
+  c.start("cancelled", 0)
+  c.cancel("cancelled")
+  await c.finish("b", "cancelled", 90_000)
+  c.start("long", 0)
+  await c.finish("c", "long", 60_000)
+  await c.finish("c", "long", 60_000)
   expect(results).toHaveLength(1)
 })
 
-test("opening or restarting a session cancels an in-flight summary", async () => {
-  for (const action of ["view", "start"] as const) {
+test("viewing, restarting, continuing, or cancelling invalidates an in-flight summary", async () => {
+  for (const action of ["view", "start", "resume", "cancel"] as const) {
     const results: Completion[] = []
     const deferred = Promise.withResolvers<string>()
-    const completions = new Completions(() => deferred.promise, async (item) => { results.push(item) })
-    completions.start("session", 0)
-    const pending = completions.finish("a", "session", 60_000)
-    if (action === "view") completions.view("session")
-    if (action === "start") completions.start("session", 70_000)
+    const c = new Completions(() => deferred.promise, async (item) => { results.push(item) })
+    c.start("root", 0)
+    const pending = c.finish("a", "root", 60_000)
+    await Bun.sleep(0)
+    if (action === "view" || action === "cancel") c[action]("root")
+    else c[action]("root", 70_000)
     deferred.resolve("Done.")
     await pending
-    expect(results).toHaveLength(0)
+    expect(results).toEqual([])
   }
 })
 
-test("uses neutral expression for failure and preserves its summary", async () => {
+test("checks current work before the minimum and preserves the timer until the final reply", async () => {
   const results: Completion[] = []
-  const completions = new Completions(async (_, failed) => failed ? "Tests failed." : "Done.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  await completions.finish("a", "session", 60_000, true)
-  expect(results[0]?.emotion).toBe("neutral")
-  expect(results[0]?.text).toBe("Tests failed.")
-})
-
-test("counts background time and announces once after the result reply", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Video completed.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  completions.jobStarted("job", "session", 10_000)
-  await completions.finish("launch", "session", 32_000)
-  expect(results).toHaveLength(0)
-  completions.jobFinished("job")
-  completions.resume("session", 150_000)
-  await completions.finish("result", "session", 158_000)
-  await completions.finish("duplicate", "session", 159_000)
-  expect(results).toHaveLength(1)
-  expect(results[0]?.id).toBe("result")
-})
-
-test("follow-up messages reset the timer without losing running jobs", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  completions.jobStarted("job", "session", 10_000)
-  await completions.finish("launch", "session", 32_000)
-  completions.start("session", 130_000)
-  await completions.finish("follow-up", "session", 135_000)
-  completions.jobFinished("job")
-  completions.resume("session", 150_000)
-  await completions.finish("result", "session", 158_000)
-  expect(results).toHaveLength(0)
-})
-
-test("waits for all jobs and preserves background tasks across reloads", async () => {
-  const results: Completion[] = []
-  const summarize = async () => "Done."
-  const publish = async (item: Completion) => { results.push(item) }
-  const before = new Completions(summarize, publish)
-  before.start("session", 0)
-  before.jobStarted("one", "session", 10_000)
-  before.jobStarted("two", "session", 20_000)
-  await before.finish("launch", "session", 70_000)
-  const after = new Completions(summarize, publish)
-  after.restore(before.snapshot())
-  expect(after.sessionForJob("one")).toBe("session")
-  after.jobFinished("one")
-  after.resume("session", 80_000)
-  await after.finish("first-result", "session", 90_000)
-  expect(results).toHaveLength(0)
-  after.jobFinished("two")
-  after.resume("session", 100_000)
-  await after.finish("last-result", "session", 110_000)
-  expect(results).toHaveLength(1)
-})
-
-test("cancelling a background task prevents its later announcement", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  completions.jobStarted("job", "session", 10_000)
-  await completions.finish("launch", "session", 32_000)
-  completions.cancel("session")
-  expect(completions.sessionForJob("job")).toBeUndefined()
-  completions.jobFinished("job")
-  completions.resume("session", 150_000)
-  await completions.finish("result", "session", 158_000)
-  expect(results).toHaveLength(0)
-})
-
-test("announces when a background job lasts a minute after a follow-up reset", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  completions.jobStarted("job", "session", 10_000)
-  await completions.finish("launch", "session", 32_000)
-  completions.start("session", 40_000)
-  await completions.finish("follow-up", "session", 45_000)
-  completions.jobFinished("job")
-  completions.resume("session", 150_000)
-  await completions.finish("result", "session", 158_000)
-  expect(results).toHaveLength(1)
-})
-
-test("foreground commands do not defer or reset completion after they exit", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  completions.resume("session", 100)
-  completions.jobStarted("foreground", "session", 10_000)
-  completions.jobFinished("foreground")
-  await completions.finish("result", "session", 65_000)
-  expect(results).toHaveLength(1)
-})
-
-test("a continuation invalidates an old summary without losing the task timer", async () => {
-  const results: Completion[] = []
-  const deferred = Promise.withResolvers<string>()
-  let calls = 0
-  const completions = new Completions(async () => ++calls === 1 ? deferred.promise : "Final result.", async (item) => { results.push(item) })
-  completions.start("session", 0)
-  const previous = completions.finish("previous", "session", 70_000)
-  completions.resume("session", 75_000)
-  deferred.resolve("Old result.")
-  await previous
-  await completions.finish("final", "session", 80_000)
+  let ready = false
+  const c = new Completions(async () => "Done.", async (item) => { results.push(item) }, 60_000, undefined, async () => ready)
+  c.start("root", 0)
+  await c.finish("launch", "root", 30_000)
+  expect(c.snapshot().runs).toEqual([{ sessionID: "root", started: 0 }])
+  ready = true
+  expect(results).toEqual([])
+  c.resume("root", 80_000)
+  await c.finish("final", "root", 90_000)
   expect(results.map((item) => item.id)).toEqual(["final"])
 })
 
-test("a durable completion notice recovers a shell exit missed during reload", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.restore({ runs: [{ sessionID: "session", started: 0 }], jobs: [{ id: "shell", sessionID: "session" }] })
-  completions.notice("other", { source: "shell", shellID: "shell", state: "completed" })
-  expect(completions.hasJobs("session")).toBe(true)
-  completions.notice("session", { source: "shell", shellID: "shell", state: "running" })
-  expect(completions.hasJobs("session")).toBe(true)
-  completions.notice("session", { source: "shell", shellID: "shell", state: "completed" })
-  completions.resume("session", 150_000)
-  await completions.finish("result", "session", 158_000)
-  expect(results).toHaveLength(1)
+test("restores timers from old snapshots without restoring obsolete job counts", async () => {
+  const c = new Completions(async () => "Done.", async () => {})
+  c.restore({ runs: [{ sessionID: "root", started: 0 }], jobs: [{ id: "stale", sessionID: "root" }] })
+  expect(c.snapshot()).toEqual({ runs: [{ sessionID: "root", started: 0 }] })
 })
 
-test("a restored child can be deleted before ownership is looked up", async () => {
+test("new messages reset the timer while continuations preserve it", async () => {
   const results: Completion[] = []
-  const completions = new Completions(async () => "Done.", async (item) => { results.push(item) })
-  completions.restore({ runs: [{ sessionID: "parent", started: 0 }], jobs: [{ id: "child", sessionID: "parent" }] })
-  expect(completions.tracks("child")).toBe(true)
-  completions.jobFinished("child")
-  completions.cancel("child")
-  expect(completions.tracks("child")).toBe(false)
-  await completions.finish("parent-result", "parent", 80000)
-  expect(results).toHaveLength(1)
-})
-
-test("moving child jobs to the main task preserves its timer and suppresses the child", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "All work finished.", async (item) => { results.push(item) })
-  completions.start("root", 0)
-  completions.start("child", 50_000)
-  completions.jobStarted("shell", "child", 55_000)
-  completions.reparent("child", "root")
-  await completions.finish("child-result", "child", 70_000)
-  await completions.finish("early-root", "root", 70_000)
+  const c = new Completions(async () => "Done.", async (item) => { results.push(item) })
+  c.start("root", 0)
+  c.start("root", 70_000)
+  c.resume("root", 90_000)
+  await c.finish("short", "root", 100_000)
   expect(results).toEqual([])
-  completions.jobFinished("shell")
-  await completions.finish("final-root", "root", 80_000)
-  expect(results).toEqual([{ id: "final-root", sessionID: "root", completed: 80_000, text: "All work finished.", emotion: "neutral" }])
 })
 
-test("a child timer cannot revive a cancelled main task", async () => {
+test("work starting during summarization blocks delivery without losing the timer", async () => {
   const results: Completion[] = []
-  const completions = new Completions(async () => "The new task finished.", async (item) => { results.push(item) })
-  completions.start("root", 0)
-  completions.start("child", 10_000)
-  completions.cancel("root")
-  completions.reparent("child", "root")
-  completions.resume("root", 70_000)
-  await completions.finish("old-result", "root", 82_000)
+  let ready = true
+  const c = new Completions(async () => { ready = false; return "Done." }, async (item) => { results.push(item) }, 0, undefined, async () => ready)
+  c.start("root", 0)
+  await c.finish("early", "root", 70_000)
   expect(results).toEqual([])
-  completions.start("root", 100_000)
-  await completions.finish("new-result", "root", 160_000)
-  expect(results).toEqual([{ id: "new-result", sessionID: "root", completed: 160_000, text: "The new task finished.", emotion: "neutral" }])
+  expect(c.snapshot().runs).toHaveLength(1)
 })
 
-test("an old completion notice cannot release a restarted job", async () => {
+test("new input during a state query invalidates that completion", async () => {
+  const deferred = Promise.withResolvers<boolean>()
   const results: Completion[] = []
-  const completions = new Completions(async () => "Both runs finished.", async (item) => { results.push(item) })
-  completions.start("root", 0)
-  completions.jobStarted("child", "root", 10_000)
-  completions.jobFinished("child")
-  completions.jobStarted("child", "root", 60_002)
-  completions.notice("root", { source: "subagent", childID: "child", state: "completed" }, 60_001)
-  await completions.finish("early", "root", 65_000)
+  const c = new Completions(async () => "Done.", async (item) => { results.push(item) }, 0, undefined, () => deferred.promise)
+  c.start("root", 0)
+  const pending = c.finish("old", "root", 70_000)
+  c.start("root", 80_000)
+  deferred.resolve(true)
+  await pending
   expect(results).toEqual([])
-  completions.notice("root", { source: "subagent", childID: "child", state: "completed" }, 70_000)
-  await completions.finish("final", "root", 80_000)
-  expect(results).toEqual([{ id: "final", sessionID: "root", completed: 80_000, text: "Both runs finished.", emotion: "neutral" }])
+  expect(c.snapshot().runs).toEqual([{ sessionID: "root", started: 80_000 }])
 })
 
-test("late background starts cannot revive a cancelled main task", async () => {
-  const results: Completion[] = []
-  const completions = new Completions(async () => "The new task finished.", async (item) => { results.push(item) })
-  completions.start("root", 0)
-  completions.cancel("root")
-  completions.jobStarted("late-child", "root", 70_000)
-  completions.jobFinished("late-child")
-  await completions.finish("cancelled-result", "root", 130_000)
-  expect(results).toEqual([])
-  completions.start("root", 140_000)
-  completions.jobStarted("new-child", "root", 140_001)
-  completions.jobFinished("new-child")
-  await completions.finish("new-result", "root", 200_000)
-  expect(results).toEqual([{ id: "new-result", sessionID: "root", completed: 200_000, text: "The new task finished.", emotion: "neutral" }])
+test("state, summary, and delivery failures preserve the timer for another final completion", async () => {
+  for (const stage of ["state", "summary", "delivery"] as const) {
+    let fail = true
+    const results: Completion[] = []
+    const c = new Completions(
+      async () => { if (fail && stage === "summary") throw new Error(stage); return "Tests failed." },
+      async (item) => { if (fail && stage === "delivery") throw new Error(stage); results.push(item) },
+      0, undefined,
+      async () => { if (fail && stage === "state") throw new Error(stage); return true },
+    )
+    c.start("root", 0)
+    await expect(c.finish("old", "root", 70_000, true)).rejects.toThrow(stage)
+    expect(c.snapshot().runs).toHaveLength(1)
+    fail = false
+    await c.finish("final", "root", 80_000, true)
+    expect(results[0]?.text).toBe("Tests failed.")
+    expect(results[0]?.emotion).toBe("neutral")
+  }
 })
