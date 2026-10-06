@@ -13,9 +13,50 @@ function Assert-Rejected {
     Assert-True $rejected $Message
 }
 
+function Assert-SettingsPreserved {
+    param([string]$Path, [string]$Expected, [string]$Message)
+    Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($Path)) -ceq $Expected) $Message
+}
+
 $temporary = Join-Path $env:LOCALAPPDATA ('Temp/opencode/Civilized Agent Ω bundle-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $temporary | Out-Null
+$previousCivilizedAgentData = $env:CIVILIZED_AGENT_DATA
+$nativeData = Join-Path $temporary 'native-data'
+$env:CIVILIZED_AGENT_DATA = $nativeData
 try {
+    New-Item -ItemType Directory -Path $nativeData | Out-Null
+    $settingsPath = Join-Path $nativeData 'settings.json'
+    $settingsJson = @'
+{
+  "quietMode": true,
+  "scheduleEnabled": true,
+  "quietStart": 1350,
+  "quietEnd": 495,
+  "volume": 35,
+  "outputDevice": "saved-output-device",
+  "elevenlabsApiKey": "saved-api-key",
+  "speechModel": "eleven_v4_turbo",
+  "voices": {
+    "claude": "Mark",
+    "opencode": "Luna"
+  },
+  "characters": {
+    "saved-herald": {
+      "name": "Saved herald",
+      "voiceDescription": "A warm saved voice",
+      "animationPath": "C:\\Videos\\saved-herald.mp4",
+      "voice": {
+        "type": "elevenLabs",
+        "voiceId": "saved-voice"
+      }
+    }
+  },
+  "selectedCharacter": "saved-herald",
+  "installedBundledCharacters": []
+}
+'@
+    [IO.File]::WriteAllText($settingsPath, $settingsJson, [Text.UTF8Encoding]::new($false))
+    $settingsBytes = [Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath))
     $payload = Join-Path $temporary 'payload'
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/native-announcer/bin/node.exe')
@@ -57,13 +98,16 @@ try {
     $app = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
     Assert-True (Test-Path "$app/native-announcer/resources/videos/fixture.mp4") 'Runtime asset was not installed'
     Assert-True (-not (Get-Item "$app/claude-plugin/native-announcer").LinkType) 'Claude runtime is linked'
+    Assert-SettingsPreserved $settingsPath $settingsBytes 'First installation changed native settings'
     $again = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
     Assert-True ($again -eq $app) 'Repeated installation changed the immutable location'
+    Assert-SettingsPreserved $settingsPath $settingsBytes 'Repeated installation changed native settings'
     $lock = [IO.File]::Open((Join-Path $root '.install.lock'), 'Open', 'ReadWrite', 'None')
     try { Assert-Rejected { Install-Payload $bundle $root } 'Concurrent installation acquired the same root' } finally { $lock.Dispose() }
     'corrupt' | Set-Content "$app/native-announcer/bin/onnxruntime.dll"
     $repair = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
     Assert-True ($repair -eq $app -and (Get-Content "$app/native-announcer/bin/onnxruntime.dll") -eq 'fixture') 'Corrupt owned runtime was not repaired'
+    Assert-SettingsPreserved $settingsPath $settingsBytes 'Repair changed native settings'
     $file = "$bundle/native-announcer/bin/onnxruntime.dll"
     $bytes = [IO.File]::ReadAllBytes($file)
     'tampered' | Set-Content $file
@@ -139,6 +183,7 @@ try {
     Assert-True ($script:claudeCalls[0] -eq "plugin|marketplace|add|$(Join-Path $app 'claude-plugin')|--scope|user") 'Marketplace migration does not use the durable installed source'
     Assert-True (-not @($script:claudeCalls | Where-Object { $_ -like '*|remove|*' }).Count) 'Marketplace migration removed installed plugins'
     Assert-True ((Get-Content "$profile/plugins/known_marketplaces.json" -Raw | ConvertFrom-Json).unrelated.source.repo -eq 'keep/me') 'Marketplace migration changed unrelated registration data'
+    Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful Claude registration changed native settings'
     $openCode = Join-Path $temporary 'opencode'
     New-Item -ItemType Directory -Path $openCode | Out-Null
     $config = Join-Path $openCode 'opencode.jsonc'
@@ -182,6 +227,11 @@ try {
         [IO.File]::WriteAllText($config, $userConfig)
         '{"unrelated":"preserve"}' | Set-Content "$profile/settings.json"
         'previous hook' | Set-Content "$cache/hooks/register.ts"
+        $successPrograms = Join-Path $temporary 'successful-programs'
+        $binary = "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
+        $script:mutateClaude = $false
+        Register-BundleHosts $app @($config) $profile $binary $successPrograms
+        Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful host registration changed native settings'
         $rollbackPrograms = Join-Path $temporary 'rollback-programs'
         New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
         $rollbackShortcut = Join-Path $rollbackPrograms 'Civilized Agent settings.lnk'
@@ -190,11 +240,11 @@ try {
         $beforeRollback = @{}
         foreach ($path in $rollbackPaths) { $beforeRollback[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
         $script:mutateClaude = $true
-        $binary = "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
         Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms } 'An unrelated shortcut did not fail host registration'
         foreach ($path in $rollbackPaths) {
             Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -ceq $beforeRollback[$path]) "Host rollback did not restore $path"
         }
+        Assert-SettingsPreserved $settingsPath $settingsBytes 'Host registration rollback changed native settings'
         $absentConfig = Join-Path $openCode 'previously-absent.jsonc'
         Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms } 'Fresh config rollback did not fail'
         Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
@@ -228,4 +278,8 @@ try {
     Assert-True ((Read-NativeShortcut "$programs/Unrelated.lnk").TargetPath -eq 'C:\Windows\notepad.exe') 'Installer changed an unrelated shortcut'
     Assert-True (@(Get-ChildItem $root -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Installation left staging or backup directories'
     Write-Output 'Bundle unit checks passed: compiled imports and licenses, file integrity, copying, repair and mocked host migration. Native startup and real host installation require test:bundle:installed.'
-} finally { Remove-DeploymentDirectory $temporary }
+} finally {
+    if ($null -eq $previousCivilizedAgentData) { Remove-Item Env:CIVILIZED_AGENT_DATA -ErrorAction SilentlyContinue }
+    else { $env:CIVILIZED_AGENT_DATA = $previousCivilizedAgentData }
+    Remove-DeploymentDirectory $temporary
+}

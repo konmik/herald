@@ -378,4 +378,51 @@ mod tests {
         assert!(store.reload().unwrap());
         std::fs::remove_dir_all(data).unwrap();
     }
+
+    #[test]
+    fn startup_restart_preserves_complete_saved_preferences_without_rewriting_settings() {
+        let data = std::env::temp_dir().join(format!("civilized-settings-restart-{}-{}", std::process::id(), crate::state::timestamp()));
+        let mut settings = Settings::default();
+        settings.quiet_mode = true;
+        settings.schedule_enabled = true;
+        settings.quiet_start = 21 * 60 + 45;
+        settings.quiet_end = 6 * 60 + 30;
+        settings.volume = 35;
+        settings.output_device = Some("saved-output-device".into());
+        settings.elevenlabs_api_key = Some("saved-api-key".into());
+        settings.speech_model = crate::elevenlabs::SpeechModel::V4Turbo;
+        settings.voices.insert("claude".into(), "Mark".into());
+        settings.voices.insert("opencode".into(), "Luna".into());
+        settings.characters.insert("saved-herald".into(), Character {
+            name: "Saved herald".into(),
+            voice_description: "A warm saved voice".into(),
+            animation_path: Some(PathBuf::from("C:\\Videos\\saved-herald.mp4")),
+            voice: crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() },
+        });
+        settings.selected_character = Some("saved-herald".into());
+        settings.save(&data).unwrap();
+        let saved_bytes = std::fs::read(data.join("settings.json")).unwrap();
+
+        for _ in 0..2 {
+            let store = Store::new(&data).unwrap();
+            assert_eq!(store.current, settings);
+            assert!(store.current.quiet_mode);
+            assert!(store.current.schedule_enabled);
+            assert_eq!(store.current.quiet_start, 1305);
+            assert_eq!(store.current.quiet_end, 390);
+            assert_eq!(store.current.volume, 35);
+            assert_eq!(store.current.output_device.as_deref(), Some("saved-output-device"));
+            assert_eq!(store.current.elevenlabs_api_key.as_deref(), Some("saved-api-key"));
+            assert_eq!(store.current.speech_model, crate::elevenlabs::SpeechModel::V4Turbo);
+            assert_eq!(store.current.voices.get("claude").map(String::as_str), Some("Mark"));
+            assert_eq!(store.current.voices.get("opencode").map(String::as_str), Some("Luna"));
+            assert_eq!(store.current.selected_character.as_deref(), Some("saved-herald"));
+            assert_eq!(store.current.characters["saved-herald"].name, "Saved herald");
+            assert_eq!(store.current.characters["saved-herald"].voice_description, "A warm saved voice");
+            assert_eq!(store.current.characters["saved-herald"].animation_path, Some(PathBuf::from("C:\\Videos\\saved-herald.mp4")));
+            assert_eq!(store.current.characters["saved-herald"].voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
+            assert_eq!(std::fs::read(data.join("settings.json")).unwrap(), saved_bytes);
+        }
+        std::fs::remove_dir_all(data).unwrap();
+    }
 }
