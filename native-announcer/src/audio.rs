@@ -190,4 +190,5 @@ mod tests {
         assert_eq!(selected_index(&devices, Some("unplugged")), None);
         assert_eq!(selected_index(&devices, None), None);
     }
+
 }

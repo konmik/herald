@@ -3,6 +3,8 @@
 mod capture;
 #[cfg(any(target_os = "windows", test))]
 mod audio;
+mod characters;
+mod elevenlabs;
 mod history;
 mod platform;
 mod private;
@@ -34,6 +36,7 @@ use window::{
 
 struct Active {
     notification: Notification,
+    character: characters::ResolvedCharacter,
     started: Instant,
     expires: Instant,
     end: Option<Instant>,
@@ -265,10 +268,25 @@ fn run() -> Result<(), String> {
                             let position = monitor.position();
                             window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
                         }
-                        let path = video::select_path(&assets, notification.character());
+                        let mut character = characters::resolve(settings, &assets, notification.character());
+                        if let Some(warning) = &character.video_warning { state::log(&data, warning); }
+                        let mut path = character.video_path.clone();
                         let video = match video::Video::open(&path) {
                             Ok(video) => Some(video),
-                            Err(error) => { state::log(&data, format!("Video: {error}")); None }
+                            Err(error) => {
+                                state::log(&data, format!("Video: {error}"));
+                                let fallback = video::select_path(&assets, notification.character());
+                                if character.id.is_some() && fallback != path {
+                                    match video::Video::open(&fallback) {
+                                        Ok(video) => {
+                                            path = fallback;
+                                            character.video_path = path.clone();
+                                            Some(video)
+                                        }
+                                        Err(error) => { state::log(&data, format!("Fallback video: {error}")); None }
+                                    }
+                                } else { None }
+                            }
                         };
                         if let Some(video) = &video {
                             selected_videos.push(path.to_string_lossy().into_owned());
@@ -277,7 +295,7 @@ fn run() -> Result<(), String> {
                         let started = Instant::now();
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
                         let expires = started + duration;
-                        current = Some(Active { notification, started, expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
+                        current = Some(Active { notification, character, started, expires, end: None, speaking: false, speech_finished: muted, silent: muted, video, video_path: path, history_recorded: false });
                         abrupt_window_ok &= platform::opacity(&window, 1.0);
                         window_opacity_updates += 1;
                         let previous_focus = platform::foreground();
@@ -296,7 +314,7 @@ fn run() -> Result<(), String> {
                 if let Some(active) = current.as_mut() {
                     if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
-                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, active.notification.character(), settings); speech_started += 1; }
+                        if !active.silent { speech.start(&active.notification.text, &active.notification.id, &active.character, settings); speech_started += 1; }
                     }
                     if active.end.is_none() && active.ready_to_end(now) {
                         active.end = Some(now); speech.cancel();
@@ -351,7 +369,12 @@ fn run() -> Result<(), String> {
                             }
                             buffer.present().map_err(|e| e.to_string())?;
                             if !active.history_recorded {
-                                match history::record(&data, &active.notification, &active.video_path, chrono::Utc::now()) {
+                                let result = if active.character.id.is_some() {
+                                    history::record_with_identity(&data, &active.notification, active.character.history_identity(), &active.video_path, chrono::Utc::now())
+                                } else {
+                                    history::record(&data, &active.notification, &active.video_path, chrono::Utc::now())
+                                };
+                                match result {
                                     Ok(()) => active.history_recorded = true,
                                     Err(error) => state::log(&data, format!("History: {error}")),
                                 }
@@ -393,6 +416,15 @@ mod tests {
                 title: "Test".into(),
                 character: "opencode".into(),
                 emotion: "neutral".into(),
+            },
+            character: characters::ResolvedCharacter {
+                id: None,
+                name: "opencode".into(),
+                voice: characters::ResolvedVoice::Local { speaker: None },
+                fallback_character: "opencode".into(),
+                fallback_speaker: None,
+                video_path: PathBuf::new(),
+                video_warning: None,
             },
             started,
             expires: started + Duration::from_secs(10),

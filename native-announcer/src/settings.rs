@@ -1,5 +1,6 @@
+use crate::characters::{validate_registry, Character};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -13,6 +14,8 @@ pub struct Settings {
     pub output_device: Option<String>,
     pub use_gpu: bool,
     pub voices: HashMap<String, String>,
+    pub characters: BTreeMap<String, Character>,
+    pub selected_character: Option<String>,
 }
 
 impl Default for Settings {
@@ -26,6 +29,8 @@ impl Default for Settings {
             output_device: None,
             use_gpu: false,
             voices: HashMap::new(),
+            characters: BTreeMap::new(),
+            selected_character: None,
         }
     }
 }
@@ -40,6 +45,7 @@ impl Settings {
             return Err("Enter a valid daily quiet schedule.".into());
         }
         if self.volume > 100 { return Err("Volume must be between 0 and 100%.".into()); }
+        validate_registry(&self.characters, self.selected_character.as_deref())?;
         Ok(())
     }
 
@@ -174,6 +180,28 @@ mod tests {
         assert_eq!(parse_time("24:00", true).unwrap(), 1440);
         assert!(parse_time("08:60", true).is_err());
         assert_eq!(format_time(495), "08:15");
+    }
+
+    #[test]
+    fn character_registry_and_selected_profile_persist_with_legacy_preferences() {
+        let settings = Settings::decode(br#"{
+            "voices":{"opencode":"Luna"},
+            "characters":{"herald":{"name":"Herald","voiceDescription":"A warm herald","sampleText":"Hear this announcement from the herald.","animationPath":"C:\\Videos\\herald.mp4","voice":{"type":"elevenLabs","voiceId":"saved-herald"}}},
+            "selectedCharacter":"herald"
+        }"#).unwrap();
+        assert_eq!(settings.voices["opencode"], "Luna");
+        assert_eq!(settings.selected_character.as_deref(), Some("herald"));
+        assert_eq!(settings.characters["herald"].name, "Herald");
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        let restored = Settings::decode(&bytes).unwrap();
+        assert_eq!(restored, settings);
+    }
+
+    #[test]
+    fn selected_profile_must_exist() {
+        let mut settings = Settings::default();
+        settings.selected_character = Some("missing".into());
+        assert!(settings.validate().is_err());
     }
 
     #[test]

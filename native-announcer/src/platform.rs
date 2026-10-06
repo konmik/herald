@@ -1,4 +1,5 @@
 use crate::state::{log, MeetingStatus};
+use crate::characters::{ResolvedCharacter, ResolvedVoice};
 use crate::settings::Settings;
 use crate::window::Window;
 use std::path::{Path, PathBuf};
@@ -150,8 +151,9 @@ pub fn hidden_command(program: &str) -> Command {
 struct SpeechCommand {
     text: String,
     id: String,
-    character: String,
-    preferred: Option<String>,
+    voice: ResolvedVoice,
+    fallback_character: String,
+    fallback_speaker: Option<String>,
     output_device: Option<String>,
     use_gpu: bool,
     volume: Arc<AtomicU16>,
@@ -179,8 +181,9 @@ impl Speech {
             for SpeechCommand {
                 text,
                 id,
-                character,
-                preferred,
+                voice,
+                fallback_character,
+                fallback_speaker,
                 output_device,
                 use_gpu,
                 volume,
@@ -190,7 +193,7 @@ impl Speech {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &character, preferred.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu);
+                let result = speak(&text, &voice, &fallback_character, fallback_speaker.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu);
                 let _ = events.send((id, result));
             }
         });
@@ -202,15 +205,16 @@ impl Speech {
         }
     }
 
-    pub fn start(&mut self, text: &str, id: &str, character: &str, settings: &Settings) {
+    pub fn start(&mut self, text: &str, id: &str, character: &ResolvedCharacter, settings: &Settings) {
         self.cancel();
         self.set_volume(settings.volume);
         self.cancelled = Arc::new(AtomicBool::new(false));
         let _ = self.sender.send(SpeechCommand {
             text: text.into(),
             id: id.into(),
-            character: character.into(),
-            preferred: settings.voices.get(character).cloned(),
+            voice: character.voice.clone(),
+            fallback_character: character.fallback_character.clone(),
+            fallback_speaker: character.fallback_speaker.clone(),
             output_device: settings.output_device.clone(),
             use_gpu: settings.use_gpu,
             volume: self.volume.clone(),
@@ -237,23 +241,28 @@ use crate::tts::speak;
 #[cfg(not(target_os = "windows"))]
 fn speak(
     text: &str,
-    character: &str,
-    preferred: Option<&str>,
+    voice: &ResolvedVoice,
+    fallback_character: &str,
+    fallback_speaker: Option<&str>,
     _output_device: Option<&str>,
     volume: &AtomicU16,
     cancelled: &AtomicBool,
     _use_gpu: bool,
 ) -> Result<(), String> {
+    let preferred = match voice {
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(fallback_speaker),
+        ResolvedVoice::ElevenLabs { .. } => fallback_speaker,
+    };
     let mut command = if cfg!(target_os = "macos") {
         let mut command = hidden_command("say");
-        command.args(["-r", if character == "claude" { "180" } else { "160" }]);
+        command.args(["-r", if fallback_character == "claude" { "180" } else { "160" }]);
         let available = Command::new("say")
             .args(["-v", "?"])
             .output()
             .map_err(|e| e.to_string())?;
         let available = String::from_utf8_lossy(&available.stdout);
         let names = preferred.map(|p| vec![p]).unwrap_or_else(|| {
-            if character == "claude" {
+            if fallback_character == "claude" {
                 vec!["Alex", "Daniel"]
             } else {
                 vec!["Daniel", "Alex"]
@@ -277,13 +286,13 @@ fn speak(
         command.args(["-a", &(crate::settings::volume_gain(volume.load(Ordering::Relaxed)) * 100.0).round().to_string()]);
         command.args([
             "-v",
-            preferred.unwrap_or(if character == "claude" {
+            preferred.unwrap_or(if fallback_character == "claude" {
                 "en-us+m2"
             } else {
                 "en-us+m3"
             }),
             "-s",
-            if character == "claude" { "180" } else { "160" },
+            if fallback_character == "claude" { "180" } else { "160" },
         ]);
         command
     };
@@ -432,7 +441,8 @@ impl Preview {
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
             if stop.load(Ordering::Relaxed) { return Ok(()); }
             let mut speech = Speech::new(false, settings.use_gpu);
-            speech.start("This is an announcement", "settings-preview", "opencode", &settings);
+            let character = crate::characters::resolve(&settings, std::path::Path::new(""), "opencode");
+            speech.start("This is an announcement", "settings-preview", &character, &settings);
             let started = std::time::Instant::now();
             loop {
                 if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
@@ -455,6 +465,38 @@ impl Preview {
 
 #[cfg(target_os = "windows")]
 impl Drop for Preview {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(playback) = self.playback.take() { let _ = playback.join(); }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub struct PcmPreview {
+    cancelled: Arc<AtomicBool>,
+    playback: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl PcmPreview {
+    pub fn start(samples: Vec<i16>, settings: Settings) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let playback = std::thread::spawn(move || {
+            if stop.load(Ordering::Relaxed) { return Ok(()); }
+            crate::audio::play_pcm(&samples, 16000, &AtomicU16::new(settings.volume), settings.output_device.as_deref(), &stop)
+        });
+        Self { cancelled, playback: Some(playback) }
+    }
+
+    pub fn finished(&mut self) -> Option<Result<(), String>> {
+        if !self.playback.as_ref()?.is_finished() { return None; }
+        Some(self.playback.take()?.join().unwrap_or_else(|_| Err("Voice preview failed.".into())))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PcmPreview {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
         if let Some(playback) = self.playback.take() { let _ = playback.join(); }
@@ -608,7 +650,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
-        speak("This is an announcement", "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false).unwrap();
+        speak("This is an announcement", &ResolvedVoice::Local { speaker: None }, "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false).unwrap();
         assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
     }
 

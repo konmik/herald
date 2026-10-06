@@ -469,6 +469,7 @@ name = "civilized-announcer"
 version = "0.3.0"
 dependencies = [
  "atspi",
+ "base64",
  "chrono",
  "fontdue",
  "gtk",
@@ -481,6 +482,7 @@ dependencies = [
  "softbuffer",
  "tao",
  "tokio",
+ "ureq",
  "windows",
  "windows-sys 0.61.2",
 ]

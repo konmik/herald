@@ -1,3 +1,4 @@
+use crate::characters::ResolvedVoice;
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKittenModelConfig, OfflineTtsModelConfig};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -85,9 +86,32 @@ pub fn gpu_worker() -> Result<(), String> {
     Ok(())
 }
 
-pub fn speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool) -> Result<(), String> {
+pub fn speak(text: &str, voice: &ResolvedVoice, fallback_character: &str, fallback_speaker: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) || text.trim().is_empty() { return Ok(()); }
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
+    if let ResolvedVoice::ElevenLabs { voice_id } = voice {
+        let remote = match crate::elevenlabs::Client::from_environment() {
+            Ok(Some(client)) => client.speech(voice_id, text, cancelled),
+            Ok(None) => Err(crate::elevenlabs::SpeechError::Message("ElevenLabs API key is missing.".into())),
+            Err(error) => Err(crate::elevenlabs::SpeechError::Message(error)),
+        };
+        match remote {
+            Ok(samples) => return crate::audio::play_pcm(&samples, 16000, volume, output_device, cancelled),
+            Err(crate::elevenlabs::SpeechError::Cancelled) => return Ok(()),
+            Err(error) => {
+                crate::state::log(&crate::platform::data_directory(), format!("ElevenLabs speech unavailable; using local voice: {error}"));
+            }
+        }
+    }
+    let preferred = match voice {
+        ResolvedVoice::Local { speaker } => speaker.as_deref().or(fallback_speaker),
+        ResolvedVoice::ElevenLabs { .. } => fallback_speaker,
+    };
+    local_speak(text, fallback_character, preferred, output_device, volume, cancelled, use_gpu)
+}
+
+fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, use_gpu: bool) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) || text.trim().is_empty() { return Ok(()); }
     let text = text.to_owned();
     let config = GenerationConfig { sid: speaker(character, preferred), ..Default::default() };
     let stop = cancelled.clone();
@@ -204,9 +228,9 @@ mod tests {
 
     #[test]
     fn cancelled_or_empty_speech_never_loads_the_model() {
-        assert!(speak("Hello", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), false).is_ok());
-        assert!(speak(" ", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_ok());
-        assert!(speak("a\0b", "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_err());
+        assert!(speak("Hello", &ResolvedVoice::Local { speaker: None }, "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), false).is_ok());
+        assert!(speak(" ", &ResolvedVoice::Local { speaker: None }, "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_ok());
+        assert!(speak("a\0b", &ResolvedVoice::Local { speaker: None }, "opencode", None, None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), false).is_err());
     }
 
     #[test]
