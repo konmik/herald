@@ -84,6 +84,51 @@ try {
     $entry = [uri]::new((Join-Path $bundle 'index.ts')).AbsoluteUri
     & bun -e "const {default: plugin} = await import('$entry'); if (plugin.id !== 'civilized-agent') throw new Error('Wrong packaged plugin')"
     Assert-True ($LASTEXITCODE -eq 0) 'Compiled plugin failed to import outside the checkout'
+    $tuiEntry = [uri]::new((Join-Path $bundle 'tui.ts')).AbsoluteUri
+    $peerDirectory = Join-Path $temporary 'node_modules'
+    $solidPeer = Join-Path $peerDirectory 'solid-js'
+    New-Item -ItemType Directory -Path $peerDirectory | Out-Null
+    New-Item -ItemType Junction -Path $solidPeer -Target (Join-Path (Split-Path $PSScriptRoot -Parent) 'node_modules/solid-js') | Out-Null
+    $solidEntry = [uri]::new((Join-Path $solidPeer 'dist/solid.js')).AbsoluteUri
+    $tuiScript = @"
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+const {default: plugin} = await import('$tuiEntry');
+if (plugin.id !== 'civilized-agent.tui' || typeof plugin.setup !== 'function') throw new Error('Wrong packaged TUI plugin');
+const {createRoot} = await import('$solidEntry');
+const inbox = join(process.env.CIVILIZED_AGENT_DATA, 'inbox');
+async function waitForPresence(matches) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+        const files = await readdir(inbox).catch((error) => { if (error.code === 'ENOENT') return []; throw error });
+        const messages = await Promise.all(files.filter((file) => file.endsWith('.json')).map(async (file) => JSON.parse(await readFile(join(inbox, file), 'utf8'))));
+        if (messages.some(matches)) return;
+        await Bun.sleep(10);
+    }
+    throw new Error('Timed out waiting for packaged TUI presence');
+}
+let dispose;
+try {
+    createRoot((rootDispose) => {
+        dispose = rootDispose;
+        plugin.setup({ui: {slot({render}) { render() }, router: {current: () => ({type: 'session', sessionID: 'root'})}, tabs: {enabled: () => true, list: () => [{sessionID: 'root'}]}}});
+    });
+    await waitForPresence((message) => message.type === 'presence' && message.sessionIDs?.[0] === 'root');
+} finally { dispose?.() }
+await waitForPresence((message) => message.type === 'presence' && Array.isArray(message.sessionIDs) && message.sessionIDs.length === 0);
+"@
+    try {
+        & bun --conditions=browser -e $tuiScript
+        Assert-True ($LASTEXITCODE -eq 0) 'Packaged TUI plugin failed to import and render outside the checkout'
+    } finally {
+        Remove-Item -LiteralPath $solidPeer -Force
+        Remove-Item -LiteralPath $peerDirectory -Force
+    }
+    $presence = @(Get-ChildItem -LiteralPath (Join-Path $nativeData 'inbox') -Filter '*.json' -File | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
+    $initial = @($presence | Where-Object { $_.type -eq 'presence' -and $_.sequence -eq 1 }) | Select-Object -First 1
+    $cleared = @($presence | Where-Object { $_.type -eq 'presence' -and $_.sessionIDs -is [array] -and $_.sessionIDs.Count -eq 0 }) | Select-Object -First 1
+    Assert-True ($null -ne $initial -and $initial.clientID -and $initial.sessionIDs -is [array] -and $initial.sessionIDs.Count -eq 1 -and $initial.sessionIDs[0] -eq 'root' -and [long]$initial.at -gt 0) 'Packaged TUI plugin did not send initial presence'
+    Assert-True ($null -ne $cleared -and $cleared.clientID -eq $initial.clientID -and $cleared.sequence -gt $initial.sequence -and [long]$cleared.at -gt 0) 'Packaged TUI plugin did not clear presence'
     $sourceManifest = [IO.File]::ReadAllBytes("$bundle/bundle-manifest.json")
     $repacked = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $bundle -OutputDirectory (Join-Path $temporary 'repacked-output')
     $repackedBundle = Join-Path $temporary 'repacked'
