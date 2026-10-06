@@ -30,7 +30,9 @@ async function startPresence($: EngineInterface) {
 }
 
 async function bridge($: EngineInterface, command: object) {
-  const result = await $.process.run(['node', $.plugin.root + '/scripts/bridge.mjs'], { stdin: JSON.stringify(command), timeoutMs: 10000 })
+  const development = await $.fs.exists($.plugin.root + '/.claude-plugin/development.json')
+  const executable = development ? 'node' : $.plugin.root + '/native-announcer/bin/node.exe'
+  const result = await $.process.run([executable, $.plugin.root + '/scripts/bridge.mjs'], { stdin: JSON.stringify(command), timeoutMs: 10000 })
   if (result.exitCode !== 0) throw new Error('Civilized Agent bridge failed: ' + result.stderr)
 }
 

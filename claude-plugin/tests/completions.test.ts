@@ -1,7 +1,28 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as engineTest, type TestBody } from 'claude-code/testing'
+
+const test = (name: string, body: TestBody) => engineTest(name, async ($, on) => {
+  on('fs.exists', () => ({ value: true }))
+  await body($, on)
+})
 
 const usage = { model: 'claude-opus-5', input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const processResult = { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+
+for (const development of [true, false]) {
+  engineTest(`bridge uses ${development ? 'PATH Node in development' : 'bundled Node when installed'}`, async ($, on) => {
+    const clock = mock.clock(on)
+    let executable = ''
+    let bridgePath = ''
+    on('session.id', () => ({ value: 'main' }))
+    on('fs.exists', () => ({ value: development }))
+    on('turn.complete', () => ({ text: '' }))
+    on('model.fork', () => ({ value: { isAnswered: true, text: 'Done.', usage } }))
+    on('process.run', (_, e) => { executable = e.argv[0] ?? ''; bridgePath = e.argv[1] ?? ''; return { value: processResult } })
+    await $.turn.complete({ turnId: 'launcher', answer: 'Done.', durationMs: 60000, isAborted: false, reason: 'answer', usage })
+    await clock.settle()
+    expect(executable).toBe(development ? 'node' : bridgePath.replace('/scripts/bridge.mjs', '/native-announcer/bin/node.exe'))
+  })
+}
 
 test('long main tasks fork the current conversation once', async ($, on) => {
   const clock = mock.clock(on)

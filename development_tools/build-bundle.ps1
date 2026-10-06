@@ -74,13 +74,9 @@ try {
     foreach ($entry in @(@{ name = 'index'; export = '.' }, @{ name = 'tui'; export = './tui' })) {
         ('export { default } from "' + $exports[$entry.export] + '"') | Set-Content (Join-Path $stage "$($entry.name).ts") -Encoding utf8NoBOM
     }
-    $register = Join-Path $stage 'claude-plugin/hooks/register.ts'
-    $text = Get-Content -LiteralPath $register -Raw
-    if (-not $text.Contains("['node',") -and -not $text.Contains("[$.plugin.root + '/native-announcer/bin/node.exe',")) { throw 'Claude hook does not contain a supported bridge launcher' }
-    [IO.File]::WriteAllText($register, $text.Replace("['node',", "[$.plugin.root + '/native-announcer/bin/node.exe',"))
-    $runtimeScript = Join-Path $stage 'claude-plugin/scripts/runtime.mjs'
-    $runtimeText = Get-Content -LiteralPath $runtimeScript -Raw
-    [IO.File]::WriteAllText($runtimeScript, $runtimeText.Replace('Civilized Agent native announcer is missing. Run npm run build:announcer on this platform.', 'Civilized Agent runtime is missing. Reinstall the application bundle.'))
+    foreach ($name in @('hooks/register.ts', 'scripts/runtime.mjs')) {
+        Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination (Join-Path $stage "claude-plugin/$name") -Force
+    }
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
     foreach ($name in @('install.ps1', 'shortcut.ps1', 'register-opencode.mjs')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
