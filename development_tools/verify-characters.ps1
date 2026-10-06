@@ -150,12 +150,13 @@ try {
     $settingsInfo.UseShellExecute = $false
     $settingsInfo.Environment['CIVILIZED_AGENT_DATA'] = $data
     $settingsInfo.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
-    $settingsInfo.Environment['ELEVENLABS_API_KEY'] = 'character-ui-test-key'
+    $settingsInfo.Environment['ELEVENLABS_API_KEY'] = 'wrong-environment-key'
     $settingsInfo.Environment['ELEVENLABS_API_BASE_URL'] = $baseUrl
     $settingsInfo.ArgumentList.Add('--settings')
     $settingsInfo.ArgumentList.Add('--assets')
     $settingsInfo.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
     Open-Settings
+    Set-Control 114 'character-ui-test-key'
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The General tab must not show character fields.' }
     Select-CharactersTab
     Send-Control 202 0xF5 | Out-Null
@@ -202,7 +203,7 @@ try {
     Select-CharactersTab
     $saved = Get-Content $settingsPath -Raw
     $saved | Set-Content (Join-Path $Evidence 'settings-applied.json')
-    if ($saved -match 'character-ui-test-key|generated-0|audio_base_64') { throw 'Settings contain credentials or transient previews.' }
+    if ($saved -match 'character-ui-test-key|generated-0|audio_base_64') { throw 'Settings contain plaintext credentials or transient previews.' }
     Set-Control 203 'Unapplied name'
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Settings did not close.' }

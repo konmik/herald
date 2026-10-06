@@ -154,8 +154,7 @@ struct SpeechCommand {
     voice: ResolvedVoice,
     fallback_character: String,
     fallback_speaker: Option<String>,
-    output_device: Option<String>,
-    use_gpu: bool,
+    settings: Settings,
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
 }
@@ -168,15 +167,13 @@ pub struct Speech {
 }
 
 impl Speech {
-    pub fn new(preload: bool, use_gpu: bool) -> Self {
-        #[cfg(not(target_os = "windows"))]
-        let _ = use_gpu;
+    pub fn new(preload: bool) -> Self {
         let (sender, commands) = mpsc::channel::<SpeechCommand>();
         let (events, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             if preload {
                 #[cfg(target_os = "windows")]
-                if let Err(error) = crate::tts::prepare(use_gpu) { log(&data_directory(), error); }
+                if let Err(error) = crate::tts::prepare() { log(&data_directory(), error); }
             }
             for SpeechCommand {
                 text,
@@ -184,8 +181,7 @@ impl Speech {
                 voice,
                 fallback_character,
                 fallback_speaker,
-                output_device,
-                use_gpu,
+                settings,
                 volume,
                 cancelled,
             } in commands
@@ -193,7 +189,7 @@ impl Speech {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
-                let result = speak(&text, &voice, &fallback_character, fallback_speaker.as_deref(), output_device.as_deref(), &volume, &cancelled, use_gpu);
+                let result = speak(&text, &voice, &fallback_character, fallback_speaker.as_deref(), &volume, &cancelled, &settings);
                 let _ = events.send((id, result));
             }
         });
@@ -215,8 +211,7 @@ impl Speech {
             voice: character.voice.clone(),
             fallback_character: character.fallback_character.clone(),
             fallback_speaker: character.fallback_speaker.clone(),
-            output_device: settings.output_device.clone(),
-            use_gpu: settings.use_gpu,
+            settings: settings.clone(),
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
         });
@@ -244,10 +239,9 @@ fn speak(
     voice: &ResolvedVoice,
     fallback_character: &str,
     fallback_speaker: Option<&str>,
-    _output_device: Option<&str>,
     volume: &AtomicU16,
     cancelled: &AtomicBool,
-    _use_gpu: bool,
+    _settings: &Settings,
 ) -> Result<(), String> {
     let preferred = match voice {
         ResolvedVoice::Local { speaker } => speaker.as_deref().or(fallback_speaker),
@@ -440,7 +434,7 @@ impl Preview {
             let signal = Signal::new(&data);
             crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
             if stop.load(Ordering::Relaxed) { return Ok(()); }
-            let mut speech = Speech::new(false, settings.use_gpu);
+            let mut speech = Speech::new(false);
             let character = crate::characters::resolve(&settings, std::path::Path::new(""), "opencode");
             speech.start("This is an announcement", "settings-preview", &character, &settings);
             let started = std::time::Instant::now();
@@ -650,7 +644,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(10)); stop.store(true, Ordering::Relaxed); });
-        speak("This is an announcement", &ResolvedVoice::Local { speaker: None }, "opencode", None, Some("unavailable-test-device"), &AtomicU16::new(75), &cancelled, false).unwrap();
+        let settings = Settings { output_device: Some("unavailable-test-device".into()), ..Default::default() };
+        speak("This is an announcement", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(75), &cancelled, &settings).unwrap();
         assert!(!cancelled.load(Ordering::Relaxed), "Speech must finish without timing out");
     }
 

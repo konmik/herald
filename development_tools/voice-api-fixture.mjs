@@ -32,7 +32,7 @@ const server = createServer(async (request, response) => {
     } else if (url.pathname === '/v1/text-to-voice') {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ voice_id: `saved-${body.generated_voice_id}` }))
-    } else if (url.pathname.startsWith('/v1/text-to-speech/')) {
+    } else if (url.pathname.startsWith('/v1/text-to-speech/') || url.pathname === '/v1/text-to-dialogue') {
       response.writeHead(200, { 'Content-Type': 'audio/pcm' })
       response.end(pcm)
     } else {

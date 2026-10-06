@@ -7,7 +7,7 @@ pub fn run(_data: &std::path::Path) -> Result<(), String> {
 mod native {
     use crate::audio::OutputDevice;
     use crate::characters::{validate_registry, Character, CharacterVoice};
-    use crate::elevenlabs::{Client, VoicePreview};
+    use crate::elevenlabs::{Client, SpeechModel, VoicePreview};
     use crate::settings::{format_time, parse_time, Settings};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -34,7 +34,10 @@ mod native {
     const VOLUME_LABEL: i32 = 110;
     const REFRESH: i32 = 111;
     const PREVIEW: i32 = 112;
-    const GPU: i32 = 113;
+    const MODEL: i32 = 113;
+    const API_KEY: i32 = 114;
+    const API_KEY_LABEL: i32 = 116;
+    const API_KEY_HINT: i32 = 117;
     const TAB: i32 = 200;
     const CHARACTER_DROPDOWN: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
@@ -56,7 +59,7 @@ mod native {
     const END_LABEL: i32 = 304;
     const TIME_HINT: i32 = 305;
     const OUTPUT_LABEL: i32 = 306;
-    const GPU_HINT: i32 = 307;
+    const MODEL_LABEL: i32 = 307;
     const PREVIEW_HINT: i32 = 308;
     const CHARACTER_LABEL: i32 = 309;
     const NAME_LABEL: i32 = 310;
@@ -338,17 +341,20 @@ mod native {
         else { form.devices.get(index as usize - 1).map(|device| device.id.clone()).or_else(|| form.missing.clone()) }
     }
 
-    unsafe fn audio_settings(window: HWND, form: &Form) -> Settings {
+    unsafe fn read_speech_settings(window: HWND, form: &Form) -> Settings {
         let mut settings = form.settings.clone();
         settings.volume = SendMessageW(GetDlgItem(window, VOLUME), TBM_GETPOS, 0, 0) as u16;
         settings.output_device = selected_output(window, form);
-        settings.use_gpu = checked(window, GPU);
+        let index = SendMessageW(GetDlgItem(window, MODEL), CB_GETCURSEL, 0, 0);
+        settings.speech_model = SpeechModel::ALL.get(index.max(0) as usize).copied().unwrap_or_default();
+        let key = text(window, API_KEY).trim().to_owned();
+        settings.elevenlabs_api_key = if key.is_empty() { None } else { Some(key) };
         settings
     }
 
     unsafe fn save(window: HWND, form: &mut Form) -> Result<(), String> {
         capture_current_draft(window, form);
-        let mut settings = audio_settings(window, form);
+        let mut settings = read_speech_settings(window, form);
         settings.quiet_mode = checked(window, QUIET);
         settings.schedule_enabled = checked(window, SCHEDULE);
         settings.quiet_start = parse_time(&text(window, START), false)?;
@@ -368,17 +374,19 @@ mod native {
         settings.selected_character = form.selected_character.clone().filter(|id| settings.characters.contains_key(id));
         settings.save(&form.data)?;
         form.settings = settings;
+        label(window, API_KEY_HINT, &api_key_status(form.settings.elevenlabs_api_key.as_deref()));
+        label(window, CHARACTER_KEY_STATUS, &api_key_status(form.settings.elevenlabs_api_key.as_deref()));
         form.removed_characters.clear();
         label(window, STATUS, "Saved. Changes apply to the next announcement.");
         refresh_characters(window, form);
         Ok(())
     }
 
-    fn key_status() -> String {
-        match Client::from_environment() {
-            Ok(Some(_)) => "ElevenLabs API key found. It is never saved here.".into(),
-            Ok(None) => "ElevenLabs API key missing. Local voices remain available.".into(),
-            Err(error) => format!("ElevenLabs API key unavailable: {error}"),
+    fn api_key_status(api_key: Option<&str>) -> String {
+        match api_key.filter(|key| !key.trim().is_empty()).map(crate::elevenlabs::validate_api_key) {
+            Some(Ok(())) => "Using the key entered in Settings. Kitten CPU is the fallback.".into(),
+            None => "Enter an ElevenLabs key, or leave blank to use Kitten CPU.".into(),
+            Some(Err(error)) => format!("ElevenLabs API key unavailable: {error}"),
         }
     }
 
@@ -397,6 +405,7 @@ mod native {
         let description = draft.voice_description.clone();
         let sample = draft.sample_text.clone();
         let revision = draft.revision;
+        let settings = read_speech_settings(window, form);
         let (sender, receiver) = mpsc::channel();
         form.cloud_job = CloudJob::Designing { id: id.clone(), revision };
         form.cloud_receiver = Some(receiver);
@@ -404,7 +413,7 @@ mod native {
         label(window, STATUS, "Generating voice previews…");
         SetTimer(window, 2, 100, None);
         std::thread::spawn(move || {
-            let result = Client::from_environment().and_then(|client| client.ok_or_else(|| "ElevenLabs API key is missing.".into()).and_then(|client| client.design(&description, &sample)));
+            let result = Client::from_settings(&settings).and_then(|client| client.ok_or_else(|| "ElevenLabs API key is missing.".into()).and_then(|client| client.design(&description, &sample)));
             let _ = sender.send(CloudResult::Designed { id, revision, result });
         });
     }
@@ -424,6 +433,7 @@ mod native {
             return;
         }
         let revision = draft.revision;
+        let settings = read_speech_settings(window, form);
         let (sender, receiver) = mpsc::channel();
         form.cloud_job = CloudJob::Creating { id: id.clone(), revision };
         form.cloud_receiver = Some(receiver);
@@ -431,7 +441,7 @@ mod native {
         label(window, STATUS, "Saving the chosen ElevenLabs voice…");
         SetTimer(window, 2, 100, None);
         std::thread::spawn(move || {
-            let result = Client::from_environment().and_then(|client| client.ok_or_else(|| "ElevenLabs API key is missing.".into()).and_then(|client| client.create_voice(&name, &description, &generated_voice_id)));
+            let result = Client::from_settings(&settings).and_then(|client| client.ok_or_else(|| "ElevenLabs API key is missing.".into()).and_then(|client| client.create_voice(&name, &description, &generated_voice_id)));
             let _ = sender.send(CloudResult::Created { id, revision, result });
         });
     }
@@ -519,7 +529,7 @@ mod native {
         let Some(id) = form.active_draft.clone() else { return; };
         let index = SendMessageW(GetDlgItem(window, VOICE_PREVIEW_DROPDOWN), CB_GETCURSEL, 0, 0);
         let Some(preview) = form.drafts.get(&id).and_then(|draft| draft.previews.get(index.max(0) as usize)).cloned() else { label(window, STATUS, "Generate a voice preview first."); return; };
-        let settings = audio_settings(window, form);
+        let settings = read_speech_settings(window, form);
         if settings.volume == 0 { label(window, STATUS, "Voice preview is silent at 0% volume."); return; }
         form.drafts.get_mut(&id).unwrap().selected_preview = index.max(0) as usize;
         form.voice_preview = Some(crate::platform::PcmPreview::start(preview.samples, settings));
@@ -557,10 +567,13 @@ mod native {
         move_control(OUTPUT_LABEL, 28, 278, width - 56, 24);
         move_control(OUTPUT, 28, 306, width - 154, 220);
         move_control(REFRESH, width - 118, 306, 90, 28);
-        move_control(GPU, 28, 350, width - 56, 28);
-        move_control(GPU_HINT, 28, 380, width - 56, 24);
-        move_control(PREVIEW, 28, 412, 140, 30);
-        move_control(PREVIEW_HINT, 180, 414, width - 208, 36);
+        move_control(MODEL_LABEL, 28, 350, 110, 24);
+        move_control(MODEL, 144, 346, width - 172, 180);
+        move_control(API_KEY_LABEL, 28, 392, 110, 24);
+        move_control(API_KEY, 144, 388, width - 172, 28);
+        move_control(API_KEY_HINT, 28, 426, width - 56, 42);
+        move_control(PREVIEW, 28, 484, 140, 30);
+        move_control(PREVIEW_HINT, 180, 486, width - 208, 36);
         move_control(CHARACTER_LABEL, 28, 54, 110, 24);
         move_control(CHARACTER_DROPDOWN, 144, 50, width - 260, 220);
         move_control(NEW_CHARACTER, width - 106, 50, 78, 28);
@@ -589,7 +602,7 @@ mod native {
     }
 
     unsafe fn show_page(window: HWND, characters: bool) {
-        for id in [QUIET, QUIET_HINT, SCHEDULE, START_LABEL, START, END_LABEL, END, TIME_HINT, VOLUME_LABEL, VOLUME, OUTPUT_LABEL, OUTPUT, REFRESH, GPU, GPU_HINT, PREVIEW, PREVIEW_HINT] {
+        for id in [QUIET, QUIET_HINT, SCHEDULE, START_LABEL, START, END_LABEL, END, TIME_HINT, VOLUME_LABEL, VOLUME, OUTPUT_LABEL, OUTPUT, REFRESH, MODEL, MODEL_LABEL, API_KEY, API_KEY_LABEL, API_KEY_HINT, PREVIEW, PREVIEW_HINT] {
             ShowWindow(GetDlgItem(window, id), if characters { SW_HIDE } else { SW_SHOW });
         }
         for id in [CHARACTER_LABEL, CHARACTER_DROPDOWN, NEW_CHARACTER, NAME_LABEL, CHARACTER_NAME, PROMPT_LABEL, VOICE_PROMPT, SAMPLE_LABEL, SAMPLE_TEXT, VIDEO_LABEL, VIDEO_PATH, BROWSE_VIDEO, VOICE_LABEL, VOICE_STATUS, GENERATE_VOICES, PREVIEW_LABEL, VOICE_PREVIEW_DROPDOWN, PLAY_VOICE, SAVE_VOICE, ACTIVE_CHARACTER, CHARACTER_KEY_STATUS, REMOVE_CHARACTER] {
@@ -646,6 +659,11 @@ mod native {
                 let id = (wparam & 0xffff) as i32;
                 let code = ((wparam >> 16) & 0xffff) as u32;
                 match id {
+                    API_KEY if code == EN_CHANGE => {
+                        let status = api_key_status(Some(text(window, API_KEY).trim()));
+                        label(window, API_KEY_HINT, &status);
+                        label(window, CHARACTER_KEY_STATUS, &status);
+                    }
                     APPLY => match save(window, &mut *form) {
                         Ok(()) => {}
                         Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Civilized Agent settings").as_ptr(), MB_OK | MB_ICONERROR); }
@@ -665,7 +683,7 @@ mod native {
                             label(window, STATUS, "Preview stopped.");
                             KillTimer(window, 1);
                         } else {
-                            let settings = audio_settings(window, &*form);
+                            let settings = read_speech_settings(window, &*form);
                             if settings.volume == 0 {
                                 label(window, STATUS, "Preview is silent at 0% volume.");
                             } else {
@@ -848,8 +866,17 @@ mod native {
             control(window, "STATIC", "Audio output (speech and static)", OUTPUT_LABEL, 0, (28, 278, 664, 24))?;
             control(window, "COMBOBOX", "Audio output", OUTPUT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (28, 306, 566, 220))?;
             control(window, "BUTTON", "Refresh", REFRESH, WS_TABSTOP, (602, 306, 90, 28))?;
-            control(window, "BUTTON", "Use GPU for speech (NVIDIA CUDA)", GPU, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (28, 350, 664, 28))?;
-            control(window, "STATIC", "Falls back to CPU if GPU startup is unavailable.", GPU_HINT, 0, (28, 380, 664, 24))?;
+            control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (28, 350, 110, 24))?;
+            control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (144, 346, 548, 180))?;
+            for model in SpeechModel::ALL {
+                SendMessageW(GetDlgItem(window, MODEL), CB_ADDSTRING, 0, wide(model.label()).as_ptr() as isize);
+            }
+            let selected = SpeechModel::ALL.iter().position(|model| *model == form.settings.speech_model).unwrap_or(0);
+            SendMessageW(GetDlgItem(window, MODEL), CB_SETCURSEL, selected, 0);
+            control(window, "STATIC", "ElevenLabs key", API_KEY_LABEL, 0, (28, 392, 110, 24))?;
+            control(window, "EDIT", form.settings.elevenlabs_api_key.as_deref().unwrap_or_default(), API_KEY, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32, (144, 388, 548, 28))?;
+            SendMessageW(GetDlgItem(window, API_KEY), EM_SETLIMITTEXT, 4096, 0);
+            control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), API_KEY_HINT, 0, (28, 426, 664, 42))?;
             control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (28, 412, 140, 30))?;
             control(window, "STATIC", "Previews your selected settings without saving.", PREVIEW_HINT, 0, (180, 414, 512, 36))?;
             control(window, "STATIC", "Character", CHARACTER_LABEL, 0, (28, 54, 110, 24))?;
@@ -872,14 +899,13 @@ mod native {
             control(window, "BUTTON", "Play preview", PLAY_VOICE, WS_TABSTOP, (144, 430, 140, 30))?;
             control(window, "BUTTON", "Save chosen voice", SAVE_VOICE, WS_TABSTOP, (298, 430, 140, 30))?;
             control(window, "BUTTON", "Use this character for announcements", ACTIVE_CHARACTER, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, (144, 470, 548, 28))?;
-            control(window, "STATIC", &key_status(), CHARACTER_KEY_STATUS, 0, (28, 512, 664, 42))?;
+            control(window, "STATIC", &api_key_status(form.settings.elevenlabs_api_key.as_deref()), CHARACTER_KEY_STATUS, 0, (28, 512, 664, 42))?;
             control(window, "BUTTON", "Remove", REMOVE_CHARACTER, WS_TABSTOP, (548, 430, 140, 30))?;
             control(window, "STATIC", "Uses the system default if your selected device is unavailable.", STATUS, 0, (28, 586, 664, 36))?;
             control(window, "BUTTON", "Apply", APPLY, WS_TABSTOP | BS_DEFPUSHBUTTON as u32, (492, 632, 100, 30))?;
             control(window, "BUTTON", "Close", CLOSE, WS_TABSTOP, (604, 632, 100, 30))?;
             set_checked(window, QUIET, form.settings.quiet_mode);
             set_checked(window, SCHEDULE, form.settings.schedule_enabled);
-            set_checked(window, GPU, form.settings.use_gpu);
             EnableWindow(GetDlgItem(window, START), form.settings.schedule_enabled as i32);
             EnableWindow(GetDlgItem(window, END), form.settings.schedule_enabled as i32);
             let selected = form.settings.output_device.clone();
@@ -891,9 +917,8 @@ mod native {
             layout(window, client.right, client.bottom);
             show_on_desktop(window, desktop.as_ref());
             let speech_data = data.to_path_buf();
-            let use_gpu = form.settings.use_gpu;
             std::thread::spawn(move || {
-                if let Err(error) = crate::tts::prepare(use_gpu) { crate::state::log(&speech_data, error); }
+                if let Err(error) = crate::tts::prepare() { crate::state::log(&speech_data, error); }
             });
             let mut message = MSG::default();
             loop {

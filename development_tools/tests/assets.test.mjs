@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -48,16 +47,8 @@ test('retains the previous installation when publishing fails', async t => {
   assert.deepEqual(await readdir(root), ['installed'])
 })
 
-test('Windows builds prepare missing GPU assets and stop if preparation fails', { skip: process.platform !== 'win32' || process.arch !== 'x64' }, async t => {
-  const root = await fixture(t)
-  const tools = join(root, 'development_tools')
-  await mkdir(tools)
-  await copyFile(new URL('../build-announcer.mjs', import.meta.url), join(tools, 'build-announcer.mjs'))
-  await writeFile(join(tools, 'prepare-tts.mjs'), 'export {}\n')
-  await writeFile(join(tools, 'prepare-gpu-tts.ps1'), "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'prepared') -Value 'gpu'\nexit 73\n")
-  const result = spawnSync(process.execPath, [join(tools, 'build-announcer.mjs')], { encoding: 'utf8', timeout: 15000 })
-  assert.ifError(result.error)
-  assert.equal(await readFile(join(tools, 'prepared'), 'utf8').catch(() => null), 'gpu\r\n')
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /GPU runtime preparation failed/)
+test('Windows builds prepare CPU speech without GPU assets', async () => {
+  const source = await readFile(new URL('../build-announcer.mjs', import.meta.url), 'utf8')
+  assert.match(source, /import\('\.\/prepare-tts\.mjs'\)/)
+  assert.doesNotMatch(source, /gpu|cuda/i)
 })

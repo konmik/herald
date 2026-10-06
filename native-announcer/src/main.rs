@@ -14,8 +14,6 @@ mod settings;
 mod settings_app;
 #[cfg(target_os = "windows")]
 mod tts;
-#[cfg(target_os = "windows")]
-mod gpu;
 mod video;
 mod window;
 
@@ -64,8 +62,6 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if std::env::args().any(|argument| argument == "--gpu-speech-worker") { return tts::gpu_worker(); }
     let mut assets = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
@@ -177,7 +173,7 @@ fn run() -> Result<(), String> {
     let preload_speech = settings_store.current.volume > 0
         && !settings_store.current.quiet_at(local.hour() * 60 + local.minute())
         && !platform::meeting_override(&data);
-    let mut speech = Speech::new(preload_speech, settings_store.current.use_gpu);
+    let mut speech = Speech::new(preload_speech);
     let mut signal = Signal::new(&data);
     let meeting = Arc::new(MeetingStatus::new());
     let stop = Arc::new(AtomicBool::new(false));
@@ -231,8 +227,6 @@ fn run() -> Result<(), String> {
                         Ok(true) => {
                             speech.set_volume(settings_store.current.volume);
                             signal.stop();
-                            #[cfg(target_os = "windows")]
-                            if !settings_store.current.use_gpu { std::thread::spawn(gpu::release); }
                         }
                         Err(error) => state::log(&data, format!("Settings: {error}")),
                         _ => {}

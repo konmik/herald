@@ -1,15 +1,52 @@
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum SpeechModel {
+    #[default]
+    #[serde(rename = "eleven_flash_v2_5")]
+    Flash,
+    #[serde(rename = "eleven_v4")]
+    V4,
+    #[serde(rename = "eleven_v4_turbo")]
+    V4Turbo,
+}
+
+impl SpeechModel {
+    pub const ALL: [Self; 3] = [Self::Flash, Self::V4, Self::V4Turbo];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Flash => "eleven_flash_v2_5",
+            Self::V4 => "eleven_v4",
+            Self::V4Turbo => "eleven_v4_turbo",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flash => "ElevenLabs Flash v2.5",
+            Self::V4 => "ElevenLabs V4",
+            Self::V4Turbo => "ElevenLabs V4 Turbo",
+        }
+    }
+}
+
+pub const DEFAULT_VOICE_ID: &str = "JBFqnCBsd6RMkjVDRZzb";
+
+pub fn validate_api_key(key: &str) -> Result<(), String> {
+    if key.trim().is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
+        return Err("ElevenLabs API key is invalid.".into());
+    }
+    Ok(())
+}
 
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io";
-const API_KEY: &str = "ELEVENLABS_API_KEY";
-const ENV_FILE: &str = "CIVILIZED_AGENT_ENV";
 const API_BASE: &str = "ELEVENLABS_API_BASE_URL";
 const DESIGN_BODY_LIMIT: u64 = 8 * 1024 * 1024;
 const AUDIO_LIMIT: usize = 8 * 1024 * 1024;
@@ -51,8 +88,8 @@ impl std::fmt::Display for SpeechError {
 }
 
 impl Client {
-    pub fn from_environment() -> Result<Option<Self>, String> {
-        let key = match resolve_api_key()? {
+    pub fn from_settings(settings: &crate::settings::Settings) -> Result<Option<Self>, String> {
+        let key = match settings.elevenlabs_api_key.clone() {
             Some(key) => key,
             None => return Ok(None),
         };
@@ -63,9 +100,7 @@ impl Client {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self, String> {
         let base_url = normalize_base_url(&base_url.into())?;
         let api_key = api_key.into();
-        if api_key.trim().is_empty() || api_key.contains('\r') || api_key.contains('\n') {
-            return Err("ElevenLabs API key is invalid.".into());
-        }
+        validate_api_key(&api_key)?;
         Ok(Self { base_url, api_key })
     }
 
@@ -109,7 +144,7 @@ impl Client {
         Ok(response.voice_id)
     }
 
-    pub fn speech(&self, voice_id: &str, text: &str, cancelled: &Arc<AtomicBool>) -> Result<Vec<i16>, SpeechError> {
+    pub fn synthesize_speech(&self, voice_id: &str, text: &str, model: SpeechModel, cancelled: &Arc<AtomicBool>) -> Result<Vec<i16>, SpeechError> {
         if cancelled.load(Ordering::Relaxed) { return Err(SpeechError::Cancelled); }
         validate_remote_id(voice_id, "saved voice").map_err(SpeechError::Message)?;
         if text.trim().is_empty() { return Ok(Vec::new()); }
@@ -126,10 +161,12 @@ impl Client {
         std::thread::spawn(move || {
             let _slot = slot;
             if stop.load(Ordering::Relaxed) { return; }
-            let body = serde_json::json!({ "text": text, "model_id": "eleven_flash_v2_5" });
-            let result = client
-                .request(&format!("/v1/text-to-speech/{voice_id}?output_format=pcm_16000"), &body.to_string())
-                .and_then(|bytes| decode_pcm(&bytes));
+            let result = if model == SpeechModel::V4Turbo {
+                client.synthesize_turbo_speech(&voice_id, &text, &stop)
+            } else {
+                let (path, body) = build_http_speech_request(model, &voice_id, &text);
+                client.request(&path, &body.to_string()).and_then(|bytes| decode_pcm(&bytes))
+            };
             let _ = sender.send(result);
         });
         loop {
@@ -145,7 +182,7 @@ impl Client {
     fn request(&self, path: &str, body: &str) -> Result<Vec<u8>, String> {
         if body.len() > DESIGN_BODY_LIMIT as usize { return Err("ElevenLabs request is too large.".into()); }
         let url = format!("{}{}", self.base_url, path);
-        let speech = path.contains("text-to-speech");
+        let speech = path.contains("text-to-speech") || path.contains("text-to-dialogue");
         let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(if speech { 30 } else { 180 })).build();
         let result = agent
             .post(&url)
@@ -160,6 +197,65 @@ impl Client {
         if !(200..300).contains(&response.status()) { return Err(format!("ElevenLabs request failed with HTTP {}.", response.status())); }
         if speech { validate_pcm_type(response.header("Content-Type").unwrap_or_default())?; }
         read_limited(response.into_reader(), if speech { AUDIO_LIMIT } else { DESIGN_BODY_LIMIT as usize })
+    }
+
+    fn synthesize_turbo_speech(&self, voice_id: &str, text: &str, cancelled: &AtomicBool) -> Result<Vec<i16>, String> {
+        use tungstenite::{client::IntoClientRequest, Message};
+        let base = self.base_url.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+        let mut request = format!("{base}/v1/text-to-dialogue/stream-input?model_id=eleven_v4_turbo&output_format=pcm_16000").into_client_request().map_err(|_| "Invalid ElevenLabs connection.".to_string())?;
+        request.headers_mut().insert("xi-api-key", self.api_key.parse().map_err(|_| "ElevenLabs API key is invalid.".to_string())?);
+        let started = Instant::now();
+        let config = tungstenite::protocol::WebSocketConfig { max_message_size: Some(AUDIO_LIMIT * 2), max_frame_size: Some(AUDIO_LIMIT * 2), ..Default::default() };
+        use std::net::ToSocketAddrs;
+        let host = request.uri().host().ok_or("Invalid ElevenLabs host.")?;
+        let port = request.uri().port_u16().unwrap_or(if request.uri().scheme_str() == Some("wss") { 443 } else { 80 });
+        let addresses = (host, port).to_socket_addrs().map_err(|_| "Could not resolve ElevenLabs host.".to_string())?;
+        let stream = addresses.filter_map(|address| std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5)).ok()).next().ok_or("Could not connect to ElevenLabs Turbo.")?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|_| "Could not limit ElevenLabs connection.".to_string())?;
+        stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|_| "Could not limit ElevenLabs connection.".to_string())?;
+        let (mut socket, _) = tungstenite::client_tls_with_config(request, stream, Some(config), None).map_err(|_| "Could not connect to ElevenLabs Turbo.".to_string())?;
+        let stream = match socket.get_mut() {
+            tungstenite::stream::MaybeTlsStream::Plain(stream) => stream,
+            tungstenite::stream::MaybeTlsStream::Rustls(stream) => &mut stream.sock,
+            _ => return Err("Unsupported ElevenLabs connection.".into()),
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(1))).map_err(|_| "Could not limit ElevenLabs connection.".to_string())?;
+        for body in [
+            serde_json::json!({ "voices": [voice_id] }),
+            serde_json::json!({ "inputs": [{ "text": text, "voice_id": voice_id, "new_turn": false }] }),
+            serde_json::json!({ "close_socket": true }),
+        ] {
+            socket.send(Message::Text(body.to_string())).map_err(|_| "Could not send ElevenLabs Turbo request.".to_string())?;
+        }
+        let mut audio = Vec::new();
+        loop {
+            if cancelled.load(Ordering::Relaxed) { return Err("Speech was cancelled.".into()); }
+            if started.elapsed() > Duration::from_secs(30) { return Err("ElevenLabs Turbo speech timed out.".into()); }
+            match socket.read() {
+                Ok(Message::Text(value)) => {
+                    let value: serde_json::Value = serde_json::from_str(&value).map_err(|_| "Invalid ElevenLabs Turbo response.".to_string())?;
+                    if value.get("error").is_some_and(|value| !value.is_null()) { return Err("ElevenLabs Turbo rejected the speech request.".into()); }
+                    if let Some(encoded) = value.get("audio").and_then(|value| value.as_str()) {
+                        let chunk = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "Invalid ElevenLabs Turbo audio.".to_string())?;
+                        if audio.len() + chunk.len() > AUDIO_LIMIT { return Err("ElevenLabs Turbo audio is too large.".into()); }
+                        audio.extend(chunk);
+                    }
+                    if value.get("is_final").and_then(|value| value.as_bool()) == Some(true) { return decode_pcm(&audio); }
+                }
+                Ok(Message::Close(_)) => return Err("ElevenLabs Turbo returned incomplete audio.".into()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error)) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(_) => return Err("ElevenLabs Turbo connection failed.".into()),
+            }
+        }
+    }
+}
+
+fn build_http_speech_request(model: SpeechModel, voice_id: &str, text: &str) -> (String, serde_json::Value) {
+    if model == SpeechModel::V4 {
+        ("/v1/text-to-dialogue?output_format=pcm_16000".into(), serde_json::json!({ "inputs": [{ "text": text, "voice_id": voice_id }], "model_id": model.id() }))
+    } else {
+        (format!("/v1/text-to-speech/{voice_id}?output_format=pcm_16000"), serde_json::json!({ "text": text, "model_id": model.id() }))
     }
 }
 
@@ -221,47 +317,6 @@ fn validate_pcm_type(value: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn decode_env_key(bytes: &[u8]) -> Option<String> {
-    for line in String::from_utf8_lossy(bytes).lines() {
-        let line = line.trim();
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((name, value)) = line.split_once('=') else { continue; };
-        if name.trim() != API_KEY { continue; }
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if !value.is_empty() { return Some(value.to_owned()); }
-    }
-    None
-}
-
-pub fn resolve_api_key() -> Result<Option<String>, String> {
-    resolve_api_key_from_sources(
-        std::env::var(API_KEY).ok(),
-        std::env::var_os(ENV_FILE).map(PathBuf::from),
-        std::env::current_exe().ok(),
-    )
-}
-
-pub fn resolve_api_key_from_sources(
-    process_key: Option<String>,
-    explicit_env: Option<PathBuf>,
-    current_exe: Option<PathBuf>,
-) -> Result<Option<String>, String> {
-    if let Some(key) = process_key.filter(|key| !key.trim().is_empty()) { return Ok(Some(key)); }
-    if let Some(path) = explicit_env {
-        let bytes = std::fs::read(&path).map_err(|_| "Could not read the configured environment file.".to_string())?;
-        return Ok(decode_env_key(&bytes));
-    }
-    if let Some(root) = current_exe.and_then(|path| path.parent().map(Path::to_path_buf)) {
-        for ancestor in root.ancestors() {
-            let path = ancestor.join(".env");
-            if let Ok(bytes) = std::fs::read(path) {
-                if let Some(key) = decode_env_key(&bytes) { return Ok(Some(key)); }
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn validate_remote_id(value: &str, label: &str) -> Result<(), String> {
@@ -345,14 +400,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_environment_file_is_the_only_fallback_when_configured() {
-        let directory = std::env::temp_dir().join(format!("civilized-key-{}", crate::state::timestamp()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("fixture.env");
-        std::fs::write(&path, "OTHER=ignored\nELEVENLABS_API_KEY=fixture-key\n").unwrap();
-        assert_eq!(resolve_api_key_from_sources(None, Some(path.clone()), None).unwrap().as_deref(), Some("fixture-key"));
-        assert!(resolve_api_key_from_sources(None, Some(directory.join("missing.env")), None).is_err());
-        std::fs::remove_dir_all(directory).unwrap();
+    fn missing_settings_key_disables_elevenlabs() {
+        assert!(Client::from_settings(&crate::settings::Settings::default()).unwrap().is_none());
     }
 
     #[test]
@@ -362,17 +411,6 @@ mod tests {
         assert!(normalize_base_url("http://[::1]:1234").is_ok());
         assert!(normalize_base_url("http://192.168.1.4:1234").is_err());
         assert!(normalize_base_url("https://example.test").is_err());
-    }
-
-    #[test]
-    fn process_key_takes_precedence_and_executable_ancestors_find_the_env_file() {
-        let directory = std::env::temp_dir().join("opencode").join(format!("civilized-key-sources-{}-{}", std::process::id(), crate::state::timestamp()));
-        let binary = directory.join("bin").join("app.exe");
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(directory.join(".env"), "ELEVENLABS_API_KEY='ancestor-key'\n").unwrap();
-        assert_eq!(resolve_api_key_from_sources(Some("process-key".into()), Some(directory.join("missing.env")), Some(binary.clone())).unwrap(), Some("process-key".into()));
-        assert_eq!(resolve_api_key_from_sources(None, None, Some(binary)).unwrap(), Some("ancestor-key".into()));
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -418,7 +456,7 @@ mod tests {
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n", pcm.len());
         let (base, handle) = mock(format!("{response}{}", String::from_utf8_lossy(&pcm)), "text-to-speech/saved-voice");
         let client = Client::new(base, "key").unwrap();
-        assert_eq!(client.speech("saved-voice", "Hello", &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
+        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
         assert!(handle.join().unwrap().contains("eleven_flash_v2_5"));
     }
 
@@ -426,7 +464,7 @@ mod tests {
     fn malformed_and_http_error_outputs_are_rejected_without_body_details() {
         let (base, handle) = mock("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: 1\r\n\r\n{".into(), "text-to-speech");
         let client = Client::new(base, "secret-key").unwrap();
-        let error = client.speech("saved-voice", "Hello", &Arc::new(AtomicBool::new(false))).unwrap_err();
+        let error = client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap_err();
         assert_eq!(error.to_string(), "ElevenLabs returned invalid PCM audio.");
         handle.join().unwrap();
 
@@ -469,8 +507,55 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
         });
         let started = Instant::now();
-        assert_eq!(client.speech("saved-voice", "Hello", &cancelled), Err(SpeechError::Cancelled));
+        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &cancelled), Err(SpeechError::Cancelled));
         assert!(started.elapsed() < Duration::from_millis(180));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn saved_key_is_used_without_environment_resolution() {
+        let settings = crate::settings::Settings { elevenlabs_api_key: Some("saved-key".into()), ..Default::default() };
+        assert_eq!(Client::from_settings(&settings).unwrap().unwrap().api_key, "saved-key");
+    }
+
+    #[test]
+    fn v4_uses_dialogue_and_validates_pcm() {
+        let pcm = pcm_bytes(&[257, 514]);
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n{}", pcm.len(), String::from_utf8_lossy(&pcm));
+        let (base, handle) = mock(response, "text-to-dialogue?");
+        let client = Client::new(base, "key").unwrap();
+        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
+        let request = handle.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model_id"], "eleven_v4");
+        assert_eq!(body["inputs"][0]["voice_id"], "saved-voice");
+        assert_eq!(body["inputs"][0]["text"], "Hello");
+    }
+
+    #[test]
+    fn turbo_uses_authenticated_websocket_and_collects_audio() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept_hdr(stream, |request: &tungstenite::handshake::server::Request, response| {
+                assert_eq!(request.headers()["xi-api-key"], "fixture-key");
+                assert!(request.uri().query().unwrap().contains("model_id=eleven_v4_turbo"));
+                Ok(response)
+            }).unwrap();
+            let init: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(init["voices"][0], "saved-voice");
+            let input: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(input["inputs"][0]["text"], "Hello");
+            let _ = socket.read().unwrap();
+            for samples in [[1, -2], [3, -4]] {
+                let audio = base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&samples));
+                socket.send(tungstenite::Message::Text(serde_json::json!({"audio": audio}).to_string())).unwrap();
+            }
+            socket.send(tungstenite::Message::Text("{\"is_final\":true}".into())).unwrap();
+        });
+        let client = Client::new(format!("http://{address}"), "fixture-key").unwrap();
+        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4Turbo, &Arc::new(AtomicBool::new(false))).unwrap(), [1, -2, 3, -4]);
         handle.join().unwrap();
     }
 }

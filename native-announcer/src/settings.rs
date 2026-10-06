@@ -12,10 +12,65 @@ pub struct Settings {
     pub quiet_end: u32,
     pub volume: u16,
     pub output_device: Option<String>,
-    pub use_gpu: bool,
+    #[serde(with = "api_key_storage")]
+    pub elevenlabs_api_key: Option<String>,
+    pub speech_model: crate::elevenlabs::SpeechModel,
     pub voices: HashMap<String, String>,
     pub characters: BTreeMap<String, Character>,
     pub selected_character: Option<String>,
+}
+
+mod api_key_storage {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(key: &Option<String>, serializer: S) -> Result<S::Ok, S::Error> {
+        key.as_deref().map(protect).transpose().map_err(serde::ser::Error::custom)?.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+        Option::<String>::deserialize(deserializer)?.map(|key| unprotect(&key).map_err(serde::de::Error::custom)).transpose()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
+        use windows_sys::Win32::Security::Cryptography::*;
+        let input = CRYPT_INTEGER_BLOB { cbData: bytes.len() as u32, pbData: bytes.as_ptr() as *mut u8 };
+        let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        unsafe {
+            let result = if encrypt {
+                CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            };
+            if result == 0 { return Err("Could not access the saved ElevenLabs key for this Windows user.".into()); }
+            let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            windows_sys::Win32::Foundation::LocalFree(output.pbData as *mut _);
+            Ok(bytes)
+        }
+    }
+
+    fn protect(key: &str) -> Result<String, String> {
+        #[cfg(target_os = "windows")]
+        {
+            use base64::Engine;
+            Ok(format!("dpapi:{}", base64::engine::general_purpose::STANDARD.encode(crypt(key.as_bytes(), true)?)))
+        }
+        #[cfg(not(target_os = "windows"))]
+        { Ok(key.to_owned()) }
+    }
+
+    fn unprotect(key: &str) -> Result<String, String> {
+        if let Some(encoded) = key.strip_prefix("dpapi:") {
+            #[cfg(target_os = "windows")]
+            {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "Invalid saved ElevenLabs key.".to_string())?;
+                String::from_utf8(crypt(&bytes, false)?).map_err(|_| "Invalid saved ElevenLabs key.".into())
+            }
+            #[cfg(not(target_os = "windows"))]
+            { let _ = encoded; Err("This saved key belongs to a Windows user. Enter a new key.".into()) }
+        } else { Ok(key.to_owned()) }
+    }
 }
 
 impl Default for Settings {
@@ -27,7 +82,8 @@ impl Default for Settings {
             quiet_end: 8 * 60,
             volume: 100,
             output_device: None,
-            use_gpu: false,
+            elevenlabs_api_key: None,
+            speech_model: crate::elevenlabs::SpeechModel::default(),
             voices: HashMap::new(),
             characters: BTreeMap::new(),
             selected_character: None,
@@ -45,6 +101,9 @@ impl Settings {
             return Err("Enter a valid daily quiet schedule.".into());
         }
         if self.volume > 100 { return Err("Volume must be between 0 and 100%.".into()); }
+        if let Some(key) = &self.elevenlabs_api_key {
+            crate::elevenlabs::validate_api_key(key)?;
+        }
         validate_registry(&self.characters, self.selected_character.as_deref())?;
         Ok(())
     }
@@ -131,10 +190,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gpu_defaults_off_and_persists_when_selected() {
-        assert!(!Settings::decode(b"{}").unwrap().use_gpu);
-        let settings = Settings { use_gpu: true, ..Settings::default() };
-        assert!(Settings::decode(&serde_json::to_vec(&settings).unwrap()).unwrap().use_gpu);
+    fn speech_preferences_persist_and_legacy_gpu_is_ignored() {
+        let defaults = Settings::decode(br#"{"useGpu":true}"#).unwrap();
+        assert_eq!(defaults.speech_model, crate::elevenlabs::SpeechModel::Flash);
+        let settings = Settings { elevenlabs_api_key: Some("test-key".into()), speech_model: crate::elevenlabs::SpeechModel::V4Turbo, ..Settings::default() };
+        assert_eq!(Settings::decode(&serde_json::to_vec(&settings).unwrap()).unwrap(), settings);
+        #[cfg(target_os = "windows")]
+        {
+            let json = serde_json::to_string(&settings).unwrap();
+            assert!(json.contains("dpapi:"));
+            assert!(!json.contains("test-key"));
+            assert!(Settings::decode(br#"{"elevenlabsApiKey":"dpapi:not-base64"}"#).is_err());
+        }
+        assert!(Settings::decode(br#"{"elevenlabsApiKey":"bad\nkey"}"#).is_err());
+        assert!(Settings::decode(br#"{"speechModel":"unknown"}"#).is_err());
+        assert!(serde_json::to_value(defaults).unwrap().get("useGpu").is_none());
     }
 
     #[test]

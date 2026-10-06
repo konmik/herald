@@ -3,6 +3,7 @@
 .DS_Store
 Thumbs.db
 *.log
+.env
 node_modules/
 /generated-assets/
 /native-announcer/resources/*
