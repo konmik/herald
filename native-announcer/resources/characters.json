@@ -43,8 +43,8 @@
     "name": "Golden Cap Herald",
     "animationPath": "videos/hatted-herald-11.mp4"
   },
-  "sherlock-holmes": {
-    "name": "Sherlock Holmes",
-    "animationPath": "videos/sherlock-holmes.mp4"
+  "mad-hatter-realistic-01": {
+    "name": "Mad Hatter",
+    "animationPath": "videos/mad-hatter-realistic-01.mp4"
   }
 }
