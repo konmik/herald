@@ -183,6 +183,7 @@ impl Renderer {
                 max_height: title_y + 22.0,
             },
         );
+        shade_bubble_scanlines(buffer, width, height, scale, logical_height - 152.0);
         let face_x = (188.0 * scale) as usize;
         let face_y = ((logical_height - 140.0) * scale) as usize;
         let face_size = (128.0 * scale) as usize;
@@ -316,6 +317,42 @@ fn multiply_color(color: u32, amount: f32) -> u32 {
         result |= ((((color >> shift) & 255) as f32 * amount).clamp(0.0, 255.0) as u32) << shift;
     }
     result
+}
+
+fn shade_bubble_scanlines(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    scale: f32,
+    bottom: f32,
+) {
+    for y in 0..height {
+        if (y as f32 / scale).floor() as usize % 2 != 0 {
+            continue;
+        }
+        let y_position = y as f32 / scale;
+        for x in 0..width {
+            let x_position = x as f32 / scale;
+            if bubble_contains(x_position, y_position, bottom) {
+                let index = y * width + x;
+                buffer[index] = multiply_color(buffer[index], 0.82);
+            }
+        }
+    }
+}
+
+fn bubble_contains(x: f32, y: f32, bottom: f32) -> bool {
+    rounded_contains(x, y, [8.0, 10.0, 316.0, bottom + 4.0], 20.0)
+        || triangle_contains(
+            x,
+            y,
+            [
+                [236.0, bottom - 4.0],
+                [268.0, bottom - 4.0],
+                [252.0, bottom + 18.0],
+            ],
+        )
+        || rounded_contains(x, y, [6.0, 6.0, 314.0, bottom], 20.0)
 }
 
 fn draw_bubble(
@@ -458,7 +495,7 @@ mod tests {
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 260];
         renderer.draw(&mut buffer, 320, 260, 1.0, Some(&frame), 0.0);
-        assert_eq!(buffer[30 * 320 + 150], 0x1e2832);
+        assert_eq!(buffer[30 * 320 + 150], 0x182029);
     }
 
     #[test]
@@ -473,6 +510,56 @@ mod tests {
         assert_eq!(video_background(Some(&frame)), 0x141e28);
         assert_eq!(video_background(None), 0x191f2a);
         assert_eq!(video_background(Some(&RgbaImage::new(0, 0))), 0x191f2a);
+    }
+
+    #[test]
+    fn renderer_scanlines_shade_bubble_contents_but_not_background() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = "Done.".into();
+        renderer.title = "Session".into();
+        let mut buffer = vec![0; 320 * 260];
+        renderer.draw(&mut buffer, 320, 260, 1.0, None, 0.0);
+        assert_eq!(buffer[30 * 320 + 150], 0x141922);
+        assert_eq!(buffer[31 * 320 + 150], 0x191f2a);
+        assert_eq!(buffer[110 * 320 + 252], 0x141922);
+        assert_eq!(buffer[111 * 320 + 252], 0x191f2a);
+        assert_eq!(buffer[62 * 320 + 40], 0x2a2e36);
+        assert_eq!(
+            buffer[0],
+            if cfg!(target_os = "windows") {
+                0xff00ff
+            } else {
+                0x1c1b16
+            }
+        );
+        assert!((26..43)
+            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
+            .any(|index| buffer[index] == 0xc3c6ca));
+        assert!((26..43)
+            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
+            .any(|index| buffer[index] == 0xecf0f5));
+        assert!((72..94)
+            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
+            .any(|index| buffer[index] == 0x808b9a));
+        assert!((72..94)
+            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
+            .any(|index| buffer[index] == 0x99a6b9));
+    }
+
+    #[test]
+    fn renderer_scanlines_follow_logical_rows_at_multiple_scales() {
+        let mut renderer = Renderer::new().unwrap();
+        for (scale, width, height, even_row, odd_row) in [
+            (1.0, 320, 240, 30, 31),
+            (1.5, 480, 360, 45, 47),
+            (2.0, 640, 480, 60, 63),
+        ] {
+            let mut buffer = vec![0; width * height];
+            renderer.draw(&mut buffer, width, height, scale, None, 0.0);
+            let x = (150.0 * scale) as usize;
+            assert_eq!(buffer[even_row * width + x], 0x141922);
+            assert_eq!(buffer[odd_row * width + x], 0x191f2a);
+        }
     }
 
     #[test]
