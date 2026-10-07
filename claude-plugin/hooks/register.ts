@@ -11,22 +11,30 @@ let editTimer: Timer | undefined
 let sessionTitle = ''
 let transcriptPath = ''
 const clientID = crypto.randomUUID()
-let presenceTimer: Timer | undefined
+type Presence = { sessionID: string; timer?: Timer }
+let presence: Presence | undefined
 let presenceWrites = Promise.resolve()
 let presenceSequence = 0
 
-function reportPresence($: EngineInterface, sessionIDs: string[]) {
+function reportPresence($: EngineInterface, sessionIDs: string[], owner = presence) {
   presenceWrites = presenceWrites.then(async () => {
+    if (presence !== owner) return
     await bridge($, { type: 'presence', clientID, sessionIDs, sequence: ++presenceSequence, at: await $.clock.now() })
-  }).catch(async (error) => { await $.ui.log('Voice presence failed: ' + String(error)) })
+  }).catch(async (error) => {
+    if (presence === owner) await $.ui.log('Voice presence failed: ' + String(error))
+  })
   return presenceWrites
 }
 
 async function startPresence($: EngineInterface) {
-  presenceTimer?.cancel()
   const sessionID = await keyFor($)
-  await reportPresence($, [sessionID])
-  presenceTimer = $.clock.every(2000, async () => { await reportPresence($, [sessionID]) })
+  if (presence?.sessionID === sessionID) return presenceWrites
+  presence?.timer?.cancel()
+  const owner: Presence = { sessionID }
+  presence = owner
+  await reportPresence($, [sessionID], owner)
+  if (presence !== owner) return
+  owner.timer = $.clock.every(2000, async () => { await reportPresence($, [sessionID], owner) })
 }
 
 async function bridge($: EngineInterface, command: object) {
@@ -182,8 +190,9 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
-    presenceTimer?.cancel()
-    presenceTimer = undefined
+    const owner = presence
+    presence = undefined
+    owner?.timer?.cancel()
     editTimer?.cancel()
     pending.clear()
     started.clear()

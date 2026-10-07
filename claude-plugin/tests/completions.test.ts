@@ -266,6 +266,24 @@ test('session presence is renewed and removed on exit', async ($, on) => {
   expect(commands).toHaveLength(count)
 })
 
+test('both startup events share one session presence timer', async ($, on) => {
+  const clock = mock.clock(on, { now: 100000 })
+  const commands: BridgeCommand[] = []
+  on('session.id', () => ({ value: 'startup' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('classic.SessionStart', () => ({}))
+  on('agent.list', () => ({ value: [] }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('process.run', (_, e) => { commands.push(bridgeCommand(e.init?.stdin)); return { value: runResult(e.init?.stdin) } })
+  await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  await $.classic.SessionStart({ source: 'startup' })
+  await clock.settle()
+  expect(commands.filter((command) => command.type === 'presence')).toHaveLength(1)
+  await clock.advance(2000)
+  expect(commands.filter((command) => command.type === 'presence')).toHaveLength(2)
+})
+
 test('clearing a conversation renews presence for the replacement session', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
   let sessionID = 'before-clear'
@@ -288,6 +306,54 @@ test('clearing a conversation renews presence for the replacement session', asyn
     ['claude:before-clear'], [], ['claude:after-clear'], ['claude:after-clear'],
   ])
 })
+
+for (const replaced of [false, true]) {
+  test(`presence failures ${replaced ? 'from a replaced session stay silent' : 'in the current session remain visible'}`, async ($, on) => {
+    const clock = mock.clock(on, { now: 100000 })
+    const commands: BridgeCommand[] = []
+    const logs: string[] = []
+    let sessionID = 'original'
+    let release = () => {}
+    let started = () => {}
+    const inFlight = new Promise<void>((resolve) => { started = resolve })
+    const stopped = new Promise<void>((resolve) => { release = resolve })
+    on('session.id', () => ({ value: sessionID }))
+    on('classic.SessionStart', () => ({}))
+    on('agent.list', () => ({ value: [] }))
+    on('ui.log', (_, e) => { logs.push(e.text); return { value: undefined } })
+    on('process.run', async (_, e) => {
+      const command = bridgeCommand(e.init?.stdin)
+      if (command.type === 'presence') {
+        commands.push(command)
+        if (commands.length === 2) {
+          started()
+          await stopped
+          throw new Error('presence process aborted')
+        }
+      }
+      return { value: runResult(e.init?.stdin) }
+    })
+    await $.classic.SessionStart({ source: 'startup' })
+    const tick = clock.advance(2000)
+    await inFlight
+    let replacement: Promise<object> | undefined
+    try {
+      if (replaced) {
+        sessionID = 'replacement'
+        replacement = $.classic.SessionStart({ source: 'resume' })
+        await clock.settle()
+      }
+    } finally {
+      release()
+    }
+    await tick
+    await replacement
+    await clock.settle()
+    expect(logs).toHaveLength(replaced ? 0 : 1)
+    await clock.advance(2000)
+    expect(commands.at(-1)).toMatchObject({ sessionIDs: ['claude:' + sessionID] })
+  })
+}
 
 test('a new user turn cancels pending child summaries', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
