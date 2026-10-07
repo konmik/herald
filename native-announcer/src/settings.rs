@@ -47,6 +47,7 @@ pub struct Settings {
     pub quiet_start: u32,
     pub quiet_end: u32,
     pub volume: u16,
+    pub silent_sound_before_speech: bool,
     pub output_device: Option<String>,
     #[serde(with = "api_key_storage")]
     pub elevenlabs_api_key: Option<String>,
@@ -126,6 +127,7 @@ impl Default for Settings {
             quiet_start: 22 * 60,
             quiet_end: 8 * 60,
             volume: 100,
+            silent_sound_before_speech: false,
             output_device: None,
             elevenlabs_api_key: None,
             speech_model: crate::elevenlabs::SpeechModel::default(),
@@ -263,6 +265,27 @@ pub fn validate_summary_prompt(prompt: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_sound_defaults_off_and_survives_save_load_and_reload() {
+        assert!(!Settings::default().silent_sound_before_speech);
+        assert!(!Settings::decode(br#"{"volume":35}"#).unwrap().silent_sound_before_speech);
+        let data = std::env::temp_dir().join("opencode").join(format!("civilized-silent-sound-{}-{}", std::process::id(), crate::state::timestamp()));
+        let mut settings = Settings::default();
+        settings.save(&data).unwrap();
+        let mut store = Store::new(&data).unwrap();
+        for enabled in [true, false] {
+            settings.silent_sound_before_speech = enabled;
+            settings.save(&data).unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+            assert_eq!(saved["silentSoundBeforeSpeech"], enabled);
+            assert_eq!(Settings::load(&data).unwrap(), settings);
+            assert!(store.reload().unwrap());
+            assert_eq!(store.current, settings);
+            assert!(!store.reload().unwrap());
+        }
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn legacy_description_and_sample_text_are_ignored_and_dropped_when_saved() {

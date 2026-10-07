@@ -36,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser(epilog="Capture requires PyAudioWPatch. Install it with python -m pip install PyAudioWPatch.")
     parser.add_argument("--evidence", default=f"temp/verification/audio-{uuid.uuid4()}")
     parser.add_argument("--check", type=Path)
+    parser.add_argument("--silent-sound", action="store_true")
     args = parser.parse_args()
     recording_path = args.check
     if recording_path is None:
@@ -50,11 +51,14 @@ def main():
             rate = int(output["defaultSampleRate"])
             channels = output["maxInputChannels"]
             with device.open(format=audio.paInt16, channels=channels, rate=rate, input=True, input_device_index=output["index"], frames_per_buffer=1024) as stream:
-                process = subprocess.Popen([
+                command = [
                     "pwsh", "-NoProfile", "-File",
                     str(root / ".claude/skills/verify-civilized-agent/scripts/announce.ps1"),
-                    "-Speech", "-Evidence", str(evidence.relative_to(root)),
-                ], cwd=root)
+                    "-Speech", "-Evidence", str((evidence / "playback").relative_to(root)),
+                ]
+                if args.silent_sound:
+                    command.append("-SilentSound")
+                process = subprocess.Popen(command, cwd=root)
                 try:
                     with wave.open(str(recording_path), "wb") as recording:
                         recording.setnchannels(channels)
@@ -72,9 +76,14 @@ def main():
                             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True, timeout=10)
                             process.wait(timeout=10)
     gap = opening_gap(recording_path)
-    if gap >= 0.35:
+    if args.silent_sound:
+        if not 1.8 <= gap <= 2.5:
+            raise AssertionError(f"FAIL: expected a two-second silent lead-in, captured {gap:.2f}s")
+        print("PASS: two-second silent lead-in captured before speech")
+    elif gap >= 0.35:
         raise AssertionError(f"FAIL: static-to-speech silence {gap:.2f}s exceeds 0.35s")
-    print("PASS: no static-to-speech silence exceeds 0.35s")
+    else:
+        print("PASS: no static-to-speech silence exceeds 0.35s")
 
 
 if __name__ == "__main__":

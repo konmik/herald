@@ -1,10 +1,11 @@
 param(
-    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview', 'Announcements')][string]$Feature = 'Settings',
+    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview', 'Announcements', 'SilentSound')][string]$Feature = 'Settings',
     [string]$Evidence = ('temp/verification/' + [guid]::NewGuid()),
     [string]$AppDirectory,
     [string]$ClaudePluginDirectory,
     [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode',
-    [switch]$Audible
+    [switch]$Audible,
+    [switch]$SilentSound
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -215,6 +216,10 @@ function Select-Page([int]$Index) {
 function Snapshot([string]$Name) {
     $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); voicePreview = (Read-Control 210); voiceId = (Read-Control 216); model = (Send-Control 113 0x147) }
     $bodyFont = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, 130)
+    $silentSoundControl = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, 126)
+    if ($silentSoundControl -ne [IntPtr]::Zero) {
+        $state.silentSound = [ordered]@{ checked = (Send-Control 126 0xF0); visible = [bool][CivilizedVerify]::IsWindowVisible($silentSoundControl); label = (Read-Control 126) }
+    }
     if ($bodyFont -ne [IntPtr]::Zero) {
         $state.announcementBodyFont = [ordered]@{ family = (Read-Combo-Control 130); size = (Read-Announcement-Size 131) }
         $state.announcementTitleFont = [ordered]@{ family = (Read-Combo-Control 132); size = (Read-Announcement-Size 133) }
@@ -293,7 +298,38 @@ try {
         Assert-Announcements-Page
     }
     $before = Snapshot 'controls-before'
-    if ($Feature -eq 'Output') {
+    if ($Feature -eq 'SilentSound') {
+        Select-Page 1
+        $initial = Snapshot 'controls-silent-sound-default'
+        if ($initial.silentSound.checked -ne 0 -or -not $initial.silentSound.visible -or $initial.silentSound.label -cne '2s silent sound') { throw 'Silent sound is not visible on Audio or default off' }
+        Send-Control 126 0xF5 | Out-Null
+        Snapshot 'controls-silent-sound-enabled-draft' | Out-Null
+        Send-Control 107 0xF5 | Out-Null
+        if ((Get-Content $settingsPath -Raw | ConvertFrom-Json).silentSoundBeforeSpeech -ne $true) { throw 'Apply did not enable silent sound' }
+        Copy-Item $settingsPath (Join-Path $evidencePath 'settings-silent-sound-enabled.json')
+        Close-Settings
+        Launch
+        Select-Page 1
+        $enabled = Snapshot 'controls-silent-sound-enabled-reopened'
+        if ($enabled.silentSound.checked -ne 1) { throw 'Reopen did not restore enabled silent sound' }
+        $saved = Get-Content $settingsPath -Raw
+        Send-Control 126 0xF5 | Out-Null
+        Snapshot 'controls-silent-sound-disabled-draft' | Out-Null
+        Close-Settings
+        if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Close saved the disabled draft' }
+        Launch
+        Select-Page 1
+        $discarded = Snapshot 'controls-silent-sound-draft-discarded'
+        if ($discarded.silentSound.checked -ne 1) { throw 'Close did not discard the disabled draft' }
+        Send-Control 126 0xF5 | Out-Null
+        Send-Control 107 0xF5 | Out-Null
+        if ((Get-Content $settingsPath -Raw | ConvertFrom-Json).silentSoundBeforeSpeech -ne $false) { throw 'Apply did not disable silent sound' }
+        Close-Settings
+        Launch
+        Select-Page 1
+        $disabled = Snapshot 'controls-silent-sound-disabled-reopened'
+        if ($disabled.silentSound.checked -ne 0) { throw 'Reopen did not restore disabled silent sound' }
+    } elseif ($Feature -eq 'Output') {
         Write-Output 'Check unavailable device uses system default; Refresh devices; Apply.'
         if ($before.output -ne 'Selected device unavailable (using system default)') { throw 'Unavailable device did not use system default' }
         Send-Control 111 0xF5 | Out-Null
@@ -353,6 +389,21 @@ try {
             Select-Page 1
             Send-Control 106 0x14E 0 | Out-Null
             Send-Control 105 0x405 1 1 | Out-Null
+            if ($SilentSound) {
+                Send-Control 126 0xF5 | Out-Null
+                Snapshot 'controls-preview-silent-sound-draft' | Out-Null
+                foreach ($button in @(210, 112)) {
+                    Select-Page $(if ($button -eq 210) { 0 } else { 1 })
+                    Send-Control $button 0xF5 | Out-Null
+                    $expected = if ($button -eq 210) { 'Voice preview finished.' } else { 'Preview finished.' }
+                    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+                    while ((Read-Control 109) -ne $expected) {
+                        if ([DateTime]::UtcNow -ge $deadline) { throw "Local silent sound preview did not finish. $(Read-Control 109)" }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    Snapshot "controls-local-silent-sound-preview-$button" | Out-Null
+                }
+            }
             Select-Page 3
             [CivilizedVerify]::SetText((Control 114), 0xC, [IntPtr]::Zero, 'character-ui-test-key') | Out-Null
             Send-Control 113 0x14E 1 | Out-Null
@@ -377,6 +428,7 @@ try {
                     $requests = @(Get-Content $requestsFile | Select-Object -Skip $count | ForEach-Object { $_ | ConvertFrom-Json })
                     if ($requests.Count -ne 1 -or $requests[0].url -ne '/v1/text-to-dialogue?output_format=pcm_16000' -or $requests[0].body.model_id -ne 'eleven_v4' -or $requests[0].body.inputs[0].voice_id -ne $voice) { throw 'Preview ignored the draft model or voice.' }
                     Write-Output "Preview control $button finished with draft V4 and $voice."
+                    if ($SilentSound) { Snapshot "controls-remote-silent-sound-preview-$button-$voice" | Out-Null }
                 }
             }
         }
@@ -386,6 +438,7 @@ try {
             [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
             Send-Control 107 0xF5 | Out-Null
             $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+            if ($SilentSound -and -not $settings.silentSoundBeforeSpeech) { throw 'Apply did not persist the previewed silent sound setting.' }
             if (-not $settings.selectedCharacter -or $settings.characters.($settings.selectedCharacter).voice.voiceId -ne 'draft-character-voice' -or $settings.defaultVoiceId -ne 'draft-default-voice' -or $settings.speechModel -ne 'eleven_v4' -or $settings.volume -ne 1 -or $settings.scheduleEnabled -or $settings.quietMode -or $null -ne $settings.outputDevice) { throw 'Apply did not persist the previewed character and audio settings.' }
             Close-Settings
             Launch
