@@ -9,6 +9,7 @@ mod native {
     use crate::characters::{validate_registry, Character, CharacterVoice};
     use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
     use crate::settings::{format_time, parse_time, Settings};
+    use chrono::Timelike;
     use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
     use std::path::{Path, PathBuf};
@@ -547,13 +548,24 @@ mod native {
         settings
     }
 
-    unsafe fn save(window: HWND, form: &mut Form) -> Result<(), String> {
-        capture_current_draft(window, form);
+    unsafe fn read_preview_settings(window: HWND, form: &Form) -> Result<Settings, String> {
         let mut settings = read_speech_settings(window, form);
         settings.quiet_mode = checked(window, QUIET);
         settings.schedule_enabled = checked(window, SCHEDULE);
         settings.quiet_start = parse_time(&text(window, START), false)?;
         settings.quiet_end = parse_time(&text(window, END), true)?;
+        settings.selected_character = form.selected_character.clone();
+        if let Some(id) = settings.selected_character.clone() {
+            if let Some(draft) = form.drafts.get(&id) {
+                settings.characters.insert(id, draft.clone());
+            }
+        }
+        Ok(settings)
+    }
+
+    unsafe fn save(window: HWND, form: &mut Form) -> Result<(), String> {
+        capture_current_draft(window, form);
+        let mut settings = read_preview_settings(window, form)?;
         for id in &form.removed_characters {
             settings.characters.remove(id);
             if settings.selected_character.as_deref() == Some(id.as_str()) { settings.selected_character = None; }
@@ -743,12 +755,19 @@ mod native {
             label(window, PREVIEW, "Play example");
             KillTimer(window, 1);
         }
-        let settings = read_speech_settings(window, form);
-        play_character_example(window, form, settings);
+        match read_preview_settings(window, form) {
+            Ok(settings) => play_character_example(window, form, settings),
+            Err(error) => label(window, STATUS, &error),
+        }
     }
 
     unsafe fn play_character_example(window: HWND, form: &mut Form, mut settings: Settings) {
         if settings.volume == 0 { label(window, STATUS, "Voice preview is silent at 0% volume."); return; }
+        let now = chrono::Local::now();
+        if settings.quiet_at(now.hour() * 60 + now.minute()) {
+            label(window, STATUS, "Preview is silent during quiet hours.");
+            return;
+        }
         let Some(id) = form.active_draft.clone() else { return; };
         let character = draft_for(form, &id).clone();
         if let CharacterVoice::ElevenLabs { voice_id } = &character.voice {
@@ -962,14 +981,21 @@ mod native {
                             label(window, STATUS, "Preview stopped.");
                             KillTimer(window, 1);
                         } else {
-                            let settings = read_speech_settings(window, &*form);
-                            if settings.volume == 0 {
-                                label(window, STATUS, "Preview is silent at 0% volume.");
-                            } else {
-                                (*form).preview = Some(crate::platform::Preview::start((*form).data.clone(), settings, (*form).assets.clone()));
-                                label(window, PREVIEW, "Stop example");
-                                label(window, STATUS, "Playing static, then: This is an announcement");
-                                SetTimer(window, 1, 100, None);
+                            capture_current_draft(window, &mut *form);
+                            match read_preview_settings(window, &*form) {
+                                Ok(settings) if settings.volume == 0 => label(window, STATUS, "Preview is silent at 0% volume."),
+                                Ok(settings) => {
+                                    let now = chrono::Local::now();
+                                    if settings.quiet_at(now.hour() * 60 + now.minute()) {
+                                        label(window, STATUS, "Preview is silent during quiet hours.");
+                                    } else {
+                                        (*form).preview = Some(crate::platform::Preview::start((*form).data.clone(), settings, (*form).assets.clone()));
+                                        label(window, PREVIEW, "Stop example");
+                                        label(window, STATUS, "Playing static, then: This is an announcement");
+                                        SetTimer(window, 1, 100, None);
+                                    }
+                                }
+                                Err(error) => label(window, STATUS, &error),
                             }
                         }
                     }

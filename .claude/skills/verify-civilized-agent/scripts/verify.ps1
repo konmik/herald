@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview')][string]$Feature = 'Settings',
+    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview')][string]$Feature = 'Settings',
     [string]$Evidence = ('temp/verification/' + [guid]::NewGuid()),
     [string]$AppDirectory,
     [string]$ClaudePluginDirectory,
@@ -20,6 +20,7 @@ if ($AppDirectory) {
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-verify-' + [guid]::NewGuid())
 $process = $null
+$server = $null
 $transcribing = $false
 Add-Type @'
 using System;
@@ -55,7 +56,7 @@ function Select-Page([int]$Index) {
     if ((Send-Control 200 0x188) -ne $Index) { throw 'The settings sidebar did not select the requested page' }
 }
 function Snapshot([string]$Name) {
-    $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); model = (Send-Control 113 0x147) }
+    $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); voicePreview = (Read-Control 210); voiceId = (Read-Control 216); model = (Send-Control 113 0x147) }
     $state | ConvertTo-Json | Set-Content (Join-Path $evidencePath "$Name.json") -Encoding utf8NoBOM
     return $state
 }
@@ -103,6 +104,22 @@ try {
         $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
     }
     $info.ArgumentList.Add('--settings')
+    if ($Feature -eq 'VoicePreview' -and $Audible) {
+        $addressFile = Join-Path $scratch 'voice-api-address.txt'
+        $requestsFile = Join-Path $evidencePath 'voice-api-requests.jsonl'
+        $serverInfo = [Diagnostics.ProcessStartInfo]::new('node')
+        $serverInfo.UseShellExecute = $false
+        $serverInfo.ArgumentList.Add((Join-Path $root 'development_tools/voice-api-fixture.mjs'))
+        $serverInfo.ArgumentList.Add($addressFile)
+        $serverInfo.ArgumentList.Add($requestsFile)
+        $server = [Diagnostics.Process]::Start($serverInfo)
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path $addressFile)) {
+            if ($server.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Voice API fixture did not start.' }
+            Start-Sleep -Milliseconds 50
+        }
+        $info.Environment['ELEVENLABS_API_BASE_URL'] = (Get-Content $addressFile -Raw)
+    }
     Write-Output "Launch: $binary --settings; feature=$Feature; audible=$Audible"
     Launch
     $before = Snapshot 'controls-before'
@@ -117,6 +134,83 @@ try {
         Send-Control 106 0x14E 0 | Out-Null
         Send-Control 107 0xF5 | Out-Null
         if ($null -ne (Get-Content $settingsPath -Raw | ConvertFrom-Json).outputDevice) { throw 'System default was not saved' }
+    } elseif ($Feature -eq 'VoicePreview') {
+        $saved = Get-Content $settingsPath -Raw
+        Select-Page 1
+        Send-Control 105 0x405 1 1 | Out-Null
+        Select-Page 2
+        Send-Control 101 0xF5 | Out-Null
+        Select-Page 0
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Control 201)) | Out-Null
+        Write-Output 'Enable draft quiet mode without Apply; play the character voice example.'
+        Send-Control 210 0xF5 | Out-Null
+        Snapshot 'controls-voice-quiet' | Out-Null
+        if ((Read-Control 109) -ne 'Preview is silent during quiet hours.' -or (Read-Control 210) -ne 'Play voice example') { throw 'Voice preview ignored draft quiet mode.' }
+        Select-Page 1
+        Send-Control 112 0xF5 | Out-Null
+        if ((Read-Control 109) -ne 'Preview is silent during quiet hours.' -or (Read-Control 112) -ne 'Play example') { throw 'Audio preview ignored draft quiet mode.' }
+        Select-Page 2
+        Send-Control 101 0xF5 | Out-Null
+        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
+        [CivilizedVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '24:00') | Out-Null
+        foreach ($button in @(210, 112)) {
+            Select-Page $(if ($button -eq 210) { 0 } else { 1 })
+            Write-Output "Play example control $button with a draft all-day quiet schedule."
+            Send-Control $button 0xF5 | Out-Null
+            if ((Read-Control 109) -ne 'Preview is silent during quiet hours.') { throw 'Preview ignored the draft quiet schedule.' }
+        }
+        Select-Page 2
+        Send-Control 102 0xF5 | Out-Null
+        Select-Page 1
+        Send-Control 105 0x405 1 0 | Out-Null
+        foreach ($button in @(210, 112)) {
+            Select-Page $(if ($button -eq 210) { 0 } else { 1 })
+            Send-Control $button 0xF5 | Out-Null
+            $expected = if ($button -eq 210) { 'Voice preview is silent at 0% volume.' } else { 'Preview is silent at 0% volume.' }
+            if ((Read-Control 109) -ne $expected) { throw 'Disabling the draft schedule did not restore volume-based previews.' }
+        }
+        Select-Page 2
+        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, 'invalid') | Out-Null
+        foreach ($button in @(210, 112)) {
+            Select-Page $(if ($button -eq 210) { 0 } else { 1 })
+            Send-Control $button 0xF5 | Out-Null
+            if ((Read-Control 109) -ne 'Use HH:MM for times.') { throw 'Preview did not reject the invalid draft quiet time.' }
+        }
+        Select-Page 2
+        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
+        if ($Audible) {
+            Select-Page 1
+            Send-Control 106 0x14E 0 | Out-Null
+            Send-Control 105 0x405 1 1 | Out-Null
+            Select-Page 3
+            [CivilizedVerify]::SetText((Control 114), 0xC, [IntPtr]::Zero, 'character-ui-test-key') | Out-Null
+            Send-Control 113 0x14E 1 | Out-Null
+            [CivilizedVerify]::SetText((Control 121), 0xC, [IntPtr]::Zero, 'draft-default-voice') | Out-Null
+            Select-Page 0
+            [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
+            foreach ($voice in @('draft-character-voice', 'draft-default-voice')) {
+                if ($voice -eq 'draft-default-voice') {
+                    Select-Page 0
+                    [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, '') | Out-Null
+                }
+                foreach ($button in @(210, 112)) {
+                    Select-Page $(if ($button -eq 210) { 0 } else { 1 })
+                    $count = if (Test-Path $requestsFile) { @(Get-Content $requestsFile).Count } else { 0 }
+                    Send-Control $button 0xF5 | Out-Null
+                    $expected = if ($button -eq 210) { 'Voice preview finished.' } else { 'Preview finished.' }
+                    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                    while ((Read-Control 109) -ne $expected) {
+                        if ([DateTime]::UtcNow -ge $deadline) { throw "Preview did not finish. $(Read-Control 109)" }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    $requests = @(Get-Content $requestsFile | Select-Object -Skip $count | ForEach-Object { $_ | ConvertFrom-Json })
+                    if ($requests.Count -ne 1 -or $requests[0].url -ne '/v1/text-to-dialogue?output_format=pcm_16000' -or $requests[0].body.model_id -ne 'eleven_v4' -or $requests[0].body.inputs[0].voice_id -ne $voice) { throw 'Preview ignored the draft model or voice.' }
+                    Write-Output "Preview control $button finished with draft V4 and $voice."
+                }
+            }
+        }
+        if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Voice preview saved unapplied settings.' }
     } elseif ($Feature -eq 'Preview') {
         $saved = Get-Content $settingsPath -Raw
         Write-Output 'At zero volume, click Play example.'
@@ -125,6 +219,9 @@ try {
         Snapshot 'controls-silent' | Out-Null
         if ($Audible) {
             Write-Output 'Choose System default and 35% volume; Play example; Stop example.'
+            Select-Page 2
+            Send-Control 102 0xF5 | Out-Null
+            Select-Page 1
             Send-Control 106 0x14E 0 | Out-Null
             Send-Control 105 0x405 1 35 | Out-Null
             Send-Control 112 0xF5 | Out-Null
@@ -183,10 +280,11 @@ try {
     throw
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    if ($server -and -not $server.HasExited) { $server.Kill(); $server.WaitForExit() }
     if (Test-Path $scratch) {
         if (Test-Path (Join-Path $scratch 'errors.log')) { Copy-Item (Join-Path $scratch 'errors.log') (Join-Path $evidencePath 'errors.log') }
         Remove-Item -LiteralPath $scratch -Recurse -Force
     }
-    if (Test-Path $evidencePath) { @{ scratchRemoved = -not (Test-Path $scratch); processExited = (-not $process -or $process.HasExited) } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json') }
+    if (Test-Path $evidencePath) { @{ scratchRemoved = -not (Test-Path $scratch); processExited = (-not $process -or $process.HasExited); serverExited = (-not $server -or $server.HasExited) } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json') }
     if ($transcribing) { Stop-Transcript | Out-Null }
 }
