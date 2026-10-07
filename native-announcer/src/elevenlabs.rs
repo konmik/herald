@@ -48,9 +48,8 @@ pub fn validate_api_key(key: &str) -> Result<(), String> {
 
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io";
 const API_BASE: &str = "ELEVENLABS_API_BASE_URL";
-const DESIGN_BODY_LIMIT: u64 = 8 * 1024 * 1024;
+const REQUEST_BODY_LIMIT: usize = 8 * 1024 * 1024;
 const AUDIO_LIMIT: usize = 8 * 1024 * 1024;
-const PREVIEW_LIMIT: usize = 4 * 1024 * 1024;
 const VOICE_USAGE_LIMIT: usize = 64 * 1024;
 static SPEECH_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -64,11 +63,6 @@ impl Drop for SpeechSlot {
 pub struct Client {
     base_url: String,
     api_key: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct DesignedVoice {
-    pub generated_voice_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -121,46 +115,6 @@ impl Client {
         Ok(Self { base_url, api_key })
     }
 
-    pub fn design(&self, voice_description: &str, sample_text: &str) -> Result<Vec<DesignedVoice>, String> {
-        if !(20..=1000).contains(&voice_description.trim().chars().count()) || invalid_prose(voice_description) {
-            return Err("Voice description must be between 20 and 1000 characters.".into());
-        }
-        if !(100..=1000).contains(&sample_text.trim().chars().count()) || invalid_prose(sample_text) {
-            return Err("Sample text must be between 100 and 1000 characters.".into());
-        }
-        let body = serde_json::json!({
-            "voice_description": voice_description,
-            "text": sample_text,
-            "model_id": "eleven_ttv_v3",
-            "guidance_scale": 4
-        });
-        let response = self.request("/v1/text-to-voice/design?output_format=pcm_16000", &body.to_string())?;
-        let response: DesignResponse = serde_json::from_slice(&response).map_err(|_| "ElevenLabs returned an invalid voice design response.".to_string())?;
-        if response.previews.is_empty() || response.previews.len() > 12 {
-            return Err("ElevenLabs returned no usable voice previews.".into());
-        }
-        response.previews.into_iter().map(DesignedVoice::try_from).collect()
-    }
-
-    pub fn create_voice(&self, voice_name: &str, voice_description: &str, generated_voice_id: &str) -> Result<String, String> {
-        if !(1..=160).contains(&voice_name.trim().len()) || voice_name.chars().any(char::is_control) {
-            return Err("Enter a valid character name before saving the voice.".into());
-        }
-        if !(20..=1000).contains(&voice_description.trim().chars().count()) || invalid_prose(voice_description) {
-            return Err("Enter a valid voice description before saving the voice.".into());
-        }
-        validate_remote_id(generated_voice_id, "generated voice")?;
-        let body = serde_json::json!({
-            "voice_name": voice_name,
-            "voice_description": voice_description,
-            "generated_voice_id": generated_voice_id
-        });
-        let response = self.request("/v1/text-to-voice", &body.to_string())?;
-        let response: CreateResponse = serde_json::from_slice(&response).map_err(|_| "ElevenLabs returned an invalid saved voice response.".to_string())?;
-        validate_remote_id(&response.voice_id, "saved voice")?;
-        Ok(response.voice_id)
-    }
-
     pub fn voice_usage(&self) -> Result<VoiceUsage, String> {
         let response = self.get("/v1/user/subscription")?;
         serde_json::from_slice(&response).map_err(|_| "ElevenLabs returned an invalid voice usage response.".to_string())
@@ -202,10 +156,9 @@ impl Client {
     }
 
     fn request(&self, path: &str, body: &str) -> Result<Vec<u8>, String> {
-        if body.len() > DESIGN_BODY_LIMIT as usize { return Err("ElevenLabs request is too large.".into()); }
+        if body.len() > REQUEST_BODY_LIMIT { return Err("ElevenLabs request is too large.".into()); }
         let url = format!("{}{}", self.base_url, path);
-        let speech = path.contains("text-to-speech") || path.contains("text-to-dialogue");
-        let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(if speech { 30 } else { 180 })).build();
+        let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(30)).build();
         let result = agent
             .post(&url)
             .set("xi-api-key", &self.api_key)
@@ -217,8 +170,8 @@ impl Client {
             Err(ureq::Error::Transport(_)) => return Err("Could not reach ElevenLabs.".into()),
         };
         if !(200..300).contains(&response.status()) { return Err(format!("ElevenLabs request failed with HTTP {}.", response.status())); }
-        if speech { validate_pcm_type(response.header("Content-Type").unwrap_or_default())?; }
-        read_limited(response.into_reader(), if speech { AUDIO_LIMIT } else { DESIGN_BODY_LIMIT as usize })
+        validate_pcm_type(response.header("Content-Type").unwrap_or_default())?;
+        read_limited(response.into_reader(), AUDIO_LIMIT)
     }
 
     fn get(&self, path: &str) -> Result<Vec<u8>, String> {
@@ -295,43 +248,6 @@ fn build_http_speech_request(model: SpeechModel, voice_id: &str, text: &str) -> 
     }
 }
 
-#[derive(Deserialize)]
-struct DesignResponse {
-    previews: Vec<PreviewResponse>,
-}
-
-#[derive(Deserialize)]
-struct PreviewResponse {
-    audio_base_64: String,
-    generated_voice_id: String,
-    duration_secs: f64,
-    media_type: String,
-}
-
-#[derive(Deserialize)]
-struct CreateResponse {
-    voice_id: String,
-}
-
-impl TryFrom<PreviewResponse> for DesignedVoice {
-    type Error = String;
-
-    fn try_from(value: PreviewResponse) -> Result<Self, Self::Error> {
-        validate_remote_id(&value.generated_voice_id, "generated voice")?;
-        validate_pcm_type(&value.media_type)?;
-        if !value.duration_secs.is_finite() || !(0.0 < value.duration_secs && value.duration_secs <= 300.0) {
-            return Err("ElevenLabs returned an invalid preview duration.".into());
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(value.audio_base_64.as_bytes())
-            .map_err(|_| "ElevenLabs returned invalid preview audio.".to_string())?;
-        if bytes.len() > PREVIEW_LIMIT { return Err("ElevenLabs preview audio is too large.".into()); }
-        let samples = decode_pcm(&bytes)?;
-        if samples.is_empty() { return Err("ElevenLabs returned empty preview audio.".into()); }
-        Ok(Self { generated_voice_id: value.generated_voice_id })
-    }
-}
-
 fn decode_pcm(bytes: &[u8]) -> Result<Vec<i16>, String> {
     if bytes.is_empty() || bytes.len() % 2 != 0 { return Err("ElevenLabs returned invalid PCM audio.".into()); }
     if [b"RIFF".as_slice(), b"ID3".as_slice(), b"OggS".as_slice(), b"fLaC".as_slice()].iter().any(|header| bytes.starts_with(header)) {
@@ -360,10 +276,6 @@ fn validate_remote_id(value: &str, label: &str) -> Result<(), String> {
         return Err(format!("ElevenLabs {label} ID is invalid."));
     }
     Ok(())
-}
-
-fn invalid_prose(value: &str) -> bool {
-    value.chars().any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
 }
 
 fn normalize_base_url(value: &str) -> Result<String, String> {
@@ -402,9 +314,32 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::sync::Arc;
     use std::thread;
     use std::time::Instant;
+
+    fn isolated_speech_test(body: impl FnOnce()) {
+        const CHILD: &str = "CIVILIZED_SPEECH_TEST_CHILD";
+        let name = std::thread::current().name().expect("speech test thread is unnamed").to_owned();
+        let done = format!("CIVILIZED_SPEECH_TEST_DONE {name}");
+        if let Some(marker) = std::env::var_os(CHILD) {
+            assert_eq!(marker, std::ffi::OsStr::new(name.as_str()));
+            body();
+            println!("{done}");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("speech test executable is unavailable"))
+            .args(["--exact", name.as_str(), "--nocapture", "--test-threads=1"])
+            .env(CHILD, &name)
+            .output()
+            .expect("speech test child failed to start");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = format!("{name}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(output.status.code(), Some(0), "{detail}");
+        assert!(stdout.contains(&done), "{detail}");
+    }
 
     fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
         samples.iter().flat_map(|sample| sample.to_le_bytes()).collect()
@@ -527,102 +462,89 @@ mod tests {
     }
 
     #[test]
-    fn multiline_design_text_is_sent_without_losing_line_breaks() {
-        let audio = base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&[123, -456]));
-        let body = serde_json::json!({"previews":[{"audio_base_64":audio,"generated_voice_id":"multiline","duration_secs":0.1,"media_type":"audio/pcm"}]}).to_string();
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-        let (base, handle) = mock(response, "text-to-voice/design");
-        let sample = "Hear the herald.\nListen as I deliver this announcement with warmth and clarity. Your work is ready, and every check has passed.";
-        let previews = Client::new(base, "fixture-key").unwrap().design("A theatrical herald.\nWarm and clear.", sample).unwrap();
-        assert_eq!(previews[0].generated_voice_id, "multiline");
-        let request = handle.join().unwrap();
-        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["text"], sample);
-        assert_eq!(body["voice_description"], "A theatrical herald.\nWarm and clear.");
+    fn multiline_speech_text_is_sent_without_losing_line_breaks() {
+        isolated_speech_test(|| {
+            let pcm = pcm_bytes(&[257, 514]);
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n{}", pcm.len(), String::from_utf8_lossy(&pcm));
+            let (base, handle) = mock(response, "text-to-speech/saved-voice");
+            let sample = "Hear the herald.\nListen as I deliver this announcement with warmth and clarity. Your work is ready, and every check has passed.";
+            assert_eq!(Client::new(base, "fixture-key").unwrap().synthesize_speech("saved-voice", sample, SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
+            let request = handle.join().unwrap();
+            assert!(request.to_ascii_lowercase().contains("xi-api-key: fixture-key"));
+            let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["text"], sample);
+        });
     }
 
     #[test]
-    fn design_save_and_speech_use_literal_api_outputs() {
-        let audio = base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&[1, -2, 3]));
-        let body = serde_json::json!({"previews":[
-            {"audio_base_64":audio,"generated_voice_id":"generated-0","duration_secs":0.1,"media_type":"audio/pcm"},
-            {"audio_base_64":base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&[4, 5])),"generated_voice_id":"generated-1","duration_secs":0.1,"media_type":"audio/pcm"},
-            {"audio_base_64":base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&[6, 7])),"generated_voice_id":"generated-2","duration_secs":0.1,"media_type":"audio/pcm"}
-        ]}).to_string();
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-        let (base, handle) = mock(response, "text-to-voice/design");
-        let client = Client::new(base, "key").unwrap();
-        let previews = client.design("A clear announcer voice", &"sample text ".repeat(10)).unwrap();
-        assert_eq!(previews.len(), 3);
-        assert_eq!(previews[1].generated_voice_id, "generated-1");
-        let request = handle.join().unwrap();
-        assert!(request.contains("eleven_ttv_v3"));
-
-        let body = "{\"voice_id\":\"saved-generated-0\"}";
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-        let (base, handle) = mock(response, "text-to-voice");
-        let client = Client::new(base, "key").unwrap();
-        assert_eq!(client.create_voice("Royal herald", "A clear announcer voice", "generated-0").unwrap(), "saved-generated-0");
-        assert!(handle.join().unwrap().contains("generated_voice_id"));
-
-        let pcm = pcm_bytes(&[257, 514]);
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n", pcm.len());
-        let (base, handle) = mock(format!("{response}{}", String::from_utf8_lossy(&pcm)), "text-to-speech/saved-voice");
-        let client = Client::new(base, "key").unwrap();
-        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
-        assert!(handle.join().unwrap().contains("eleven_flash_v2_5"));
+    fn speech_uses_literal_api_outputs() {
+        isolated_speech_test(|| {
+            let pcm = pcm_bytes(&[257, 514]);
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n", pcm.len());
+            let (base, handle) = mock(format!("{response}{}", String::from_utf8_lossy(&pcm)), "text-to-speech/saved-voice");
+            let client = Client::new(base, "key").unwrap();
+            assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
+            assert!(handle.join().unwrap().contains("eleven_flash_v2_5"));
+        });
     }
 
     #[test]
     fn malformed_and_http_error_outputs_are_rejected_without_body_details() {
-        let (base, handle) = mock("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: 1\r\n\r\n{".into(), "text-to-speech");
-        let client = Client::new(base, "secret-key").unwrap();
-        let error = client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap_err();
-        assert_eq!(error.to_string(), "ElevenLabs returned invalid PCM audio.");
-        handle.join().unwrap();
+        isolated_speech_test(|| {
+            let (base, handle) = mock("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: 1\r\n\r\n{".into(), "text-to-speech");
+            let client = Client::new(base, "secret-key").unwrap();
+            let error = client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap_err();
+            assert_eq!(error.to_string(), "ElevenLabs returned invalid PCM audio.");
+            handle.join().unwrap();
 
-        let (base, handle) = mock("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 20\r\n\r\nsecret response body".into(), "text-to-voice/design");
-        let client = Client::new(base, "secret-key").unwrap();
-        let error = client.design("A clear announcer voice", &"sample text ".repeat(10)).unwrap_err();
-        assert!(!error.contains("secret"));
-        handle.join().unwrap();
+            let (base, handle) = mock("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 20\r\n\r\nsecret response body".into(), "text-to-speech");
+            let client = Client::new(base, "secret-key").unwrap();
+            let error = client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap_err();
+            assert_eq!(error.to_string(), "ElevenLabs request failed with HTTP 500.");
+            assert!(!error.to_string().contains("secret"));
+            handle.join().unwrap();
+        });
     }
 
     #[test]
     fn redirects_do_not_forward_the_key_and_encoded_audio_is_rejected() {
-        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
-        destination.set_nonblocking(true).unwrap();
-        let response = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\n\r\n", destination.local_addr().unwrap());
-        let (base, handle) = mock(response, "text-to-voice/design");
-        let client = Client::new(base, "fixture-secret").unwrap();
-        assert_eq!(client.design("A clear theatrical announcer", &"sample text ".repeat(10)).unwrap_err(), "ElevenLabs request failed with HTTP 302.");
-        handle.join().unwrap();
-        assert_eq!(destination.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
-        assert_eq!(validate_pcm_type("audio/mpeg"), Err("ElevenLabs returned an unsupported audio format; expected PCM at 16 kHz.".into()));
-        assert_eq!(decode_pcm(b"RIFFencoded audio!"), Err("ElevenLabs returned encoded audio instead of PCM.".into()));
+        isolated_speech_test(|| {
+            let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+            destination.set_nonblocking(true).unwrap();
+            let response = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\n\r\n", destination.local_addr().unwrap());
+            let (base, handle) = mock(response, "text-to-speech");
+            let client = Client::new(base, "fixture-secret").unwrap();
+            assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &Arc::new(AtomicBool::new(false))).unwrap_err().to_string(), "ElevenLabs request failed with HTTP 302.");
+            handle.join().unwrap();
+            assert_eq!(destination.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(validate_pcm_type("audio/mpeg"), Err("ElevenLabs returned an unsupported audio format; expected PCM at 16 kHz.".into()));
+            assert_eq!(decode_pcm(b"RIFFencoded audio!"), Err("ElevenLabs returned encoded audio instead of PCM.".into()));
+        });
     }
 
     #[test]
     fn speech_cancellation_does_not_wait_for_a_slow_server() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = [0; 4096];
-            let _ = stream.read(&mut bytes);
-            thread::sleep(Duration::from_millis(200));
+        isolated_speech_test(|| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0; 4096];
+                let _ = stream.read(&mut bytes);
+                thread::sleep(Duration::from_millis(200));
+            });
+            let client = Client::new(format!("http://{address}"), "key").unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stop = cancelled.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                stop.store(true, Ordering::Relaxed);
+            });
+            let started = Instant::now();
+            assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &cancelled), Err(SpeechError::Cancelled));
+            assert!(started.elapsed() < Duration::from_millis(180));
+            handle.join().unwrap();
         });
-        let client = Client::new(format!("http://{address}"), "key").unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let stop = cancelled.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            stop.store(true, Ordering::Relaxed);
-        });
-        let started = Instant::now();
-        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::Flash, &cancelled), Err(SpeechError::Cancelled));
-        assert!(started.elapsed() < Duration::from_millis(180));
-        handle.join().unwrap();
     }
 
     #[test]
@@ -633,42 +555,46 @@ mod tests {
 
     #[test]
     fn v4_uses_dialogue_and_validates_pcm() {
-        let pcm = pcm_bytes(&[257, 514]);
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n{}", pcm.len(), String::from_utf8_lossy(&pcm));
-        let (base, handle) = mock(response, "text-to-dialogue?");
-        let client = Client::new(base, "key").unwrap();
-        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
-        let request = handle.join().unwrap();
-        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["model_id"], "eleven_v4");
-        assert_eq!(body["inputs"][0]["voice_id"], "saved-voice");
-        assert_eq!(body["inputs"][0]["text"], "Hello");
+        isolated_speech_test(|| {
+            let pcm = pcm_bytes(&[257, 514]);
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\n\r\n{}", pcm.len(), String::from_utf8_lossy(&pcm));
+            let (base, handle) = mock(response, "text-to-dialogue?");
+            let client = Client::new(base, "key").unwrap();
+            assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4, &Arc::new(AtomicBool::new(false))).unwrap(), [257, 514]);
+            let request = handle.join().unwrap();
+            let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["model_id"], "eleven_v4");
+            assert_eq!(body["inputs"][0]["voice_id"], "saved-voice");
+            assert_eq!(body["inputs"][0]["text"], "Hello");
+        });
     }
 
     #[test]
     fn turbo_uses_authenticated_websocket_and_collects_audio() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut socket = tungstenite::accept_hdr(stream, |request: &tungstenite::handshake::server::Request, response| {
-                assert_eq!(request.headers()["xi-api-key"], "fixture-key");
-                assert!(request.uri().query().unwrap().contains("model_id=eleven_v4_turbo"));
-                Ok(response)
-            }).unwrap();
-            let init: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(init["voices"][0], "saved-voice");
-            let input: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(input["inputs"][0]["text"], "Hello");
-            let _ = socket.read().unwrap();
-            for samples in [[1, -2], [3, -4]] {
-                let audio = base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&samples));
-                socket.send(tungstenite::Message::Text(serde_json::json!({"audio": audio}).to_string())).unwrap();
-            }
-            socket.send(tungstenite::Message::Text("{\"is_final\":true}".into())).unwrap();
+        isolated_speech_test(|| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept_hdr(stream, |request: &tungstenite::handshake::server::Request, response| {
+                    assert_eq!(request.headers()["xi-api-key"], "fixture-key");
+                    assert!(request.uri().query().unwrap().contains("model_id=eleven_v4_turbo"));
+                    Ok(response)
+                }).unwrap();
+                let init: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(init["voices"][0], "saved-voice");
+                let input: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(input["inputs"][0]["text"], "Hello");
+                let _ = socket.read().unwrap();
+                for samples in [[1, -2], [3, -4]] {
+                    let audio = base64::engine::general_purpose::STANDARD.encode(pcm_bytes(&samples));
+                    socket.send(tungstenite::Message::Text(serde_json::json!({"audio": audio}).to_string())).unwrap();
+                }
+                socket.send(tungstenite::Message::Text("{\"is_final\":true}".into())).unwrap();
+            });
+            let client = Client::new(format!("http://{address}"), "fixture-key").unwrap();
+            assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4Turbo, &Arc::new(AtomicBool::new(false))).unwrap(), [1, -2, 3, -4]);
+            handle.join().unwrap();
         });
-        let client = Client::new(format!("http://{address}"), "fixture-key").unwrap();
-        assert_eq!(client.synthesize_speech("saved-voice", "Hello", SpeechModel::V4Turbo, &Arc::new(AtomicBool::new(false))).unwrap(), [1, -2, 3, -4]);
-        handle.join().unwrap();
     }
 }

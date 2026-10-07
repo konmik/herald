@@ -42,7 +42,6 @@ impl CharacterVoice {
 #[serde(default, rename_all = "camelCase")]
 pub struct Character {
     pub name: String,
-    pub voice_description: String,
     pub animation_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "CharacterVoice::is_default")]
     pub voice: CharacterVoice,
@@ -52,7 +51,6 @@ impl Default for Character {
     fn default() -> Self {
         Self {
             name: String::new(),
-            voice_description: String::new(),
             animation_path: None,
             voice: CharacterVoice::default(),
         }
@@ -141,7 +139,6 @@ pub fn validate_registry(characters: &BTreeMap<String, Character>, selected: Opt
     for (id, character) in characters {
         validate_id(id)?;
         validate_name(&character.name)?;
-        validate_prose(&character.voice_description, "Character voice description", 1000)?;
         if let Some(path) = &character.animation_path {
             validate_path(path)?;
         }
@@ -188,13 +185,6 @@ fn validate_text(value: &str, label: &str, max: usize, required: bool) -> Result
     Ok(())
 }
 
-fn validate_prose(value: &str, label: &str, max: usize) -> Result<(), String> {
-    if value.chars().count() > max || value.chars().any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t')) {
-        return Err(format!("{label} is invalid."));
-    }
-    Ok(())
-}
-
 fn validate_path(path: &Path) -> Result<(), String> {
     let value = path.to_string_lossy();
     if value.is_empty() || value.len() > 4096 || value.contains('\0') {
@@ -213,7 +203,6 @@ mod tests {
     fn character(voice: CharacterVoice) -> Character {
         Character {
             name: "Royal herald".into(),
-            voice_description: "Warm theatrical town crier".into(),
             animation_path: Some(PathBuf::from("herald.mp4")),
             voice,
         }
@@ -250,7 +239,7 @@ mod tests {
             let profile: Character = serde_json::from_value(input).unwrap();
             assert_eq!(profile.voice, CharacterVoice::Local { speaker: None });
             assert_eq!(serde_json::to_value(profile).unwrap(), serde_json::json!({
-                "name": "Local herald", "voiceDescription": "A warm voice", "animationPath": null
+                "name": "Local herald", "animationPath": null
             }));
         }
         let profile = character(CharacterVoice::Local { speaker: Some("Luna".into()) });
@@ -300,14 +289,9 @@ mod tests {
     }
 
     #[test]
-    fn multiline_voice_description_persists_but_names_cannot_contain_control_characters() {
-        let mut profile = character(CharacterVoice::default());
-        profile.voice_description = "Warm theatrical voice.\nClear diction.".into();
-        let mut registry = BTreeMap::from([("herald".into(), profile)]);
+    fn names_cannot_contain_control_characters() {
+        let mut registry = BTreeMap::from([("herald".into(), character(CharacterVoice::default()))]);
         validate_registry(&registry, Some("herald")).unwrap();
-        let encoded = serde_json::to_vec(&registry).unwrap();
-        let decoded: BTreeMap<String, Character> = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded["herald"].voice_description, "Warm theatrical voice.\nClear diction.");
         registry.get_mut("herald").unwrap().name = "Bad\nname".into();
         assert_eq!(validate_registry(&registry, Some("herald")), Err("Character name is invalid.".into()));
     }

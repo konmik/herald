@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sample_text_is_ignored_and_dropped_when_saved() {
+    fn legacy_description_and_sample_text_are_ignored_and_dropped_when_saved() {
         let custom = serde_json::json!({
             "name": "My herald",
             "voiceDescription": "A saved custom voice",
@@ -236,7 +236,6 @@ mod tests {
         let settings = Settings::decode(&serde_json::to_vec(&bytes).unwrap()).unwrap();
         let saved = &settings.characters["hatted-herald-01"];
         assert_eq!(saved.name, "My herald");
-        assert_eq!(saved.voice_description, "A saved custom voice");
         assert_eq!(saved.animation_path, Some(PathBuf::from("C:\\Videos\\my-herald.mp4")));
         assert_eq!(saved.voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert_eq!(settings.selected_character.as_deref(), Some("hatted-herald-01"));
@@ -244,13 +243,14 @@ mod tests {
         assert_eq!(settings.installed_bundled_characters.len(), 11);
         let serialized = serde_json::to_value(&settings).unwrap();
         assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
+        assert!(serialized["characters"]["hatted-herald-01"].get("voiceDescription").is_none());
         let data = std::env::temp_dir().join(format!("civilized-legacy-sample-{}", crate::state::timestamp()));
         settings.save(&data).unwrap();
         let saved_json: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
         let saved_character = &saved_json["characters"]["hatted-herald-01"];
         assert!(saved_character.get("sampleText").is_none());
         assert_eq!(saved_character["name"], "My herald");
-        assert_eq!(saved_character["voiceDescription"], "A saved custom voice");
+        assert!(saved_character.get("voiceDescription").is_none());
         assert_eq!(saved_character["animationPath"], "C:\\Videos\\my-herald.mp4");
         assert_eq!(saved_character["voice"]["voiceId"], "saved-voice");
         std::fs::remove_dir_all(data).unwrap();
@@ -427,30 +427,26 @@ mod tests {
     #[test]
     fn startup_restart_preserves_complete_saved_preferences_without_rewriting_settings() {
         let data = std::env::temp_dir().join(format!("civilized-settings-restart-{}-{}", std::process::id(), crate::state::timestamp()));
-        let mut settings = Settings::default();
-        settings.quiet_mode = true;
-        settings.schedule_enabled = true;
-        settings.quiet_start = 21 * 60 + 45;
-        settings.quiet_end = 6 * 60 + 30;
-        settings.volume = 35;
-        settings.output_device = Some("saved-output-device".into());
-        settings.elevenlabs_api_key = Some("saved-api-key".into());
-        settings.speech_model = crate::elevenlabs::SpeechModel::V4Turbo;
-        settings.voices.insert("claude".into(), "Mark".into());
-        settings.voices.insert("opencode".into(), "Luna".into());
-        settings.characters.insert("saved-herald".into(), Character {
-            name: "Saved herald".into(),
-            voice_description: "A warm saved voice".into(),
-            animation_path: Some(PathBuf::from("C:\\Videos\\saved-herald.mp4")),
-            voice: crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() },
-        });
-        settings.selected_character = Some("saved-herald".into());
-        settings.save(&data).unwrap();
-        let saved_bytes = std::fs::read(data.join("settings.json")).unwrap();
+        let saved_bytes = br#"{
+            "quietMode":true,"scheduleEnabled":true,"quietStart":1305,"quietEnd":390,
+            "volume":35,"outputDevice":"saved-output-device","elevenlabsApiKey":"saved-api-key",
+            "speechModel":"eleven_v4_turbo","defaultVoiceId":"configured-default",
+            "voices":{"claude":"Mark","opencode":"Luna"},
+            "characters":{
+                "saved-herald":{"name":"Saved herald","voiceDescription":"A warm saved voice","animationPath":"C:\\Videos\\saved-herald.mp4","voice":{"type":"elevenLabs","voiceId":"saved-voice"}},
+                "local-herald":{"name":"Local herald","voiceDescription":"Old local description","animationPath":null,"voice":{"type":"local","speaker":"Jasper"}}
+            },
+            "selectedCharacter":"saved-herald","installedBundledCharacters":["hatted-herald-01"]
+        }"#;
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("settings.json"), saved_bytes).unwrap();
+        let settings = Settings::load(&data).unwrap();
+        assert_eq!(std::fs::read(data.join("settings.json")).unwrap(), saved_bytes);
 
         for _ in 0..2 {
-            let store = Store::new(&data).unwrap();
+            let mut store = Store::new(&data).unwrap();
             assert_eq!(store.current, settings);
+            assert!(!store.reload().unwrap());
             assert!(store.current.quiet_mode);
             assert!(store.current.schedule_enabled);
             assert_eq!(store.current.quiet_start, 1305);
@@ -463,11 +459,30 @@ mod tests {
             assert_eq!(store.current.voices.get("opencode").map(String::as_str), Some("Luna"));
             assert_eq!(store.current.selected_character.as_deref(), Some("saved-herald"));
             assert_eq!(store.current.characters["saved-herald"].name, "Saved herald");
-            assert_eq!(store.current.characters["saved-herald"].voice_description, "A warm saved voice");
             assert_eq!(store.current.characters["saved-herald"].animation_path, Some(PathBuf::from("C:\\Videos\\saved-herald.mp4")));
             assert_eq!(store.current.characters["saved-herald"].voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
+            assert_eq!(store.current.default_voice_id, "configured-default");
+            assert_eq!(store.current.characters["local-herald"].voice, crate::characters::CharacterVoice::Local { speaker: Some("Jasper".into()) });
+            assert!(!store.current.characters.contains_key("hatted-herald-01"));
             assert_eq!(std::fs::read(data.join("settings.json")).unwrap(), saved_bytes);
         }
+        let mut store = Store::new(&data).unwrap();
+        let reloaded_bytes = String::from_utf8(saved_bytes.to_vec()).unwrap().replace("\"volume\":35", "\"volume\":36");
+        std::fs::write(data.join("settings.json"), &reloaded_bytes).unwrap();
+        assert!(store.reload().unwrap());
+        assert_eq!(store.current.volume, 36);
+        assert_eq!(std::fs::read(data.join("settings.json")).unwrap(), reloaded_bytes.as_bytes());
+        store.current.save(&data).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+        assert!(saved_json["characters"].as_object().unwrap().values().all(|character| character.get("voiceDescription").is_none()));
+        assert_eq!(saved_json["characters"]["saved-herald"]["name"], "Saved herald");
+        assert_eq!(saved_json["characters"]["saved-herald"]["animationPath"], "C:\\Videos\\saved-herald.mp4");
+        assert_eq!(saved_json["characters"]["saved-herald"]["voice"]["voiceId"], "saved-voice");
+        assert_eq!(saved_json["characters"]["local-herald"]["voice"]["speaker"], "Jasper");
+        assert_eq!(saved_json["defaultVoiceId"], "configured-default");
+        assert_eq!(saved_json["selectedCharacter"], "saved-herald");
+        assert!(saved_json["characters"].get("hatted-herald-01").is_none());
+        assert_eq!(Settings::load(&data).unwrap(), store.current);
         std::fs::remove_dir_all(data).unwrap();
     }
 }
