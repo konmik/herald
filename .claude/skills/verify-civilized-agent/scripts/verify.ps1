@@ -211,6 +211,18 @@ try {
             }
         }
         if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Voice preview saved unapplied settings.' }
+        if ($Audible) {
+            Select-Page 0
+            [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
+            Send-Control 107 0xF5 | Out-Null
+            $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+            if (-not $settings.selectedCharacter -or $settings.characters.($settings.selectedCharacter).voice.voiceId -ne 'draft-character-voice' -or $settings.defaultVoiceId -ne 'draft-default-voice' -or $settings.speechModel -ne 'eleven_v4' -or $settings.volume -ne 1 -or $settings.scheduleEnabled -or $settings.quietMode -or $null -ne $settings.outputDevice) { throw 'Apply did not persist the previewed character and audio settings.' }
+            Close-Settings
+            Launch
+            Select-Page 0
+            if ((Read-Control 216) -ne 'draft-character-voice') { throw 'The previewed character voice did not survive Apply and reopening.' }
+            Write-Output 'Apply persisted the previewed character and audio settings; reopening restored the character voice.'
+        }
     } elseif ($Feature -eq 'Preview') {
         $saved = Get-Content $settingsPath -Raw
         Write-Output 'At zero volume, click Play example.'
