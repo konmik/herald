@@ -75,7 +75,7 @@ impl MeetingStatus {
 }
 
 pub fn display_duration(text: &str) -> Duration {
-    Duration::from_secs_f64((3.0 + text.split_whitespace().count() as f64 * 0.4).max(10.0))
+    Duration::from_secs_f64((3.0 + text.split_whitespace().count() as f64 * 0.4).max(5.0))
 }
 
 pub const TRANSITION_DURATION: Duration = Duration::from_millis(650);
@@ -406,8 +406,8 @@ mod tests {
     }
 
     #[test]
-    fn duration_scales_and_never_under_ten_seconds() {
-        assert_eq!(display_duration("Done."), Duration::from_secs(10));
+    fn duration_scales_and_never_under_five_seconds() {
+        assert_eq!(display_duration("Done."), Duration::from_secs(5));
         assert_eq!(
             display_duration(&"word ".repeat(30)),
             Duration::from_secs(15)
