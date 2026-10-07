@@ -63,6 +63,7 @@ $requestsFile = Join-Path $temporary 'requests.jsonl'
 $settingsPath = Join-Path $data 'settings.json'
 $video = Join-Path $temporary 'test-character.mp4'
 $configuredDefault = 'configured-default'
+$manualVoiceId = 'own-voice_123'
 $process = $null
 $server = $null
 $playback = $null
@@ -86,7 +87,7 @@ function Send-Control {
 }
 function Set-Control {
     param([int]$Id, [string]$Value)
-    if ($Id -eq 204) {
+    if ($Id -in @(204, 216)) {
         Send-Control $Id 0xB1 0 -1 | Out-Null
         [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC2, [IntPtr]1, $Value) | Out-Null
     } else {
@@ -243,10 +244,11 @@ try {
     if ((Read-Control 203) -ne $bundled.name -or (Read-Control 204) -ne $bundled.voiceDescription -or [IO.Path]::GetFullPath((Read-Control 206)) -ne [IO.Path]::GetFullPath((Join-Path $assets $bundled.animationPath))) { throw 'The bundled character did not display its name, prompt, and relocated animation.' }
     $sample = 'I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.'
     Send-Control 210 0xF5 | Out-Null
+    if ([CivilizedCharacterTest]::IsWindowEnabled((Get-Control 216))) { throw 'Voice ID editing must be disabled during voice generation.' }
     Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Bundled voice example did not finish. $(Read-Control 109)"
     if ((Read-Control 216) -ne 'saved-generated-0') { throw 'The generated voice ID must appear immediately without Apply.' }
-    if (([CivilizedCharacterTest]::GetWindowLong((Get-Control 216), -16) -band 0x800) -eq 0) { throw 'The voice ID field must be read-only.' }
-    if (-not [CivilizedCharacterTest]::IsWindowEnabled((Get-Control 216))) { throw 'The voice ID must remain enabled for selection and copying.' }
+    if (([CivilizedCharacterTest]::GetWindowLong((Get-Control 216), -16) -band 0x800) -ne 0) { throw 'The voice ID field must be editable.' }
+    if (-not [CivilizedCharacterTest]::IsWindowEnabled((Get-Control 216))) { throw 'Voice ID editing must be enabled after voice generation.' }
     $idBounds = [CivilizedCharacterTest+Rect]::new()
     $promptBounds = [CivilizedCharacterTest+Rect]::new()
     [CivilizedCharacterTest]::GetWindowRect((Get-Control 216), [ref]$idBounds) | Out-Null
@@ -287,6 +289,21 @@ try {
     Select-SettingsPage 3
     Set-Control 114 'character-ui-test-key'
     Select-CharactersPage
+    $beforeManual = Get-Content $settingsPath -Raw
+    $beforeManualRequests = @(Get-Content $requestsFile).Count
+    Set-Control 216 "  $manualVoiceId  "
+    if ((Read-Control 216) -cne "  $manualVoiceId  " -or (Send-Control 216 0xB0) -ne (("  $manualVoiceId  ".Length -shl 16) -bor "  $manualVoiceId  ".Length)) { throw 'Editing the voice ID rewrote its text or moved its caret.' }
+    Select-SettingsPage 1
+    Select-CharactersPage
+    if ((Read-Control 216).Trim() -cne $manualVoiceId) { throw 'Page navigation lost the manual voice ID draft.' }
+    Send-Control 210 0xF5 | Out-Null
+    Wait-Until { (Read-Control 109) -eq 'Voice preview finished.' } "Manual voice preview did not finish. $(Read-Control 109)"
+    $manualRequests = @(Get-Content $requestsFile | Select-Object -Skip $beforeManualRequests | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($manualRequests.Count -ne 1 -or $manualRequests[0].url -cne "/v1/text-to-speech/${manualVoiceId}?output_format=pcm_16000" -or $manualRequests[0].body.text -ne $sample) { throw 'Manual voice preview must use the exact trimmed ID without design or creation requests.' }
+    if ((Get-Content $settingsPath -Raw) -ne $beforeManual) { throw 'Manual voice preview persisted its draft before Apply.' }
+    Set-Control 204 'A changed prompt invalidates a manually entered voice.'
+    if ((Read-Control 216) -ne '') { throw 'Changing the prompt did not invalidate the manual voice ID.' }
+    Set-Control 216 $manualVoiceId
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if ($settings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not persist the configured default voice ID.' }
@@ -294,7 +311,7 @@ try {
     if (-not $characterId) { throw 'The chosen character was not activated.' }
     $character = $settings.characters.$characterId
     $serialized = $character | ConvertTo-Json -Depth 8 -Compress
-    if ($character.name -ne 'Test herald' -or $serialized -match 'sampleText' -or $serialized -notmatch 'saved-generated-0' -or $serialized -notmatch [regex]::Escape('test-character.mp4')) { throw "Character did not persist its name, automatic voice, and video without a sample text. $serialized" }
+    if ($character.name -ne 'Test herald' -or $serialized -match 'sampleText' -or $character.voice.voiceId -cne $manualVoiceId -or $serialized -notmatch [regex]::Escape('test-character.mp4')) { throw "Character did not persist its name, entered voice ID, and video without a sample text. $serialized" }
     if ($settings.voices.claude -ne 'Mark') { throw 'Applying a character lost the existing local voice setting.' }
     Send-Control 202 0xF5 | Out-Null
     Set-Control 203 'Second character'
@@ -312,14 +329,47 @@ try {
     $saved | Set-Content (Join-Path $Evidence 'settings-applied.json')
     if ($saved -match 'character-ui-test-key|audio_base_64|"previews"|sampleText|voice_slots_used|voice_limit|voice_add_edit_counter|max_voice_add_edits') { throw 'Settings contain plaintext credentials, transient previews, account usage, or character sample text.' }
     Set-Control 203 'Unapplied name'
+    Set-Control 216 'unapplied-voice'
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Settings did not close.' }
     if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Close saved an unapplied character edit.' }
     Open-Settings
     Select-CharactersPage
     if ((Read-Control 203) -ne 'Test herald' -or (Read-Control 206) -ne $video) { throw 'The character did not survive reopening.' }
-    if ((Read-Control 216) -ne 'saved-generated-0') { throw 'The saved voice ID did not survive reopening.' }
+    if ((Read-Control 216) -cne $manualVoiceId) { throw 'The saved manual voice ID did not survive reopening or Close saved the discarded ID.' }
     @{ name = (Read-Control 203); animation = (Read-Control 206); voiceId = (Read-Control 216); selected = (Send-Control 201 0x188) } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'reopened-controls.json')
+    $beforeInvalid = Get-Content $settingsPath -Raw
+    $beforeInvalidRequests = @(Get-Content $requestsFile).Count
+    Set-Control 216 'bad/id?'
+    Send-Control 210 0xF5 | Out-Null
+    if ((Read-Control 109) -ne 'ElevenLabs voice ID is invalid.') { throw 'Malformed manual voice ID was not rejected before preview.' }
+    [CivilizedCharacterTest]::PostMessage((Get-Control 107), 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $script:validation = [IntPtr]::Zero
+    Wait-Until {
+        $candidate = [CivilizedCharacterTest]::FindWindow('#32770', 'Civilized Agent settings')
+        $owner = [uint32]0
+        if ($candidate -ne [IntPtr]::Zero) { [CivilizedCharacterTest]::GetWindowThreadProcessId($candidate, [ref]$owner) | Out-Null }
+        if ($owner -eq $process.Id) { $script:validation = $candidate; return $true }
+        return $false
+    } 'Apply did not reject the malformed voice ID.'
+    $validationControls = [CivilizedCharacterTest]::Describe($validation)
+    $validationControls | Set-Content (Join-Path $Evidence 'invalid-voice-id-dialog.txt')
+    if ($validationControls -notmatch 'ElevenLabs voice ID is invalid') { throw 'Apply showed an unexpected validation error.' }
+    [CivilizedCharacterTest]::SendMessage([CivilizedCharacterTest]::GetDlgItem($validation, 2), 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Wait-Until { -not [CivilizedCharacterTest]::IsWindowVisible($validation) } 'Voice ID validation dialog did not close.'
+    if ((Get-Content $settingsPath -Raw) -ne $beforeInvalid -or @(Get-Content $requestsFile).Count -ne $beforeInvalidRequests) { throw 'Malformed ID validation persisted settings or called the voice service.' }
+    Set-Control 216 ''
+    Send-Control 107 0xF5 | Out-Null
+    $cleared = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if ($cleared.characters.$characterId.voice) { throw 'Clearing the manual voice ID did not save the default local voice.' }
+    Copy-Item $settingsPath (Join-Path $Evidence 'settings-cleared.json')
+    Send-Control 108 0xF5 | Out-Null
+    if (-not $process.WaitForExit(5000)) { throw 'Cleared voice settings did not close.' }
+    Open-Settings
+    Select-CharactersPage
+    if ((Read-Control 216) -ne '') { throw 'Cleared voice ID did not survive reopening.' }
+    Set-Control 216 $manualVoiceId
+    Send-Control 107 0xF5 | Out-Null
     Send-Control 201 0x186 1 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne 'Second character') { throw 'The list did not select the second character.' }
@@ -376,7 +426,7 @@ try {
     if ($defaultRequests.Count -ne 1 -or $defaultRequests[0].url -notmatch 'output_format=pcm_16000' -or $defaultRequests[0].body.text -ne 'This is an announcement') { throw 'Audio preview did not use the configured default voice request path.' }
     if ($design.Count -ne 3 -or $design[0].url -notmatch 'output_format=pcm_16000' -or $design[0].body.model_id -ne 'eleven_ttv_v3' -or $design[0].body.text -ne $sample -or $design[1].body.text -ne $sample -or $design[2].body.text -ne $sample -or $design[1].body.voice_description -eq $design[2].body.voice_description -or $create.Count -ne 3 -or $examples.Count -ne 4) { throw 'Bundled and custom voice creation, shared example reuse, and prompt changes did not match user actions.' }
     if (-not $SettingsOnly) {
-        $speech = @($requests | Where-Object { $_.url -like '/v1/text-to-speech/saved-generated-0*' -and $_.body.text -eq $notification.text })
+        $speech = @($requests | Where-Object { $_.url -ceq "/v1/text-to-speech/${manualVoiceId}?output_format=pcm_16000" -and $_.body.text -eq $notification.text })
         if ($speech.Count -ne 1 -or $speech[0].url -notmatch 'output_format=pcm_16000' -or $speech[0].body.model_id -ne 'eleven_flash_v2_5' -or $speech[0].body.text -ne $notification.text) { throw 'Runtime speech did not use the custom character voice.' }
     }
     if ((Test-Path (Join-Path $data 'errors.log')) -and (Get-Item (Join-Path $data 'errors.log')).Length -gt 0) { throw 'The custom character logged an error or used local speech.' }

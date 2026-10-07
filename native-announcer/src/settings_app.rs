@@ -328,6 +328,56 @@ mod native {
         }
     }
 
+    fn capture_draft_voice(draft: &mut Character, description: String, entered_id: &str) -> bool {
+        if draft.voice_description != description {
+            draft.voice = CharacterVoice::default();
+            draft.voice_description = description;
+            return true;
+        }
+        let voice_id = entered_id.trim();
+        if !voice_id.is_empty() {
+            draft.voice = CharacterVoice::ElevenLabs { voice_id: voice_id.to_owned() };
+        } else if matches!(draft.voice, CharacterVoice::ElevenLabs { .. }) {
+            draft.voice = CharacterVoice::default();
+        }
+        false
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn entered_voice_id_is_trimmed_and_clearing_restores_local() {
+            let mut draft = empty_draft();
+            let description = draft.voice_description.clone();
+            assert!(!capture_draft_voice(&mut draft, description.clone(), "  own-voice_123  "));
+            assert_eq!(draft.voice, CharacterVoice::ElevenLabs { voice_id: "own-voice_123".into() });
+            assert!(!capture_draft_voice(&mut draft, description, "  "));
+            assert_eq!(draft.voice, CharacterVoice::Local { speaker: None });
+        }
+
+        #[test]
+        fn local_speaker_is_preserved_until_an_id_is_entered() {
+            let mut draft = empty_draft();
+            draft.voice = CharacterVoice::Local { speaker: Some("Luna".into()) };
+            let description = draft.voice_description.clone();
+            capture_draft_voice(&mut draft, description.clone(), "");
+            assert_eq!(draft.voice, CharacterVoice::Local { speaker: Some("Luna".into()) });
+            capture_draft_voice(&mut draft, description, "own-voice");
+            assert_eq!(draft.voice, CharacterVoice::ElevenLabs { voice_id: "own-voice".into() });
+        }
+
+        #[test]
+        fn changed_prompt_invalidates_entered_voice_id() {
+            let mut draft = empty_draft();
+            draft.voice = CharacterVoice::ElevenLabs { voice_id: "own-voice".into() };
+            assert!(capture_draft_voice(&mut draft, "A changed voice".into(), "own-voice"));
+            assert_eq!(draft.voice, CharacterVoice::Local { speaker: None });
+            assert_eq!(draft.voice_description, "A changed voice");
+        }
+    }
+
     unsafe fn draft_for<'a>(form: &'a mut Form, id: &str) -> &'a mut Character {
         if !form.drafts.contains_key(id) {
             let draft = form.settings.characters.get(id).cloned().unwrap_or_else(empty_draft);
@@ -341,15 +391,12 @@ mod native {
         let Some(id) = form.active_draft.clone() else { return; };
         let name = text(window, CHARACTER_NAME);
         let voice_description = text(window, VOICE_PROMPT);
+        let entered_id = text(window, VOICE_ID);
         let video = text(window, VIDEO_PATH);
         let assets = form.assets.clone();
         let draft = draft_for(form, &id);
         draft.name = name;
-        if draft.voice_description != voice_description {
-            draft.voice = CharacterVoice::default();
-            draft.voice_description = voice_description;
-        }
-        let voice_id = voice_id_text(&draft.voice).to_owned();
+        let invalidated = capture_draft_voice(draft, voice_description, &entered_id);
         let video = PathBuf::from(video);
         draft.animation_path = if video.as_os_str().is_empty() || video == PathBuf::from("Choose video…") {
             None
@@ -366,7 +413,11 @@ mod native {
             SendMessageW(list, LB_INSERTSTRING, index, wide(&name).as_ptr() as isize);
             SendMessageW(list, LB_SETCURSEL, index, 0);
         }
-        label(window, VOICE_ID, &voice_id);
+        if invalidated && !entered_id.is_empty() {
+            form.updating = true;
+            label(window, VOICE_ID, "");
+            form.updating = false;
+        }
     }
 
     unsafe fn refresh_page_visibility(window: HWND, form: &Form) {
@@ -630,7 +681,7 @@ mod native {
 
     unsafe fn set_cloud_controls(window: HWND, enabled: bool) {
         EnableWindow(GetDlgItem(window, APPLY), enabled as i32);
-        for id in [CHARACTER_LIST, NEW_CHARACTER, CHARACTER_NAME, VOICE_PROMPT, VIDEO_PATH, REMOVE_CHARACTER] {
+        for id in [CHARACTER_LIST, NEW_CHARACTER, CHARACTER_NAME, VOICE_PROMPT, VOICE_ID, VIDEO_PATH, REMOVE_CHARACTER] {
             EnableWindow(GetDlgItem(window, id), enabled as i32);
         }
     }
@@ -737,6 +788,12 @@ mod native {
         if settings.volume == 0 { label(window, STATUS, "Voice preview is silent at 0% volume."); return; }
         let Some(id) = form.active_draft.clone() else { return; };
         let character = draft_for(form, &id).clone();
+        if let CharacterVoice::ElevenLabs { voice_id } = &character.voice {
+            if let Err(error) = crate::characters::validate_voice_id(voice_id) {
+                label(window, STATUS, &error);
+                return;
+            }
+        }
         settings.characters.insert(id.clone(), character);
         settings.selected_character = Some(id);
         form.voice_preview = Some(crate::platform::Preview::voice(settings, VOICE_EXAMPLE.into(), form.assets.clone()));
@@ -990,7 +1047,7 @@ mod native {
                             label(window, STATUS, "Character marked for removal. Apply saves it; cloud voices are unchanged.");
                         }
                     }
-                    CHARACTER_NAME | VOICE_PROMPT if code == EN_CHANGE => capture_current_draft(window, &mut *form),
+                    CHARACTER_NAME | VOICE_PROMPT | VOICE_ID if code == EN_CHANGE => capture_current_draft(window, &mut *form),
                     _ => {}
                 }
                 0
@@ -1164,7 +1221,7 @@ mod native {
                 control(window, "STATIC", "Video", VIDEO_LABEL, 0, (502, 204, 426, 24))?;
                 control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (502, 232, 426, 36))?;
                 control(window, "STATIC", "ElevenLabs voice ID", VOICE_ID_LABEL, 0, (502, 284, 426, 24))?;
-                control(window, "EDIT", "", VOICE_ID, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_READONLY as u32, (502, 312, 426, 34))?;
+                control(window, "EDIT", "", VOICE_ID, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (502, 312, 426, 34))?;
                 control(window, "STATIC", "Voice description", PROMPT_LABEL, 0, (502, 362, 426, 24))?;
                 control(window, "EDIT", "", VOICE_PROMPT, WS_BORDER | WS_TABSTOP | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL, (502, 390, 426, 102))?;
                 control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (502, 518, 160, 34))?;
