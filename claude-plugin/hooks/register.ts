@@ -37,8 +37,8 @@ async function bridge($: EngineInterface, command: object) {
   return result
 }
 
-async function summaryPrompt($: EngineInterface, status: string, report: string) {
-  const result = await bridge($, { type: 'read-summary-prompt', status, report })
+async function summaryPrompt($: EngineInterface) {
+  const result = await bridge($, { type: 'read-summary-prompt' })
   const prompt = JSON.parse(result.stdout)
   if (typeof prompt !== 'string') throw new Error('Civilized Agent bridge returned an invalid summary prompt')
   return prompt
@@ -74,7 +74,7 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
     pending.delete(key)
     return
   }
-  const prompt = await summaryPrompt($, event.reason === 'answer' ? 'completed' : 'failed', event.answer)
+  const prompt = await summaryPrompt($)
   if (pending.get(key) !== token) return
   if (background.get(key)) {
     pending.delete(key)

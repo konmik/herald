@@ -11,7 +11,7 @@ export class Completions {
   private pending = new Map<string, object>()
 
   constructor(
-    private onSummarize: (sessionID: string, failed: boolean, isCurrent: () => boolean) => Promise<string>,
+    private onSummarize: (sessionID: string, failed: boolean) => Promise<string>,
     private onPublish: (completion: Completion) => Promise<void>,
     private onCheckReady: (sessionID: string, failed: boolean) => Promise<boolean>,
     private minimumDuration = 60_000,
@@ -68,7 +68,7 @@ export class Completions {
         this.onReport(sessionID, "below-minimum-duration")
         return
       }
-      const text = (await this.onSummarize(sessionID, failed, () => this.pending.get(sessionID) === run.token)).replace(/\s+/g, " ").trim()
+      const text = (await this.onSummarize(sessionID, failed)).replace(/\s+/g, " ").trim()
       if (!text || this.pending.get(sessionID) !== run.token) return
       if (!(await this.onCheckReady(sessionID, failed)) || this.pending.get(sessionID) !== run.token) return
       await this.onPublish({ id, sessionID, completed, text, emotion: "neutral" })

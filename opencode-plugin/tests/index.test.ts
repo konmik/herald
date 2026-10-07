@@ -65,7 +65,6 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
   const shells = new Map<string, { id: string; status: string; directory: string; metadata: { sessionID: string } }>()
   const inbox = new Map<string, unknown[]>()
   let finalReply = true
-  let reportTexts = ["Done."]
   let pageSize = 100
   let snapshot: unknown
   const queue: { event: Event; resolve: () => void }[] = []
@@ -85,7 +84,7 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
       },
       active: async () => Object.fromEntries([...active].map((id) => [id, { type: "running" }])),
       inbox: { list: async ({ sessionID }: { sessionID: string }) => inbox.get(sessionID) ?? [] },
-      context: async () => finalReply ? reportTexts.map((text) => ({ type: "assistant", finish: "stop", content: [{ type: "text", text }] })) : [],
+      context: async () => finalReply ? [{ type: "assistant", finish: "stop", content: [{ type: "text", text: "Done." }] }] : [],
       generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }) => { generated.push(sessionID); generatedPrompts.push(prompt); return { text: "Root completed." } },
     },
     shell: { list: async ({ location }: { location: { directory: string } }) => ({ data: [...shells.values()].filter((shell) => shell.directory === location.directory) }) },
@@ -127,10 +126,10 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
   const finish = (at = 70_000) => emit("session.execution.succeeded", "root", at)
   const fail = (at = 70_000) => emit("session.execution.failed", "root", at)
   const notices = () => commands.filter((command) => command.type === "notify")
-  return { sessions, session: client.session, active, shells, inbox, emit, child, start, finish, fail, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, setReports: (texts: string[]) => { reportTexts = texts }, paginate: () => { pageSize = 1 } }
+  return { sessions, session: client.session, active, shells, inbox, emit, child, start, finish, fail, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, paginate: () => { pageSize = 1 } }
 }
 
-test("cancels generation during report loading and allows the next summary", async () => {
+test("cancels generation during readiness checking and allows the next summary", async () => {
   const f = await fixture()
   const context = f.session.context
   let reads = 0
@@ -139,7 +138,7 @@ test("cancels generation during report loading and allows the next summary", asy
   const waiting = new Promise<void>(resolve => { release = resolve })
   const loading = new Promise<void>(resolve => { loaded = resolve })
   const reader = spyOn(f.session, "context").mockImplementation(async () => {
-    if (++reads === 2) {
+    if (++reads === 1) {
       loaded()
       await waiting
     }
@@ -163,29 +162,27 @@ test("cancels generation during report loading and allows the next summary", asy
   }
 })
 
-test("generates from the latest assistant report and rereads the saved prompt", async () => {
+test("sends the saved prompt unchanged and rereads it", async () => {
   const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
   mkdirSync(temporary, { recursive: true })
   const data = mkdtempSync(join(temporary, "summary-prompt-"))
   const previousData = process.env.CIVILIZED_AGENT_DATA
-  const firstPrompt = "First line {{status}}\nUnicode: Ω 😀\nReport: {{report}}\nUnknown: {{future}}"
-  const secondPrompt = "Second {{status}} {{report}}"
+  const firstPrompt = "Report the task outcome.\nUnicode: Ω 😀\nBe explicit and concise."
+  const secondPrompt = "Describe the result in one sentence."
   try {
     process.env.CIVILIZED_AGENT_DATA = data
     writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: firstPrompt }))
     const f = await fixture()
     try {
-      f.setReports(["Old report.", "Latest {{status}} {{report}}."])
       await f.start()
       await f.finish()
-      expect(generatedPrompts).toEqual(['First line completed\nUnicode: Ω 😀\nReport: "Latest {{status}} {{report}}."\nUnknown: {{future}}'])
+      expect(generatedPrompts).toEqual([firstPrompt])
       writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: secondPrompt }))
-      f.setReports(["结果 😀"])
       await f.start()
       await f.fail(80_000)
       expect(generatedPrompts).toEqual([
-        'First line completed\nUnicode: Ω 😀\nReport: "Latest {{status}} {{report}}."\nUnknown: {{future}}',
-        'Second failed "结果 😀"',
+        firstPrompt,
+        secondPrompt,
       ])
       expect(generated).toEqual(["root", "root"])
     } finally { await f.cleanup() }

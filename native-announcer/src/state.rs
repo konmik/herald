@@ -265,6 +265,10 @@ impl Inbox {
                             .iter()
                             .any(|(s, at)| s == &n.session_id && *at >= n.completed)
                     {
+                        if let Some((title, summary)) = n.text.split_once('|') {
+                            n.title = title.trim().to_owned();
+                            n.text = summary.trim().to_owned();
+                        }
                         n.text = n.text.chars().take(4096).collect();
                         n.title = n.title.chars().take(256).collect();
                         self.queue.retain(|v| v.session_id != n.session_id);
@@ -479,6 +483,29 @@ mod tests {
             value.to_string(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn notification_separator_sets_title_and_summary_for_both_hosts() {
+        for session in ["claude:task", "opencode:task"] {
+            for (text, title, summary) in [
+                (" Tests passed | All checks are green. ", "Tests passed", "All checks are green."),
+                ("结果 😀 | Fixed A | B.", "结果 😀", "Fixed A | B."),
+                ("All checks are green.", "Session title", "All checks are green."),
+            ] {
+                let data = test_directory();
+                let mut inbox = Inbox::new(data.clone());
+                write_command(&data, "0", serde_json::json!({
+                    "type": "notify", "id": "result", "sessionID": session,
+                    "completed": 10, "text": text, "title": "Session title"
+                }));
+                inbox.read(None);
+                let notification = inbox.queue.front().unwrap();
+                assert_eq!(notification.title, title);
+                assert_eq!(notification.text, summary);
+                std::fs::remove_dir_all(data).unwrap();
+            }
+        }
     }
 
     #[test]

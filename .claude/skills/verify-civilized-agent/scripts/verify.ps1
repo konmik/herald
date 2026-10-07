@@ -414,17 +414,15 @@ try {
         }
         if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Preview saved unapplied settings' }
     } elseif ($Feature -eq 'Announcements') {
-        $customPrompt = [string]::Join("`n", @('Custom first line.', 'Summarize {{status}}.', 'Report data {{report}}'))
-        $longPrompt = 'Long prompt ' + ('x' * 700) + ' {{status}} {{report}}' + "`nSummarize {{status}}.`nReport data {{report}}"
-        $missingReportPrompt = [string]::Join("`n", @('Custom first line.', 'Summarize {{status}}.'))
+        $customPrompt = [string]::Join("`n", @('Report the task outcome.', 'Be explicit.', 'Be concise.'))
+        $longPrompt = 'Long prompt ' + ('x' * 700) + "`nReport the task outcome.`nBe concise."
         Write-Output 'Select Announcements; reset the default prompt; close without Apply; confirm the reset was discarded.'
         Select-Page 5
         Assert-Announcements-Page
         $resetBytes = Get-Content $settingsPath -Raw
         Send-Control 135 0xF5 | Out-Null
         $defaultPrompt = Read-Control 134
-        if ([string]::IsNullOrWhiteSpace($defaultPrompt) -or $defaultPrompt -notmatch '\{\{status\}\}' -or $defaultPrompt -notmatch '\{\{report\}\}') { throw 'Reset did not populate the full editable default prompt' }
-        Assert-Exact-Lf 'Reset prompt' $defaultPrompt
+        if ([string]::IsNullOrWhiteSpace($defaultPrompt) -or $defaultPrompt -match '\{\{status\}\}|\{\{report\}\}') { throw 'Reset did not populate the plain editable default prompt' }
         Snapshot 'controls-reset' | Out-Null
         if ((Get-Content $settingsPath -Raw) -ne $resetBytes) { throw 'Reset changed the saved settings before Apply' }
         Set-Control-Text 134 $customPrompt
@@ -445,7 +443,7 @@ try {
         Assert-Exact-Lf 'Long prompt' $longRead
         Snapshot 'controls-long-prompt' | Out-Null
         Write-Output 'Insert a 16384-character prompt with emoji through the edit control and Apply.'
-        $unicodePrompt = ([char]::ConvertFromUtf32(0x1f600) * 16374) + '{{report}}'
+        $unicodePrompt = [char]::ConvertFromUtf32(0x1f600) * 16384
         Set-Control-Text 134 ''
         [CivilizedVerify]::SetText((Control 134), 0xC2, [IntPtr]1, $unicodePrompt) | Out-Null
         if ((Read-Control 134) -cne $unicodePrompt) { throw 'The editor truncated a valid Unicode prompt at the character limit' }
@@ -462,9 +460,9 @@ try {
         Set-Invalid-Announcement-Size 131
         Apply-Invalid-Announcement-Draft $beforeInvalid '(?i)(size|font)' 'Invalid font size'
         Set-Announcement-Size 131 22
-        Write-Output 'Reject a summary prompt without {{report}} without saving or showing a modal dialog.'
-        Set-Control-Text 134 $missingReportPrompt
-        Apply-Invalid-Announcement-Draft $beforeInvalid '(?i)(report|prompt)' 'Missing report placeholder'
+        Write-Output 'Reject an empty summary prompt without saving or showing a modal dialog.'
+        Set-Control-Text 134 ''
+        Apply-Invalid-Announcement-Draft $beforeInvalid '(?i)(empty|prompt)' 'Empty prompt'
         Set-Control-Text 134 $customPrompt
         Assert-Exact-Lf 'Custom prompt' (Read-Control 134)
         Snapshot 'controls-draft' | Out-Null
@@ -502,7 +500,7 @@ try {
         Assert-Announcements-Page
         Set-Announcement-Size 131 18
         Set-Announcement-Size 133 14
-        $unappliedPrompt = [string]::Join("`n", @('Unapplied first line.', 'Summarize {{status}}.', 'Report data {{report}}'))
+        $unappliedPrompt = [string]::Join("`n", @('Unapplied first line.', 'Summarize the task.', 'Be brief.'))
         Set-Control-Text 134 $unappliedPrompt
         Assert-Exact-Lf 'Unapplied prompt' (Read-Control 134)
         Snapshot 'controls-unapplied' | Out-Null

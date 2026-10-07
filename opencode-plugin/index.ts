@@ -1,5 +1,4 @@
 import { Plugin } from "@opencode/plugin"
-import type { OpenCode, SessionMessageAssistant, SessionMessageAssistantText } from "@opencode/client"
 import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -7,16 +6,7 @@ import { Completions } from "./completions"
 import { send } from "./bridge"
 import { consumeEvents } from "./events"
 import { canAnnounceFromLocalServer } from "./state-client"
-import { createSummaryPrompt } from "../claude-plugin/scripts/summary-prompt.mjs"
-
-async function latestAssistantText(session: Pick<ReturnType<typeof OpenCode.make>["session"], "context">, sessionID: string) {
-  const messages = await session.context({ sessionID })
-  const assistant = messages.findLast((message): message is SessionMessageAssistant => message.type === "assistant")
-  return assistant?.content
-    .filter((part): part is SessionMessageAssistantText => part.type === "text")
-    .map((part) => part.text)
-    .join("\n") ?? ""
-}
+import { readSummaryPrompt } from "../claude-plugin/scripts/summary-prompt.mjs"
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -34,12 +24,10 @@ export default Plugin.define({
       child.unref()
     }
     const completions = new Completions(
-      async (sessionID, failed, isCurrent) => {
-        const report = await latestAssistantText(ctx.session, sessionID)
-        if (!isCurrent()) return ""
+      async (sessionID) => {
         const result = await ctx.session.generate({
           sessionID,
-          prompt: createSummaryPrompt(failed ? "failed" : "completed", report),
+          prompt: readSummaryPrompt(),
         })
         return result.text
       },

@@ -269,7 +269,7 @@ try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $binaryHash = (Get-FileHash $binaryPath -Algorithm SHA256).Hash
-    $layoutPrompt = [string]::Join("`n", @('Summary {{status}}.', 'Report data {{report}}'))
+    $layoutPrompt = [string]::Join("`n", @('Report the task outcome.', 'Be explicit and concise.'))
     $fixture = [ordered]@{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 35; outputDevice = $null; speechModel = 'eleven_flash_v2_5'; voices = @{ claude = 'Mark' }; characters = @{ 'layout-verification-character' = @{ name = 'Stored layout character'; animationPath = $null } }; selectedCharacter = $null; announcementBodyFont = [ordered]@{ family = 'Segoe UI'; size = 16 }; announcementTitleFont = [ordered]@{ family = 'Segoe UI'; size = 26 }; summaryPrompt = $layoutPrompt }
     $fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'settings-before.json')

@@ -1,5 +1,6 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle)
 $ErrorActionPreference = 'Stop'
+$expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-announcement-' + [guid]::NewGuid())
@@ -65,6 +66,7 @@ try {
             if ($process.MainWindowHandle -eq [IntPtr]::Zero -and -not (Test-Path (Join-Path $scratch 'inbox'))) { throw 'Announcer not ready' }
             Write-Output "Doctor passed: owned PID $($process.Id), SHA256 $hash, isolated inbox"
             $message = @{ type = 'notify'; id = 'verification-result'; sessionID = 'claude:verification'; completed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); title = 'Verification session'; text = 'The verification task passed.'; character = 'claude'; emotion = 'neutral' }
+            if ($SummaryTitle) { $message.text = ' Checks passed | The verification task passed. ' }
             $message | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'notification.json')
             Write-Output 'Send notification through the production bridge; keep session presence alive.'
             Send-Bridge $message
@@ -75,11 +77,11 @@ try {
     if ($process.ExitCode -ne 0) { throw "Announcer exited $($process.ExitCode)" }
     if (Test-Path (Join-Path $scratch 'errors.log')) { throw (Get-Content (Join-Path $scratch 'errors.log') -Raw) }
     $report = Get-Content (Join-Path $evidencePath 'report.json') -Raw | ConvertFrom-Json
-    if ($report.shown -ne 1 -or $report.finished -ne 1 -or -not $report.passiveWindow -or -not $report.focusChecked -or -not $report.focusUnchanged -or $report.decodedVideoFrames -le 0 -or $report.sessionTitles[0] -ne 'Verification session') { throw 'Notification did not render, complete, or preserve focus' }
+    if ($report.shown -ne 1 -or $report.finished -ne 1 -or -not $report.passiveWindow -or -not $report.focusChecked -or -not $report.focusUnchanged -or $report.decodedVideoFrames -le 0 -or $report.sessionTitles[0] -ne $expectedTitle) { throw 'Notification did not render, complete, or preserve focus' }
     $shouldSpeak = $Speech -and -not $Meeting -and -not $Quiet
     if (($shouldSpeak -and $report.speechStarted -ne 1) -or (-not $shouldSpeak -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 1))) { throw 'Speech policy failed' }
     $history = Get-Content (Join-Path $scratch 'history.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
-    if (@($history).Count -ne 1 -or $history.id -ne 'verification-result' -or $history.text -ne 'The verification task passed.') { throw 'Shown history does not match notification' }
+    if (@($history).Count -ne 1 -or $history.id -ne 'verification-result' -or $history.text -ne 'The verification task passed.' -or $history.title -ne $expectedTitle) { throw 'Shown history does not match notification' }
     Copy-Item (Join-Path $scratch 'history.jsonl') (Join-Path $evidencePath 'history.jsonl')
     Copy-Item (Join-Path $scratch 'queue.json') (Join-Path $evidencePath 'queue.json')
     if (@(Get-Content (Join-Path $evidencePath 'queue.json') -Raw | ConvertFrom-Json).Count -ne 0) { throw 'Completed notification remained queued' }

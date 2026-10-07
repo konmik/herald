@@ -1329,7 +1329,7 @@ mod native {
                 control(window, "BUTTON", "Reset defaults", RESET_DEFAULT, WS_TABSTOP, (796, 296, 132, 34))?;
                 control(window, "EDIT", "", SUMMARY_PROMPT, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32, (252, 332, 676, 124))?;
                 SendMessageW(GetDlgItem(window, SUMMARY_PROMPT), EM_SETLIMITTEXT, 32_768, 0);
-                control(window, "STATIC", "Sizes use logical pixels. Use {{status}} for the task status. The required {{report}} placeholder supplies the completed report.", SUMMARY_PROMPT_HINT, 0, (252, 464, 676, 56))?;
+                control(window, "STATIC", "Sizes use logical pixels. The summary prompt is sent exactly as written, using the existing conversation.", SUMMARY_PROMPT_HINT, 0, (252, 464, 676, 56))?;
 
                 control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
                 control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
