@@ -50,5 +50,13 @@
   "mad-hatter-serious-plans": {
     "name": "Mad Hatter — Serious Plans",
     "animationPath": "videos/mad-hatter-serious-plans.mp4"
+  },
+  "astronaut-option-03": {
+    "name": "Astronaut",
+    "animationPath": "videos/astronaut-option-03.mp4"
+  },
+  "astronomer-option-06": {
+    "name": "Royal Astronomer",
+    "animationPath": "videos/astronomer-option-06.mp4"
   }
 }
