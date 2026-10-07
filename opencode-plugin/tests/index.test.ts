@@ -171,13 +171,13 @@ test("sends the saved prompt unchanged and rereads it", async () => {
   const secondPrompt = "Describe the result in one sentence."
   try {
     process.env.CIVILIZED_AGENT_DATA = data
-    writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: firstPrompt }))
+    writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", selectedCharacter: "herald", characters: { herald: { summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
     const f = await fixture()
     try {
       await f.start()
       await f.finish()
       expect(generatedPrompts).toEqual([firstPrompt])
-      writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: secondPrompt }))
+      writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", selectedCharacter: "robot", characters: { herald: { summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
       await f.start()
       await f.fail(80_000)
       expect(generatedPrompts).toEqual([

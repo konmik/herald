@@ -43,6 +43,8 @@ impl CharacterVoice {
 pub struct Character {
     pub name: String,
     pub animation_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub summary_prompt: String,
     #[serde(skip_serializing_if = "CharacterVoice::is_default")]
     pub voice: CharacterVoice,
 }
@@ -52,6 +54,7 @@ impl Default for Character {
         Self {
             name: String::new(),
             animation_path: None,
+            summary_prompt: String::new(),
             voice: CharacterVoice::default(),
         }
     }
@@ -139,6 +142,9 @@ pub fn validate_registry(characters: &BTreeMap<String, Character>, selected: Opt
     for (id, character) in characters {
         validate_id(id)?;
         validate_name(&character.name)?;
+        if !character.summary_prompt.is_empty() {
+            crate::settings::validate_summary_prompt(&character.summary_prompt)?;
+        }
         if let Some(path) = &character.animation_path {
             validate_path(path)?;
         }
@@ -204,8 +210,28 @@ mod tests {
         Character {
             name: "Royal herald".into(),
             animation_path: Some(PathBuf::from("herald.mp4")),
+            summary_prompt: String::new(),
             voice,
         }
+    }
+
+    #[test]
+    fn character_prompts_preserve_multiline_text_and_validate_length() {
+        let mut characters = BTreeMap::new();
+        let mut herald = character(CharacterVoice::default());
+        herald.summary_prompt = "Speak as a royal herald.\nReport the outcome briefly.".into();
+        characters.insert("herald".into(), herald);
+        validate_registry(&characters, None).unwrap();
+        let restored: BTreeMap<String, Character> = serde_json::from_slice(&serde_json::to_vec(&characters).unwrap()).unwrap();
+        assert_eq!(restored["herald"].summary_prompt, "Speak as a royal herald.\nReport the outcome briefly.");
+        characters.get_mut("herald").unwrap().summary_prompt = "😀".repeat(16_384);
+        validate_registry(&characters, None).unwrap();
+        characters.get_mut("herald").unwrap().summary_prompt.push('x');
+        assert!(validate_registry(&characters, None).is_err());
+        characters.get_mut("herald").unwrap().summary_prompt = "Bad\0prompt".into();
+        assert!(validate_registry(&characters, None).is_err());
+        characters.get_mut("herald").unwrap().summary_prompt.clear();
+        validate_registry(&characters, None).unwrap();
     }
 
     #[test]

@@ -22,6 +22,10 @@ export function isValidSummaryPrompt(value) {
 export function readSummaryPrompt(directory = dataDirectory()) {
   try {
     const settings = JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
+    const characterPrompt = typeof settings?.selectedCharacter === 'string'
+      ? settings.characters?.[settings.selectedCharacter]?.summaryPrompt
+      : undefined
+    if (isValidSummaryPrompt(characterPrompt)) return characterPrompt
     return isValidSummaryPrompt(settings?.summaryPrompt) ? settings.summaryPrompt : DEFAULT_SUMMARY_PROMPT
   } catch {
     return DEFAULT_SUMMARY_PROMPT

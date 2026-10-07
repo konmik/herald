@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { DEFAULT_SUMMARY_PROMPT, SUMMARY_PROMPT_MAX_LENGTH, isValidSummaryPrompt, readSummaryPrompt } from "../../claude-plugin/scripts/summary-prompt.mjs"
 
 const custom = "Línea Ω 😀\nReport the task outcome clearly and briefly."
@@ -28,6 +29,41 @@ test("falls back for missing or invalid saved prompts", () => {
       writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt }))
       expect(readSummaryPrompt(data)).toBe(DEFAULT_SUMMARY_PROMPT)
     }
+  } finally { rmSync(data, { recursive: true, force: true }) }
+})
+
+test("uses the selected character prompt and falls back for blank or unavailable profiles", () => {
+  const data = mkdtempSync(join(tmpdir(), "civilized-character-prompts-"))
+  try {
+    const settings = {
+      summaryPrompt: "Default voice.",
+      selectedCharacter: "herald",
+      characters: {
+        herald: { summaryPrompt: "Speak as a herald.\nReport the outcome." },
+        robot: { summaryPrompt: "Speak as a robot." },
+        inherited: { summaryPrompt: "" },
+        invalid: { summaryPrompt: "Bad\0prompt" },
+      },
+    }
+    for (const [character, expected] of [
+      ["herald", "Speak as a herald.\nReport the outcome."],
+      ["robot", "Speak as a robot."],
+      ["inherited", "Default voice."],
+      ["invalid", "Default voice."],
+      ["missing", "Default voice."],
+    ]) {
+      settings.selectedCharacter = character
+      writeFileSync(join(data, "settings.json"), JSON.stringify(settings))
+      expect(readSummaryPrompt(data)).toBe(expected)
+      const bridge = Bun.spawnSync(["node", fileURLToPath(new URL("../../claude-plugin/scripts/bridge.mjs", import.meta.url))], {
+        env: { ...process.env, CIVILIZED_AGENT_DATA: data },
+        stdin: new TextEncoder().encode(JSON.stringify({ type: "read-summary-prompt" })),
+      })
+      expect(bridge.exitCode).toBe(0)
+      expect(JSON.parse(bridge.stdout.toString())).toBe(expected)
+    }
+    writeFileSync(join(data, "settings.json"), JSON.stringify({ ...settings, selectedCharacter: null }))
+    expect(readSummaryPrompt(data)).toBe("Default voice.")
   } finally { rmSync(data, { recursive: true, force: true }) }
 })
 

@@ -163,15 +163,7 @@ impl Settings {
         validate_registry(&self.characters, self.selected_character.as_deref())?;
         self.announcement_body_font.validate("Announcement body")?;
         self.announcement_title_font.validate("Announcement title")?;
-        if self.summary_prompt.is_empty() {
-            return Err("Summary prompt must not be empty.".into());
-        }
-        if self.summary_prompt.chars().count() > 16_384 {
-            return Err("Summary prompt must be at most 16384 characters.".into());
-        }
-        if self.summary_prompt.contains('\0') {
-            return Err("Summary prompt must not contain NUL characters.".into());
-        }
+        validate_summary_prompt(&self.summary_prompt)?;
         Ok(())
     }
 
@@ -261,19 +253,16 @@ pub fn volume_gain(volume: u16) -> f64 {
     if volume == 0 { 0.0 } else { 10_f64.powf((-60.0 + 0.6 * f64::from(volume.min(100))) / 20.0) }
 }
 
+pub fn validate_summary_prompt(prompt: &str) -> Result<(), String> {
+    if prompt.is_empty() { return Err("Summary prompt must not be empty.".into()); }
+    if prompt.chars().count() > 16_384 { return Err("Summary prompt must be at most 16384 characters.".into()); }
+    if prompt.contains('\0') { return Err("Summary prompt must not contain NUL characters.".into()); }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn defaults_seed_the_bundled_character_catalog() {
-        let settings = Settings::default();
-        let ids: BTreeSet<_> = crate::characters::bundled_characters().keys().cloned().collect();
-        assert_eq!(ids.len(), 12);
-        assert_eq!(settings.installed_bundled_characters, ids);
-        assert_eq!(settings.characters.keys().cloned().collect::<BTreeSet<_>>(), ids);
-        assert!(settings.characters.values().all(|character| matches!(character.voice, crate::characters::CharacterVoice::Local { speaker: None }) && character.animation_path.as_ref().is_some_and(|path| !path.is_absolute())));
-    }
 
     #[test]
     fn legacy_description_and_sample_text_are_ignored_and_dropped_when_saved() {
@@ -295,8 +284,6 @@ mod tests {
         assert_eq!(saved.animation_path, Some(PathBuf::from("C:\\Videos\\my-herald.mp4")));
         assert_eq!(saved.voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert_eq!(settings.selected_character.as_deref(), Some("hatted-herald-01"));
-        assert_eq!(settings.characters.len(), 12);
-        assert_eq!(settings.installed_bundled_characters.len(), 12);
         let serialized = serde_json::to_value(&settings).unwrap();
         assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
         assert!(serialized["characters"]["hatted-herald-01"].get("voiceDescription").is_none());

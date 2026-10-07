@@ -18,7 +18,6 @@ mod native {
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::{Controls::*, WindowsAndMessaging::*};
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
     const TBM_GETPOS: u32 = WM_USER;
@@ -80,6 +79,8 @@ mod native {
     const TITLE_SIZE_LABEL: i32 = 333;
     const SUMMARY_PROMPT_LABEL: i32 = 334;
     const SUMMARY_PROMPT_HINT: i32 = 335;
+    const CHARACTER_PROMPT: i32 = 218;
+    const CHARACTER_PROMPT_LABEL: i32 = 336;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
     const VOICE_EXAMPLE: &str = "I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.";
 
@@ -118,6 +119,8 @@ mod native {
         VIDEO_PATH,
         PLAY_VOICE,
         REMOVE_CHARACTER,
+        CHARACTER_PROMPT,
+        CHARACTER_PROMPT_LABEL,
     ];
     const AUDIO_PAGE_CONTROLS: &[i32] = &[
         VOLUME_LABEL,
@@ -381,9 +384,27 @@ mod native {
         }
     }
 
+    fn video_picker_path(video: &str, assets: &Path) -> PathBuf {
+        if video.is_empty() || video == "Choose video…" {
+            assets.join("videos")
+        } else {
+            let path = PathBuf::from(video);
+            if path.is_absolute() { path } else { assets.join(path) }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn video_picker_starts_at_the_current_video_or_library() {
+            let assets = Path::new("C:\\Library\\resources");
+            assert_eq!(video_picker_path("C:\\Custom Ω\\herald.mp4", assets), PathBuf::from("C:\\Custom Ω\\herald.mp4"));
+            assert_eq!(video_picker_path("videos/herald.mp4", assets), assets.join("videos/herald.mp4"));
+            assert_eq!(video_picker_path("Choose video…", assets), assets.join("videos"));
+            assert_eq!(video_picker_path("", assets), assets.join("videos"));
+        }
 
         #[test]
         fn entered_voice_id_is_trimmed_and_clearing_restores_local() {
@@ -430,9 +451,11 @@ mod native {
         let name = text(window, CHARACTER_NAME);
         let entered_id = text(window, VOICE_ID);
         let video = text(window, VIDEO_PATH);
+        let prompt = text(window, CHARACTER_PROMPT).replace("\r\n", "\n");
         let assets = form.assets.clone();
         let draft = draft_for(form, &id);
         draft.name = name;
+        draft.summary_prompt = prompt;
         capture_draft_voice(draft, &entered_id);
         let video = PathBuf::from(video);
         draft.animation_path = if video.as_os_str().is_empty() || video == PathBuf::from("Choose video…") {
@@ -461,7 +484,7 @@ mod native {
             for id in page.controls { ShowWindow(GetDlgItem(window, *id), visibility); }
         }
         let show_editor = form.active_page == Page::Characters && form.active_draft.is_some();
-        for id in [NAME_LABEL, CHARACTER_NAME, VOICE_ID_LABEL, VOICE_ID, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER] {
+        for id in [NAME_LABEL, CHARACTER_NAME, VOICE_ID_LABEL, VOICE_ID, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER, CHARACTER_PROMPT, CHARACTER_PROMPT_LABEL] {
             ShowWindow(GetDlgItem(window, id), if show_editor { SW_SHOW } else { SW_HIDE });
         }
         ShowWindow(GetDlgItem(window, CHARACTER_EMPTY), if form.active_page == Page::Characters && !show_editor { SW_SHOW } else { SW_HIDE });
@@ -473,10 +496,11 @@ mod native {
             let assets = form.assets.clone();
             let draft = draft_for(form, &id);
             label(window, CHARACTER_NAME, &draft.name);
+            label(window, CHARACTER_PROMPT, &draft.summary_prompt.replace("\r\n", "\n").replace('\n', "\r\n"));
             label(window, VOICE_ID, voice_id_text(&draft.voice));
             label(window, VIDEO_PATH, &draft.animation_path.as_ref().map_or_else(|| "Choose video…".into(), |path| crate::characters::animation_path(&id, path, &assets).to_string_lossy().into_owned()));
         } else {
-            for id in [CHARACTER_NAME, VOICE_ID, VIDEO_PATH] { label(window, id, ""); }
+            for id in [CHARACTER_NAME, VOICE_ID, VIDEO_PATH, CHARACTER_PROMPT] { label(window, id, ""); }
         }
         form.updating = false;
         refresh_page_visibility(window, form);
@@ -804,22 +828,47 @@ mod native {
     }
 
     unsafe fn browse_video(window: HWND, form: &mut Form) {
-        let mut file = vec![0u16; 32768];
-        let filter = wide("MP4 video\0*.mp4\0All files\0*.*\0");
-        let title = wide("Choose character animation");
-        let mut dialog = OPENFILENAMEW {
-            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-            hwndOwner: window,
-            lpstrFilter: filter.as_ptr(),
-            lpstrFile: file.as_mut_ptr(),
-            nMaxFile: file.len() as u32,
-            lpstrTitle: title.as_ptr(),
-            Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-            ..OPENFILENAMEW::default()
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FILEMUSTEXIST, FOS_PATHMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+
+        let path = video_picker_path(&text(window, VIDEO_PATH), &form.assets);
+        let directory = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(&form.assets) };
+        let initial_directory = wide(&directory.to_string_lossy().replace('/', "\\"));
+        if let Err(error) = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() {
+            label(window, STATUS, &format!("Could not open the video picker: {error}"));
+            return;
+        }
+        let result = (|| -> windows::core::Result<Option<PathBuf>> {
+            let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetOptions(dialog.GetOptions()? | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM)?;
+            dialog.SetTitle(w!("Choose character animation"))?;
+            dialog.SetFileTypes(&[
+                COMDLG_FILTERSPEC { pszName: w!("MP4 video"), pszSpec: w!("*.mp4") },
+                COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            ])?;
+            let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(initial_directory.as_ptr()), None)?;
+            dialog.SetFolder(&folder)?;
+            if path.is_file() {
+                let filename = wide(&path.file_name().unwrap().to_string_lossy());
+                dialog.SetFileName(PCWSTR(filename.as_ptr()))?;
+            }
+            if let Err(error) = dialog.Show(Some(windows::Win32::Foundation::HWND(window))) {
+                if error.code() == windows::core::HRESULT(0x800704C7u32 as i32) { return Ok(None); }
+                return Err(error);
+            }
+            let name = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let selected = name.to_string();
+            CoTaskMemFree(Some(name.0.cast()));
+            Ok(Some(PathBuf::from(selected?)))
+        })();
+        CoUninitialize();
+        let path = match result {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => { label(window, STATUS, &format!("Could not open the video picker: {error}")); return; }
         };
-        if GetOpenFileNameW(&mut dialog) == 0 { return; }
-        let length = file.iter().position(|value| *value == 0).unwrap_or(file.len());
-        let path = PathBuf::from(String::from_utf16_lossy(&file[..length]));
         if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")) {
             label(window, STATUS, "Choose an MP4 animation file.");
             return;
@@ -909,6 +958,9 @@ mod native {
         move_control(VOICE_ID, character_editor_x, character_list_y + 186, character_editor_width, 34);
         move_control(PLAY_VOICE, character_editor_x, character_actions_y, 160, 34);
         move_control(REMOVE_CHARACTER, main_right - 92, character_actions_y, 92, 34);
+        move_control(CHARACTER_PROMPT_LABEL, character_editor_x, character_actions_y + 46, character_editor_width, 24);
+        let character_prompt_y = character_actions_y + 74;
+        move_control(CHARACTER_PROMPT, character_editor_x, character_prompt_y, character_editor_width, (footer_y - character_prompt_y - 20).max(60));
 
         move_control(VOLUME_LABEL, main_left, 128, main_width, 24);
         move_control(VOLUME, main_left, 158, main_width, 42);
@@ -1325,7 +1377,7 @@ mod native {
                 control(window, "STATIC", "Title size", TITLE_SIZE_LABEL, 0, (808, 214, 120, 24))?;
                 control(window, "COMBOBOX", "Title font family", TITLE_FONT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 244, 540, 220))?;
                 control(window, "COMBOBOX", "Title size", TITLE_SIZE, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (808, 244, 120, 220))?;
-                control(window, "STATIC", "Summary prompt", SUMMARY_PROMPT_LABEL, 0, (252, 300, 540, 24))?;
+                control(window, "STATIC", "Default summary prompt", SUMMARY_PROMPT_LABEL, 0, (252, 300, 540, 24))?;
                 control(window, "BUTTON", "Reset defaults", RESET_DEFAULT, WS_TABSTOP, (796, 296, 132, 34))?;
                 control(window, "EDIT", "", SUMMARY_PROMPT, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32, (252, 332, 676, 124))?;
                 SendMessageW(GetDlgItem(window, SUMMARY_PROMPT), EM_SETLIMITTEXT, 32_768, 0);
@@ -1338,6 +1390,9 @@ mod native {
                 control(window, "EDIT", "", CHARACTER_NAME, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (502, 154, 426, 34))?;
                 control(window, "STATIC", "Video", VIDEO_LABEL, 0, (502, 204, 426, 24))?;
                 control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (502, 232, 426, 36))?;
+                control(window, "STATIC", "Summary prompt (blank uses default)", CHARACTER_PROMPT_LABEL, 0, (502, 408, 426, 24))?;
+                control(window, "EDIT", "", CHARACTER_PROMPT, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32, (502, 436, 426, 120))?;
+                SendMessageW(GetDlgItem(window, CHARACTER_PROMPT), EM_SETLIMITTEXT, 32_768, 0);
                 control(window, "STATIC", "ElevenLabs voice ID", VOICE_ID_LABEL, 0, (502, 284, 426, 24))?;
                 control(window, "EDIT", "", VOICE_ID, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, (502, 312, 426, 34))?;
                 control(window, "BUTTON", "Play voice example", PLAY_VOICE, WS_TABSTOP, (502, 362, 160, 34))?;

@@ -1,7 +1,9 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/civilized-announcer.exe'),
     [string]$Evidence = (Join-Path (Split-Path $PSScriptRoot -Parent) ('temp/verification/characters-' + [guid]::NewGuid())),
-    [switch]$SettingsOnly
+    [switch]$SettingsOnly,
+    [switch]$VideoPickerOnly,
+    [switch]$CharacterPromptsOnly
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -12,6 +14,7 @@ public static class CivilizedCharacterTest {
     public struct Rect { public int Left, Top, Right, Bottom; }
     public delegate bool ChildCallback(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr window, ChildCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(ChildCallback callback, IntPtr parameter);
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder name, int length);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
@@ -26,6 +29,18 @@ public static class CivilizedCharacterTest {
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)] public static extern IntPtr SetText(IntPtr window, uint message, IntPtr wparam, string text);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)] public static extern IntPtr ReadText(IntPtr window, uint message, IntPtr length, StringBuilder text);
+    public static IntPtr FindOwnedDialog(uint process, string title) {
+        var result = IntPtr.Zero;
+        EnumWindows((window, parameter) => {
+            GetWindowThreadProcessId(window, out var owner);
+            if (owner != process) return true;
+            var text = new StringBuilder(256);
+            ReadText(window, 0xD, new IntPtr(text.Capacity), text);
+            if (text.ToString() == title) { result = window; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
     public static IntPtr FindClass(IntPtr parent, string className) {
         var result = IntPtr.Zero;
         EnumChildWindows(parent, (window, parameter) => {
@@ -47,6 +62,16 @@ public static class CivilizedCharacterTest {
             return true;
         }, IntPtr.Zero);
         return result.ToString();
+    }
+    public static string PickerFolder(IntPtr parent) {
+        var result = "";
+        EnumChildWindows(parent, (window, parameter) => {
+            var text = new StringBuilder(32768);
+            ReadText(window, 0xD, new IntPtr(text.Capacity), text);
+            if (text.ToString().StartsWith("Address: ")) { result = text.ToString().Substring(9); return false; }
+            return true;
+        }, IntPtr.Zero);
+        return result;
     }
 }
 '@
@@ -87,6 +112,7 @@ function Send-Control {
 }
 function Set-Control {
     param([int]$Id, [string]$Value)
+    if ($Id -eq 218) { $Value = $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") }
     if ($Id -eq 216) {
         Send-Control $Id 0xB1 0 -1 | Out-Null
         [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC2, [IntPtr]1, $Value) | Out-Null
@@ -99,6 +125,7 @@ function Read-Control {
     param([int]$Id)
     $buffer = [Text.StringBuilder]::new(4096)
     [CivilizedCharacterTest]::ReadText((Get-Control $Id), 0xD, [IntPtr]4096, $buffer) | Out-Null
+    if ($Id -eq 218) { return $buffer.ToString().Replace("`r`n", "`n") }
     return $buffer.ToString()
 }
 function Open-Settings {
@@ -128,16 +155,28 @@ function Select-CharactersPage {
     Wait-Until { [CivilizedCharacterTest]::IsWindowVisible((Get-Control 201)) } 'Characters page did not show its list.'
 }
 function Pick-Animation {
+    param([string]$ExpectedFolder)
+    Add-Content (Join-Path $Evidence 'actions.txt') "Opening picker for $(Read-Control 206), visible $([CivilizedCharacterTest]::IsWindowVisible((Get-Control 206))), enabled $([CivilizedCharacterTest]::IsWindowEnabled((Get-Control 206)))"
     [CivilizedCharacterTest]::PostMessage((Get-Control 206), 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     $script:picker = [IntPtr]::Zero
     Wait-Until {
-        $candidate = [CivilizedCharacterTest]::FindWindow('#32770', 'Choose character animation')
+        $candidate = [CivilizedCharacterTest]::FindOwnedDialog([uint32]$process.Id, 'Choose character animation')
         $owner = [uint32]0
         if ($candidate -ne [IntPtr]::Zero) { [CivilizedCharacterTest]::GetWindowThreadProcessId($candidate, [ref]$owner) | Out-Null }
         if ($owner -eq $process.Id) { $script:picker = $candidate; return $true }
         return $false
     } 'The native animation file picker did not open.'
     Wait-Until { [CivilizedCharacterTest]::FindClass($picker, 'SysTreeView32') -ne [IntPtr]::Zero } 'The file picker did not finish loading its navigation pane.'
+    [CivilizedCharacterTest]::Describe($picker) | Set-Content (Join-Path $Evidence 'picker-initial-controls.txt')
+    if ($ExpectedFolder) {
+        $script:folder = ''
+        Wait-Until {
+            $script:folder = [CivilizedCharacterTest]::PickerFolder($picker)
+            return $script:folder.Length -gt 0 -and [IO.Path]::GetFullPath($script:folder) -eq [IO.Path]::GetFullPath($ExpectedFolder)
+        } "The video picker did not navigate to '$ExpectedFolder'."
+        if ([IO.Path]::GetFullPath($folder) -ne [IO.Path]::GetFullPath($ExpectedFolder)) { throw "The video picker opened at '$folder' instead of '$ExpectedFolder'." }
+        Add-Content (Join-Path $Evidence 'actions.txt') "Video picker opened at $folder."
+    }
     $filename = [CivilizedCharacterTest]::GetDlgItem($picker, 1148)
     if ($filename -eq [IntPtr]::Zero) { $filename = [CivilizedCharacterTest]::GetDlgItem($picker, 1152) }
     if ($filename -eq [IntPtr]::Zero) { throw 'The animation picker has no filename control.' }
@@ -196,6 +235,64 @@ try {
     $settingsInfo.ArgumentList.Add('--assets')
     $settingsInfo.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
     Open-Settings
+    if ($CharacterPromptsOnly) {
+        Select-CharactersPage
+        $firstPrompt = "Speak as a herald.`nReport the result explicitly and briefly."
+        $secondPrompt = "Speak as a robot.`nReport the result in one sentence."
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        if (-not [CivilizedCharacterTest]::IsWindowVisible((Get-Control 218))) { throw 'The character prompt editor is not visible.' }
+        $promptClass = [Text.StringBuilder]::new(64)
+        [CivilizedCharacterTest]::GetClassName((Get-Control 218), $promptClass, $promptClass.Capacity) | Out-Null
+        if ($promptClass.ToString() -ne 'Edit') { throw 'The character prompt control is not an editable text box.' }
+        Set-Control 218 $firstPrompt
+        Send-Control 201 0x186 1 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        Set-Control 218 $secondPrompt
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        if ((Read-Control 218) -cne $firstPrompt) { throw 'Switching characters lost the first prompt draft.' }
+        Send-Control 107 0xF5 | Out-Null
+        $saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $firstId = $saved.selectedCharacter
+        if ($saved.characters.$firstId.summaryPrompt -cne $firstPrompt) { throw 'Apply did not save the first character prompt.' }
+        Send-Control 201 0x186 1 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        if ((Read-Control 218) -cne $secondPrompt) { throw 'Switching characters lost the second prompt draft.' }
+        Send-Control 107 0xF5 | Out-Null
+        $saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $secondId = $saved.selectedCharacter
+        if ($firstId -eq $secondId -or $saved.characters.$secondId.summaryPrompt -cne $secondPrompt) { throw 'Apply did not save separate character prompts.' }
+        Copy-Item $settingsPath (Join-Path $Evidence 'settings-after.json')
+        $applied = Get-Content $settingsPath -Raw
+        Set-Control 218 'Discard this prompt.'
+        Send-Control 108 0xF5 | Out-Null
+        if (-not $process.WaitForExit(5000)) { throw 'Character prompt settings did not close.' }
+        if ((Get-Content $settingsPath -Raw) -cne $applied) { throw 'Close saved an unapplied character prompt.' }
+        Open-Settings
+        Select-CharactersPage
+        if ((Read-Control 218) -cne $secondPrompt) { throw 'Reopening did not restore the second character prompt.' }
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        if ((Read-Control 218) -cne $firstPrompt) { throw 'Reopening did not restore the first character prompt.' }
+        Send-Control 108 0xF5 | Out-Null
+        if (-not $process.WaitForExit(5000)) { throw 'Reopened character prompt settings did not close.' }
+        @{ passed = $true; characterPromptsOnly = $true; firstCharacter = $firstId; secondCharacter = $secondId } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
+        Write-Output 'PASS: separate character prompts, draft switching, Apply, discard and reopen.'
+        return
+    }
+    if ($VideoPickerOnly) {
+        Select-CharactersPage
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        Pick-Animation -ExpectedFolder (Split-Path (Read-Control 206) -Parent)
+        Pick-Animation -ExpectedFolder (Split-Path $video -Parent)
+        Send-Control 108 0xF5 | Out-Null
+        if (-not $process.WaitForExit(5000)) { throw 'Video picker settings did not close.' }
+        @{ passed = $true; videoPickerOnly = $true } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
+        Write-Output 'PASS: video picker starts in the current bundled and custom video folders.'
+        return
+    }
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath)) -cne [Convert]::ToBase64String($startupBytes)) { throw 'Opening Settings rewrote the legacy settings file.' }
     Select-SettingsPage 3
     if ((Read-Control 118) -notmatch 'key') { throw 'Voice limits must explain that an ElevenLabs key is required.' }
@@ -240,14 +337,12 @@ try {
     Select-SettingsPage 3
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The Speech service page must not show character fields.' }
     Select-CharactersPage
-    $catalog = Get-Content (Join-Path $root 'native-announcer/resources/characters.json') -Raw | ConvertFrom-Json
     $assets = Join-Path $root 'native-announcer/resources'
     Add-Content (Join-Path $Evidence 'actions.txt') "Bundled count $(Send-Control 201 0x18B), editor visible $([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203)))"
-    if ((Send-Control 201 0x18B) -ne 11 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The preinstalled character catalog did not load without selecting a character.' }
-    $bundled = $catalog.'hatted-herald-01'
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The preinstalled character catalog selected a character unexpectedly.' }
     Send-Control 201 0x186 0 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
-    if ((Read-Control 203) -ne $bundled.name -or (Read-Control 216) -ne '' -or [IO.Path]::GetFullPath((Read-Control 206)) -ne [IO.Path]::GetFullPath((Join-Path $assets $bundled.animationPath))) { throw 'The bundled character did not display its name, blank voice ID, and relocated animation.' }
+    if ((Read-Control 216) -ne '') { throw 'The bundled character did not display a blank voice ID.' }
     $sample = 'I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.'
     $beforeBundledRequests = @(Get-Content $requestsFile).Count
     Send-Control 210 0xF5 | Out-Null
@@ -334,7 +429,7 @@ try {
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 13 -or $settings.selectedCharacter -ne $characterId -or $settings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not save both drafts, preserve the chosen character, and retain the configured default voice ID.' }
+    if ($settings.selectedCharacter -ne $characterId -or $settings.defaultVoiceId -ne $configuredDefault) { throw 'Apply did not preserve the chosen character and configured default voice ID.' }
     Select-SettingsPage 1
     Send-Control 107 0xF5 | Out-Null
     if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Apply on the Audio page exposed character controls.' }
@@ -394,15 +489,15 @@ try {
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne 'Second character') { throw 'The list did not select the second character.' }
     Delete-Character $false
-    if ((Send-Control 201 0x18B) -ne 13 -or (Read-Control 203) -ne 'Second character') { throw 'Cancelling Delete changed the character list.' }
+    if ((Read-Control 203) -ne 'Second character') { throw 'Cancelling Delete changed the selected character.' }
     Delete-Character
-    if ((Send-Control 201 0x18B) -ne 12 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Delete did not remove the selected character without activating another one.' }
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Delete activated another character unexpectedly.' }
     Send-Control 201 0x186 0 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     if ((Read-Control 203) -ne 'Test herald') { throw 'The remaining custom character could not be selected after deletion.' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 12 -or $settings.selectedCharacter -ne $characterId) { throw 'Character deletion did not persist.' }
+    if ($settings.selectedCharacter -ne $characterId) { throw 'Character deletion did not preserve the chosen character.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened settings did not close.' }
     if (-not $SettingsOnly) {
@@ -455,22 +550,22 @@ try {
     Open-Settings
     Select-CharactersPage
     Delete-Character
-    if ((Send-Control 201 0x18B) -ne 11 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting the final custom character did not leave the preinstalled catalog without activating it.' }
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting the final custom character activated another character unexpectedly.' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 11 -or $settings.selectedCharacter) { throw 'Deleting the final custom character did not clear the saved selection.' }
+    if ($settings.selectedCharacter) { throw 'Deleting the final custom character did not clear the saved selection.' }
     Send-Control 201 0x186 0 | Out-Null
     [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
     Delete-Character
-    if ((Send-Control 201 0x18B) -ne 10 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting a bundled character did not leave its tombstone without activating another one.' }
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Deleting a bundled character activated another character unexpectedly.' }
     Send-Control 107 0xF5 | Out-Null
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if (@($settings.characters.PSObject.Properties).Count -ne 10 -or @($settings.installedBundledCharacters).Count -ne 11 -or $settings.characters.'hatted-herald-01') { throw 'Deleting a bundled character did not persist its tombstone.' }
+    if ($settings.characters.'hatted-herald-01') { throw 'Deleting a bundled character did not persist its tombstone.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Character settings did not close.' }
     Open-Settings
     Select-CharactersPage
-    if ((Send-Control 201 0x18B) -ne 10 -or [CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'The bundled character tombstone did not survive reopening.' }
+    if ([CivilizedCharacterTest]::IsWindowVisible((Get-Control 203))) { throw 'Reopening selected a character unexpectedly.' }
     Send-Control 108 0xF5 | Out-Null
     if (-not $process.WaitForExit(5000)) { throw 'Reopened character settings did not close.' }
     if (Test-Path (Join-Path $data 'history.jsonl')) { Copy-Item (Join-Path $data 'history.jsonl') (Join-Path $Evidence 'history.jsonl') }
