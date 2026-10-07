@@ -76,8 +76,8 @@ public static class CivilizedSettingsLayoutNative {
 
 $pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service')
 $pageControls = @{ Characters = @(201, 202); Audio = @(105, 106, 111, 112); 'Quiet hours' = @(101, 102, 103, 104); 'Speech service' = @(113, 114, 121, 122, 123) }
-$editorControls = @(203, 204, 206)
-$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 121, 122, 123, 200, 201, 202, 203, 204, 206, 400)
+$editorControls = @(203, 206, 216, 217, 210, 214)
+$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 121, 122, 123, 200, 201, 202, 203, 206, 216, 217, 210, 214, 400)
 $wmKeyDown = 0x100
 $wmKeyUp = 0x101
 $wmCommand = 0x111
@@ -217,6 +217,7 @@ function Doctor {
     $errors = Join-Path $scratch 'errors.log'
     if (Test-Path -LiteralPath $errors) { throw (Get-Content -LiteralPath $errors -Raw) }
     if ((Read-Control 107) -ne 'Apply' -or (Read-Control 108) -ne 'Close') { throw 'Apply and Close are not ready' }
+    foreach ($obsolete in @(204, 311)) { if ([CivilizedSettingsLayoutNative]::GetDlgItem($script:windowHandle, $obsolete) -ne [IntPtr]::Zero) { throw "Removed description control $obsolete remains" } }
 }
 function Launch-Settings {
     if ($script:process -and -not $script:process.HasExited) { throw 'The previous settings process is still running' }
@@ -247,7 +248,7 @@ try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $binaryHash = (Get-FileHash $binaryPath -Algorithm SHA256).Hash
-    $fixture = [ordered]@{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 35; outputDevice = $null; speechModel = 'eleven_flash_v2_5'; voices = @{ claude = 'Mark' }; characters = @{ 'layout-verification-character' = @{ name = 'Stored layout character'; voiceDescription = 'A stored character for settings layout verification.'; animationPath = $null } }; selectedCharacter = $null }
+    $fixture = [ordered]@{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 35; outputDevice = $null; speechModel = 'eleven_flash_v2_5'; voices = @{ claude = 'Mark' }; characters = @{ 'layout-verification-character' = @{ name = 'Stored layout character'; animationPath = $null } }; selectedCharacter = $null }
     $fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'settings-before.json')
     $emptyEnvironment = Join-Path $scratch 'empty.env'
@@ -327,7 +328,7 @@ try {
     if ($minimum[0] -le 0 -or $minimum[1] -le 0) { throw 'The settings window reported no minimum tracking size' }
     if (-not [CivilizedSettingsLayoutNative]::SetWindowPos($script:windowHandle, [IntPtr]::Zero, 0, 0, $minimum[0], $minimum[1], 0x16)) { throw 'Could not request the enforced minimum-size resize' }
     Start-Sleep -Milliseconds 200
-    Assert-VisibleChildren 'characters-minimum'; Save-ControlSnapshot 'characters-minimum' | Out-Null; Save-WindowPng 'characters-minimum'
+    Assert-VisibleChildren 'characters-minimum'; Assert-NoVisibleOverlaps 'characters-minimum'; Save-ControlSnapshot 'characters-minimum' | Out-Null; Save-WindowPng 'characters-minimum'
     foreach ($index in @(1, 2, 3)) {
         Select-Page $index
         Assert-Page $index
@@ -338,7 +339,7 @@ try {
     Assert-Page 0 $true
     if (-not [CivilizedSettingsLayoutNative]::SetWindowPos($script:windowHandle, [IntPtr]::Zero, 0, 0, 1200, 900, 0x16)) { throw 'Could not request large resize' }
     Start-Sleep -Milliseconds 200
-    Assert-VisibleChildren 'characters-large'; Save-ControlSnapshot 'characters-large' | Out-Null; Save-WindowPng 'characters-large'
+    Assert-VisibleChildren 'characters-large'; Assert-NoVisibleOverlaps 'characters-large'; Save-ControlSnapshot 'characters-large' | Out-Null; Save-WindowPng 'characters-large'
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'settings-after.json')
     Close-Settings
     @{ passed = $true; binary = $binaryPath; sha256 = $binaryHash; screenshots = @('page-characters.png', 'page-audio.png', 'page-quiet-hours.png', 'page-speech-service.png', 'characters-minimum.png', 'characters-large.png'); launches = $launchCount } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidencePath 'result.json') -Encoding utf8NoBOM

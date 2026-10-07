@@ -4,7 +4,6 @@ import { appendFile, writeFile } from 'node:fs/promises'
 const [addressFile, requestsFile] = process.argv.slice(2)
 if (!addressFile || !requestsFile) throw new Error('Provide address and request log paths.')
 const pcm = Buffer.alloc(16000)
-let createdVoices = 0
 for (let index = 0; index < pcm.length / 2; index++) pcm.writeInt16LE(Math.round(3000 * Math.sin(2 * Math.PI * 440 * index / 16000)), index * 2)
 const server = createServer(async (request, response) => {
   try {
@@ -28,7 +27,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/v1/user/subscription') {
       if (slowUsage) await new Promise(resolve => setTimeout(resolve, 500))
       response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ voice_slots_used: slowUsage ? 9 : 2 + createdVoices, voice_limit: 10, voice_add_edit_counter: 3 + createdVoices, max_voice_add_edits: unknownLimit ? null : 65 }))
+      response.end(JSON.stringify({ voice_slots_used: slowUsage ? 9 : 2, voice_limit: 10, voice_add_edit_counter: 3, max_voice_add_edits: unknownLimit ? null : 65 }))
       if (slowUsage) await appendFile(requestsFile, `${JSON.stringify({ event: 'usage-response', usageAccount: 'slow' })}\n`)
       return
     }
@@ -36,19 +35,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(405).end()
       return
     }
-    if (url.pathname === '/v1/text-to-voice/design') {
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ previews: [0, 1, 2].map(index => ({
-        audio_base_64: pcm.toString('base64'),
-        generated_voice_id: `generated-${index}`,
-        duration_secs: 0.5,
-        media_type: 'audio/pcm',
-      })) }))
-    } else if (url.pathname === '/v1/text-to-voice') {
-      createdVoices++
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ voice_id: `saved-${body.generated_voice_id}` }))
-    } else if (url.pathname.startsWith('/v1/text-to-speech/') || url.pathname === '/v1/text-to-dialogue') {
+    if (url.pathname.startsWith('/v1/text-to-speech/') || url.pathname === '/v1/text-to-dialogue') {
       response.writeHead(200, { 'Content-Type': 'audio/pcm' })
       response.end(pcm)
     } else {
