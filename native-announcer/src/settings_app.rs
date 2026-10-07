@@ -53,6 +53,7 @@ mod native {
     const OFFLINE_STATUS: i32 = 124;
     const OFFLINE_INSTALL: i32 = 125;
     const SILENT_SOUND: i32 = 126;
+    const SILENT_SOUND_LABEL: i32 = 127;
     const SILENT_SOUND_HINT: i32 = 309;
     const BODY_FONT: i32 = 130;
     const BODY_SIZE: i32 = 131;
@@ -156,6 +157,7 @@ mod native {
         PREVIEW,
         PREVIEW_HINT,
         SILENT_SOUND,
+        SILENT_SOUND_LABEL,
         SILENT_SOUND_HINT,
     ];
     const QUIET_HOURS_PAGE_CONTROLS: &[i32] = &[
@@ -497,6 +499,10 @@ mod native {
     fn volume_label(volume: u16) -> String {
         if volume == 0 { "Announcer volume: muted".into() }
         else { format!("Announcer volume: {volume}% ({:.1} dB)", -60.0 + 0.6 * f64::from(volume)) }
+    }
+
+    fn silent_sound_label(seconds: u16) -> String {
+        format!("Silent sound before speech: {seconds} seconds")
     }
 
     unsafe fn text(window: HWND, id: i32) -> String {
@@ -1428,7 +1434,7 @@ mod native {
     unsafe fn read_speech_settings(window: HWND, form: &Form) -> Settings {
         let mut settings = form.settings.clone();
         settings.volume = SendMessageW(GetDlgItem(window, VOLUME), TBM_GETPOS, 0, 0) as u16;
-        settings.silent_sound_before_speech = checked(window, SILENT_SOUND);
+        settings.silent_sound_seconds = SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_GETPOS, 0, 0) as u16;
         settings.output_device = selected_output(window, form);
         let index = SendMessageW(GetDlgItem(window, MODEL), CB_GETCURSEL, 0, 0);
         settings.speech_model = SpeechModel::ALL.get(index.max(0) as usize).copied().unwrap_or_default();
@@ -1758,8 +1764,9 @@ mod native {
         move_control(REFRESH, main_right - 90, 250, 90, 34);
         move_control(PREVIEW, main_left, 324, 150, 34);
         move_control(PREVIEW_HINT, main_left + 174, 326, main_width - 174, 48);
-        move_control(SILENT_SOUND, main_left, 398, main_width, 32);
-        move_control(SILENT_SOUND_HINT, main_left, 438, main_width, 48);
+        move_control(SILENT_SOUND_LABEL, main_left, 398, main_width, 24);
+        move_control(SILENT_SOUND, main_left, 428, main_width, 42);
+        move_control(SILENT_SOUND_HINT, main_left, 478, main_width, 48);
 
         move_control(QUIET, main_left, 128, main_width, 32);
         move_control(QUIET_HINT, main_left, 168, main_width, 28);
@@ -2033,6 +2040,8 @@ mod native {
             WM_HSCROLL => {
                 let volume = SendMessageW(GetDlgItem(window, VOLUME), TBM_GETPOS, 0, 0);
                 label(window, VOLUME_LABEL, &volume_label(volume as u16));
+                let seconds = SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_GETPOS, 0, 0);
+                label(window, SILENT_SOUND_LABEL, &silent_sound_label(seconds as u16));
                 0
             }
             WM_TIMER if !form.is_null() && wparam == 1 => {
@@ -2178,9 +2187,14 @@ mod native {
                 control(window, "BUTTON", "Refresh", REFRESH, WS_TABSTOP, (838, 250, 90, 34))?;
                 control(window, "BUTTON", "Play example", PREVIEW, WS_TABSTOP, (252, 324, 150, 34))?;
                 control(window, "STATIC", "Previews your selected settings without saving.", PREVIEW_HINT, 0, (426, 326, 502, 48))?;
-                control(window, "BUTTON", "2s silent sound", SILENT_SOUND, WS_TABSTOP | BS_AUTOCHECKBOX as u32, (252, 398, 676, 32))?;
-                SendMessageW(GetDlgItem(window, SILENT_SOUND), BM_SETCHECK, form.settings.silent_sound_before_speech as usize, 0);
-                control(window, "STATIC", "Play two seconds of silence before speech to wake a power-saving sound card.", SILENT_SOUND_HINT, 0, (252, 438, 676, 48))?;
+                control(window, "STATIC", &silent_sound_label(form.settings.silent_sound_seconds), SILENT_SOUND_LABEL, 0, (252, 398, 676, 24))?;
+                control(window, "msctls_trackbar32", "Silent sound before speech", SILENT_SOUND, WS_TABSTOP | TBS_NOTICKS, (252, 428, 676, 42))?;
+                SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_SETRANGEMIN, 0, 0);
+                SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_SETRANGEMAX, 0, 10);
+                SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_SETLINESIZE, 0, 1);
+                SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_SETPAGESIZE, 0, 1);
+                SendMessageW(GetDlgItem(window, SILENT_SOUND), TBM_SETPOS, 1, form.settings.silent_sound_seconds as isize);
+                control(window, "STATIC", "Play silence before speech to wake a power-saving sound card. Set 0 seconds to disable.", SILENT_SOUND_HINT, 0, (252, 478, 676, 48))?;
 
                 control(window, "STATIC", "Speech model", MODEL_LABEL, 0, (252, 128, 318, 24))?;
                 control(window, "COMBOBOX", "Speech model", MODEL, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 158, 318, 220))?;

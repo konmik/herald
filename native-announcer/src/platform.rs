@@ -508,6 +508,11 @@ pub struct Preview {
     playback: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn preview_timeout(settings: &Settings) -> Duration {
+    Duration::from_secs(30 + u64::from(settings.silent_sound_seconds))
+}
+
 #[cfg(target_os = "windows")]
 impl Preview {
     pub fn start(data: PathBuf, settings: Settings, assets: PathBuf) -> Self {
@@ -532,7 +537,7 @@ impl Preview {
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-                if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
+                if started.elapsed() >= preview_timeout(&settings) { return Err("Preview speech timed out.".into()); }
             }
         });
         Self { cancelled, playback: Some(playback) }
@@ -574,7 +579,7 @@ fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, 
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        if started.elapsed() >= Duration::from_secs(30) { return Err("Preview speech timed out.".into()); }
+        if started.elapsed() >= preview_timeout(settings) { return Err("Preview speech timed out.".into()); }
     }
 }
 
@@ -717,6 +722,14 @@ fn meeting_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_timeout_allows_selected_silent_sound() {
+        for (seconds, timeout_seconds) in [(0, 30), (1, 31), (5, 35), (10, 40)] {
+            let settings = Settings { silent_sound_seconds: seconds, ..Settings::default() };
+            assert_eq!(preview_timeout(&settings), Duration::from_secs(timeout_seconds));
+        }
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

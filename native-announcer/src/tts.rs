@@ -202,11 +202,12 @@ fn pcm(samples: &[f32]) -> Vec<i16> {
     samples.iter().map(|sample| if sample.is_finite() { (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16 } else { 0 }).collect()
 }
 
-fn prepend_silent_sound(samples: Vec<i16>, sample_rate: usize, pending: &mut bool) -> Vec<i16> {
-    if !*pending || samples.is_empty() { return samples; }
-    *pending = false;
-    let mut prefixed = Vec::with_capacity(sample_rate * 2 + samples.len());
-    prefixed.resize(sample_rate * 2, 0);
+fn prepend_silent_sound(samples: Vec<i16>, sample_rate: usize, pending: &mut u16) -> Vec<i16> {
+    if *pending == 0 || samples.is_empty() { return samples; }
+    let silence_samples = sample_rate * usize::from(*pending);
+    *pending = 0;
+    let mut prefixed = Vec::with_capacity(silence_samples + samples.len());
+    prefixed.resize(silence_samples, 0);
     prefixed.extend(samples);
     prefixed
 }
@@ -230,7 +231,7 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
                 if let Some(playback) = playback {
                     if !playback.begin(cancelled) { return Ok(()); }
                 }
-                let mut silent_sound_pending = settings.silent_sound_before_speech;
+                let mut silent_sound_pending = settings.silent_sound_seconds;
                 let samples = prepend_silent_sound(samples, 16000, &mut silent_sound_pending);
                 return crate::audio::play_pcm(&samples, 16000, volume, settings.output_device.as_deref(), cancelled);
             }
@@ -244,10 +245,10 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
         ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
         ResolvedVoice::ElevenLabs { .. } => local_speaker,
     };
-    local_speak(text, source_character, preferred, settings.output_device.as_deref(), volume, cancelled, playback, settings.silent_sound_before_speech)
+    local_speak(text, source_character, preferred, settings.output_device.as_deref(), volume, cancelled, playback, settings.silent_sound_seconds)
 }
 
-fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, playback: Option<&SpeechPlayback<'_>>, mut silent_sound_pending: bool) -> Result<(), String> {
+fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, playback: Option<&SpeechPlayback<'_>>, mut silent_sound_pending: u16) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let text = text.to_owned();
     let config = GenerationConfig { sid: speaker(character, preferred), ..Default::default() };
@@ -323,28 +324,34 @@ mod tests {
     fn silent_sound_prefix_is_exact_and_preserves_speech_at_both_rates() {
         let speech = vec![i16::MIN, -1, 0, 1, i16::MAX];
         for sample_rate in [16000, 24000] {
-            let mut pending = true;
-            let prefixed = prepend_silent_sound(speech.clone(), sample_rate, &mut pending);
-            assert_eq!(prefixed.len(), sample_rate * 2 + speech.len());
-            assert!(prefixed[..sample_rate * 2].iter().all(|sample| *sample == 0));
-            assert_eq!(&prefixed[sample_rate * 2..], speech.as_slice());
-            assert!(!pending);
-            let mut disabled = false;
-            assert_eq!(prepend_silent_sound(speech.clone(), sample_rate, &mut disabled), speech);
+            for seconds in [0, 1, 2, 10] {
+                let mut pending = seconds;
+                let samples = speech.clone();
+                let pointer = samples.as_ptr();
+                let prefixed = prepend_silent_sound(samples, sample_rate, &mut pending);
+                let silence_samples = sample_rate * usize::from(seconds);
+                assert_eq!(prefixed.len(), silence_samples + speech.len());
+                assert!(prefixed[..silence_samples].iter().all(|sample| *sample == 0));
+                assert_eq!(&prefixed[silence_samples..], speech.as_slice());
+                assert_eq!(pending, 0);
+                if seconds == 0 { assert_eq!(prefixed.as_ptr(), pointer); }
+            }
         }
     }
 
     #[test]
     fn silent_sound_only_prefixes_the_first_nonempty_local_chunk() {
-        let mut pending = true;
-        assert!(prepend_silent_sound(Vec::new(), 24000, &mut pending).is_empty());
-        assert!(pending);
-        let first = prepend_silent_sound(vec![7, -9], 24000, &mut pending);
-        assert_eq!(first.len(), 48002);
-        assert_eq!(&first[48000..], &[7, -9]);
-        assert!(prepend_silent_sound(Vec::new(), 24000, &mut pending).is_empty());
-        assert_eq!(prepend_silent_sound(vec![11, -13], 24000, &mut pending), [11, -13]);
-        assert!(!pending);
+        for sample_rate in [16000, 24000] {
+            let mut pending = 2;
+            assert!(prepend_silent_sound(Vec::new(), sample_rate, &mut pending).is_empty());
+            assert_eq!(pending, 2);
+            let first = prepend_silent_sound(vec![7, -9], sample_rate, &mut pending);
+            assert_eq!(first.len(), sample_rate * 2 + 2);
+            assert_eq!(&first[sample_rate * 2..], &[7, -9]);
+            assert!(prepend_silent_sound(Vec::new(), sample_rate, &mut pending).is_empty());
+            assert_eq!(prepend_silent_sound(vec![11, -13], sample_rate, &mut pending), [11, -13]);
+            assert_eq!(pending, 0);
+        }
     }
 
     #[cfg(windows)]
@@ -430,7 +437,7 @@ mod tests {
 
     #[test]
     fn cancelled_or_empty_speech_never_loads_the_model() {
-        let settings = crate::settings::Settings { silent_sound_before_speech: true, ..crate::settings::Settings::default() };
+        let settings = crate::settings::Settings { silent_sound_seconds: 10, ..crate::settings::Settings::default() };
         assert!(speak("Hello", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(true)), &settings, None).is_ok());
         assert!(speak(" ", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), &settings, None).is_ok());
         assert!(speak("a\0b", &ResolvedVoice::Local { speaker: None }, "opencode", None, &AtomicU16::new(100), &Arc::new(AtomicBool::new(false)), &settings, None).is_err());

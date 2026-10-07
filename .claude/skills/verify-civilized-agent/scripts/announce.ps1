@@ -1,4 +1,4 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [switch]$SilentSound)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0)
 $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -39,7 +39,7 @@ try {
     $transcribing = $true
     $env:CIVILIZED_AGENT_DATA = $scratch
     $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false }
-    if ($SilentSound) { $settings.silentSoundBeforeSpeech = $true }
+    if ($PSBoundParameters.ContainsKey('SilentSoundSeconds')) { $settings.silentSoundSeconds = $SilentSoundSeconds }
     if ($AppearanceSettings) {
         $appearance = Get-Content -LiteralPath $AppearanceSettings -Raw | ConvertFrom-Json
         $settings.announcementBodyFont = $appearance.announcementBodyFont

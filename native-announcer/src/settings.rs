@@ -47,7 +47,7 @@ pub struct Settings {
     pub quiet_start: u32,
     pub quiet_end: u32,
     pub volume: u16,
-    pub silent_sound_before_speech: bool,
+    pub silent_sound_seconds: u16,
     pub output_device: Option<String>,
     #[serde(with = "api_key_storage")]
     pub elevenlabs_api_key: Option<String>,
@@ -127,7 +127,7 @@ impl Default for Settings {
             quiet_start: 22 * 60,
             quiet_end: 8 * 60,
             volume: 100,
-            silent_sound_before_speech: false,
+            silent_sound_seconds: 0,
             output_device: None,
             elevenlabs_api_key: None,
             speech_model: crate::elevenlabs::SpeechModel::default(),
@@ -155,6 +155,7 @@ impl Settings {
             return Err("Enter a valid daily quiet schedule.".into());
         }
         if self.volume > 100 { return Err("Volume must be between 0 and 100%.".into()); }
+        if self.silent_sound_seconds > 10 { return Err("Silent sound must be between 0 and 10 seconds.".into()); }
         if let Some(key) = &self.elevenlabs_api_key {
             crate::elevenlabs::validate_api_key(key)?;
         }
@@ -267,24 +268,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn silent_sound_defaults_off_and_survives_save_load_and_reload() {
-        assert!(!Settings::default().silent_sound_before_speech);
-        assert!(!Settings::decode(br#"{"volume":35}"#).unwrap().silent_sound_before_speech);
+    fn silent_sound_defaults_to_zero_and_survives_save_load_and_reload() {
+        assert_eq!(Settings::default().silent_sound_seconds, 0);
+        assert_eq!(Settings::decode(br#"{"volume":35}"#).unwrap().silent_sound_seconds, 0);
         let data = std::env::temp_dir().join("opencode").join(format!("civilized-silent-sound-{}-{}", std::process::id(), crate::state::timestamp()));
         let mut settings = Settings::default();
         settings.save(&data).unwrap();
         let mut store = Store::new(&data).unwrap();
-        for enabled in [true, false] {
-            settings.silent_sound_before_speech = enabled;
+        for seconds in [0, 1, 5, 10] {
+            settings.silent_sound_seconds = seconds;
             settings.save(&data).unwrap();
             let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
-            assert_eq!(saved["silentSoundBeforeSpeech"], enabled);
+            assert_eq!(saved["silentSoundSeconds"], seconds);
             assert_eq!(Settings::load(&data).unwrap(), settings);
-            assert!(store.reload().unwrap());
+            assert_eq!(store.reload().unwrap(), seconds != 0);
             assert_eq!(store.current, settings);
             assert!(!store.reload().unwrap());
         }
         std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn silent_sound_rejects_invalid_seconds() {
+        for value in ["11", "-1", "1.5", "\"2\"", "null"] {
+            assert!(Settings::decode(format!("{{\"silentSoundSeconds\":{value}}}").as_bytes()).is_err());
+        }
+        assert!(Settings { silent_sound_seconds: 11, ..Settings::default() }.validate().is_err());
     }
 
     #[test]

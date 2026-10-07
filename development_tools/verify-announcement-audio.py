@@ -36,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser(epilog="Capture requires PyAudioWPatch. Install it with python -m pip install PyAudioWPatch.")
     parser.add_argument("--evidence", default=f"temp/verification/audio-{uuid.uuid4()}")
     parser.add_argument("--check", type=Path)
-    parser.add_argument("--silent-sound", action="store_true")
+    parser.add_argument("--delay-seconds", type=int, choices=range(11), default=0)
     args = parser.parse_args()
     recording_path = args.check
     if recording_path is None:
@@ -56,8 +56,8 @@ def main():
                     str(root / ".claude/skills/verify-civilized-agent/scripts/announce.ps1"),
                     "-Speech", "-Evidence", str((evidence / "playback").relative_to(root)),
                 ]
-                if args.silent_sound:
-                    command.append("-SilentSound")
+                if args.delay_seconds:
+                    command.extend(["-SilentSoundSeconds", str(args.delay_seconds)])
                 process = subprocess.Popen(command, cwd=root)
                 try:
                     with wave.open(str(recording_path), "wb") as recording:
@@ -76,10 +76,10 @@ def main():
                             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True, timeout=10)
                             process.wait(timeout=10)
     gap = opening_gap(recording_path)
-    if args.silent_sound:
-        if not 1.8 <= gap <= 2.5:
-            raise AssertionError(f"FAIL: expected a two-second silent lead-in, captured {gap:.2f}s")
-        print("PASS: two-second silent lead-in captured before speech")
+    if args.delay_seconds:
+        if not args.delay_seconds - 0.2 <= gap <= args.delay_seconds + 0.5:
+            raise AssertionError(f"FAIL: expected a {args.delay_seconds}-second silent lead-in, captured {gap:.2f}s")
+        print(f"PASS: {args.delay_seconds}-second silent lead-in captured before speech")
     elif gap >= 0.35:
         raise AssertionError(f"FAIL: static-to-speech silence {gap:.2f}s exceeds 0.35s")
     else:

@@ -26,6 +26,11 @@ class AnnouncementAudioTests(unittest.TestCase):
     def test_detects_two_second_silence_between_static_and_speech(self):
         self.assertAlmostEqual(self.recording_gap(32000), 2.0)
 
+    def test_detects_slider_delays_between_static_and_speech(self):
+        for seconds in [1, 5, 10]:
+            with self.subTest(seconds=seconds):
+                self.assertAlmostEqual(self.recording_gap(seconds * 16000), seconds)
+
     def test_detects_uninterrupted_static_to_speech(self):
         self.assertEqual(self.recording_gap(0), 0.0)
 
