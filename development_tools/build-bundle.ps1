@@ -74,7 +74,7 @@ try {
     $licenseDirectory = Join-Path $stage 'licenses/javascript'
     Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/index.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--outdir', $output, "--metafile=$metafile") | Out-Host
     Copy-BundledLicenses $metafile $root $licenseDirectory
-    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/tui.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--external', '@opencode/plugin/tui', '--external', 'solid-js', '--outdir', $output, "--metafile=$metafile") | Out-Host
+    Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/tui.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--external', 'solid-js', '--outdir', $output, "--metafile=$metafile") | Out-Host
     Copy-BundledLicenses $metafile $root $licenseDirectory
     foreach ($entry in @(@{ name = 'index'; export = '.' }, @{ name = 'tui'; export = './tui' })) {
         ('export { default } from "' + $exports[$entry.export] + '"') | Set-Content (Join-Path $stage "$($entry.name).ts") -Encoding utf8NoBOM
