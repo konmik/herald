@@ -79,14 +79,14 @@ impl Renderer {
     #[cfg(test)]
     pub fn title_preference(&self) -> &FontPreference { &self.title_preference }
 
-    pub fn message_height(&self) -> u32 {
+    pub fn message_height(&self, scale: f32) -> u32 {
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         layout.reset(&LayoutSettings {
-            max_width: Some(268.0),
+            max_width: Some(268.0 * scale),
             ..LayoutSettings::default()
         });
-        layout.append(&[&self.body_font], &TextStyle::new(&self.text, f32::from(self.body_preference.size), 0));
-        layout.height().ceil() as u32
+        layout.append(&[&self.body_font], &TextStyle::new(&self.text, f32::from(self.body_preference.size) * scale, 0));
+        (layout.height() / scale).ceil() as u32
     }
 
     fn text(
@@ -498,6 +498,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn announcement_height_fits_the_last_word_at_windows_display_scales() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = display_text("[excited] Committed and deployed announcement cleanup and text-editing improvements! Checks passed!");
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let height = renderer.message_height(scale) + 238;
+            let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+            layout.reset(&LayoutSettings {
+                x: 26.0 * scale,
+                y: 26.0 * scale,
+                max_width: Some(268.0 * scale),
+                ..LayoutSettings::default()
+            });
+            layout.append(&[&renderer.body_font], &TextStyle::new(&renderer.text, f32::from(renderer.body_preference.size) * scale, 0));
+            let cutoff = (height as f32 - 198.0) * scale;
+            for glyph in layout.glyphs() {
+                assert!(glyph.y + glyph.height as f32 <= cutoff, "The final line is clipped at scale {scale}: {} > {cutoff}", glyph.y + glyph.height as f32);
+            }
+        }
+    }
+
+    #[test]
     fn displayed_text_removes_tags_and_collapses_spaces() {
         for (input, expected) in [
             ("[excited] Added Ctrl+A  and preserved scroll position; verified.", "Added Ctrl+A and preserved scroll position; verified."),
@@ -753,11 +774,11 @@ mod tests {
         let body = FontPreference::new("Unavailable body family", 32);
         let title = FontPreference::new("Unavailable title family", 8);
         renderer.set_preferences(&body, &title);
-        let large_height = renderer.message_height();
+        let large_height = renderer.message_height(1.0);
         assert_eq!(renderer.body_preference(), &body);
         assert_eq!(renderer.title_preference(), &title);
         renderer.set_preferences(&FontPreference::new("Unavailable body family", 8), &FontPreference::new("Unavailable title family", 32));
-        assert!(renderer.message_height() < large_height);
+        assert!(renderer.message_height(1.0) < large_height);
         assert_eq!(renderer.body_preference().family, "Unavailable body family");
         assert_eq!(renderer.title_preference().family, "Unavailable title family");
     }
@@ -769,11 +790,11 @@ mod tests {
         renderer.title = "A title".into();
         let mut small = vec![0; 320 * 240];
         renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 8));
-        let height = renderer.message_height();
+        let height = renderer.message_height(1.0);
         renderer.draw(&mut small, 320, 240, 1.0, None, 0.0);
         let mut large = vec![0; 320 * 240];
         renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 32));
-        assert_eq!(renderer.message_height(), height);
+        assert_eq!(renderer.message_height(1.0), height);
         renderer.seed = 567891;
         renderer.draw(&mut large, 320, 240, 1.0, None, 0.0);
         assert_eq!(&small[..320 * 52], &large[..320 * 52]);
