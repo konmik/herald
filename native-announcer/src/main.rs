@@ -347,8 +347,9 @@ fn run() -> Result<(), String> {
                     renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
-                        renderer.text = notification.text.clone();
-                        renderer.title = if notification.title.trim().is_empty() { "Untitled session".into() } else { notification.title.clone() };
+                        renderer.text = render::display_text(&notification.text);
+                        let title = render::display_text(&notification.title);
+                        renderer.title = if title.is_empty() { "Untitled session".into() } else { title };
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
                         let height = (renderer.message_height() + 238).min(max_height).max(240);

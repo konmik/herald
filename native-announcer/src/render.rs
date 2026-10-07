@@ -3,6 +3,24 @@ use fontdue::Font;
 use image::RgbaImage;
 use crate::settings::{FontPreference, Settings};
 
+pub fn display_text(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some((before, tag)) = remaining.split_once('[') {
+        let Some((_, after)) = tag.split_once(']') else { break; };
+        plain.push_str(before);
+        remaining = after;
+    }
+    plain.push_str(remaining);
+    let mut result = String::with_capacity(plain.len());
+    let mut space = false;
+    for character in plain.trim().chars() {
+        if character != ' ' || !space { result.push(character); }
+        space = character == ' ';
+    }
+    result
+}
+
 pub struct Renderer {
     catalog: crate::fonts::FontCatalog,
     body_font: Font,
@@ -478,6 +496,34 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displayed_text_removes_tags_and_collapses_spaces() {
+        for (input, expected) in [
+            ("[excited] Added Ctrl+A  and preserved scroll position; verified.", "Added Ctrl+A and preserved scroll position; verified."),
+            (" [happy]  Done [pause]   successfully. [laughs] ", "Done successfully."),
+            ("[excited][laughs] Hello   世界 😀", "Hello 世界 😀"),
+            ("First  line.\nSecond   line.", "First line.\nSecond line."),
+            ("Ordinary text.", "Ordinary text."),
+            ("Keep [unfinished", "Keep [unfinished"),
+            ("[pause] []", ""),
+            ("", ""),
+        ] {
+            assert_eq!(display_text(input), expected);
+        }
+    }
+
+    #[test]
+    fn display_cleanup_preserves_the_original_speech_text() {
+        let notification: crate::state::Notification = serde_json::from_value(serde_json::json!({
+            "id": "display-cleanup", "sessionID": "opencode", "completed": 1,
+            "text": "[excited] The  task passed.", "title": "[happy] Checks   passed",
+        })).unwrap();
+        assert_eq!(display_text(&notification.text), "The task passed.");
+        assert_eq!(display_text(&notification.title), "Checks passed");
+        assert_eq!(notification.text, "[excited] The  task passed.");
+        assert_eq!(notification.title, "[happy] Checks   passed");
+    }
 
     #[test]
     fn bubble_has_a_frame_and_keeps_the_footer_and_tail() {
