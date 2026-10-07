@@ -3,7 +3,9 @@ param(
     [string]$Evidence = (Join-Path (Split-Path $PSScriptRoot -Parent) ('temp/verification/characters-' + [guid]::NewGuid())),
     [switch]$SettingsOnly,
     [switch]$VideoPickerOnly,
-    [switch]$CharacterPromptsOnly
+    [switch]$CharacterPromptsOnly,
+    [switch]$DefaultAssets,
+    [string]$AssetsDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/resources')
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -191,6 +193,7 @@ function Pick-Animation {
     if ($open -eq [IntPtr]::Zero) { throw 'The animation picker has no Open button.' }
     [CivilizedCharacterTest]::SetForegroundWindow($picker) | Out-Null
     [CivilizedCharacterTest]::SendMessage($open, 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Wait-Until { [CivilizedCharacterTest]::FindOwnedDialog([uint32]$process.Id, 'Choose character animation') -eq [IntPtr]::Zero } 'The file picker did not close after selecting the animation.'
     Wait-Until { (Read-Control 206) -eq $video } 'The file picker did not select the animation.'
     Add-Content (Join-Path $Evidence 'actions.txt') 'Selected the animation through the native Browse dialog.'
 }
@@ -232,8 +235,10 @@ try {
     $settingsInfo.Environment['ELEVENLABS_API_KEY'] = 'wrong-environment-key'
     $settingsInfo.Environment['ELEVENLABS_API_BASE_URL'] = $baseUrl
     $settingsInfo.ArgumentList.Add('--settings')
-    $settingsInfo.ArgumentList.Add('--assets')
-    $settingsInfo.ArgumentList.Add((Join-Path $root 'native-announcer/resources'))
+    if (-not $DefaultAssets) {
+        $settingsInfo.ArgumentList.Add('--assets')
+        $settingsInfo.ArgumentList.Add($AssetsDirectory)
+    }
     Open-Settings
     if ($CharacterPromptsOnly) {
         Select-CharactersPage
@@ -285,12 +290,17 @@ try {
         Select-CharactersPage
         Send-Control 201 0x186 0 | Out-Null
         [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
-        Pick-Animation -ExpectedFolder (Split-Path (Read-Control 206) -Parent)
+        $libraryFolder = Split-Path (Read-Control 206) -Parent
+        Pick-Animation -ExpectedFolder $libraryFolder
         Pick-Animation -ExpectedFolder (Split-Path $video -Parent)
+        Set-Control 206 (Join-Path $data 'missing-folder/missing.mp4')
+        Pick-Animation -ExpectedFolder $libraryFolder
+        Send-Control 202 0xF5 | Out-Null
+        Pick-Animation -ExpectedFolder $libraryFolder
         Send-Control 108 0xF5 | Out-Null
         if (-not $process.WaitForExit(5000)) { throw 'Video picker settings did not close.' }
         @{ passed = $true; videoPickerOnly = $true } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
-        Write-Output 'PASS: video picker starts in the current bundled and custom video folders.'
+        Write-Output 'PASS: video picker opens for bundled, custom, missing and new videos in the expected folders.'
         return
     }
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath)) -cne [Convert]::ToBase64String($startupBytes)) { throw 'Opening Settings rewrote the legacy settings file.' }

@@ -385,12 +385,13 @@ mod native {
     }
 
     fn video_picker_path(video: &str, assets: &Path) -> PathBuf {
-        if video.is_empty() || video == "Choose video…" {
+        let path = if video.is_empty() || video == "Choose video…" {
             assets.join("videos")
         } else {
             let path = PathBuf::from(video);
             if path.is_absolute() { path } else { assets.join(path) }
-        }
+        };
+        std::path::absolute(&path).unwrap_or(path)
     }
 
     #[cfg(test)]
@@ -404,6 +405,9 @@ mod native {
             assert_eq!(video_picker_path("videos/herald.mp4", assets), assets.join("videos/herald.mp4"));
             assert_eq!(video_picker_path("Choose video…", assets), assets.join("videos"));
             assert_eq!(video_picker_path("", assets), assets.join("videos"));
+            let installed_assets = Path::new("C:\\Library\\bin\\../resources");
+            assert_eq!(video_picker_path("Choose video…", installed_assets), assets.join("videos"));
+            assert_eq!(video_picker_path("C:\\Library\\bin\\../resources\\videos/herald.mp4", installed_assets), assets.join("videos/herald.mp4"));
         }
 
         #[test]
@@ -835,7 +839,9 @@ mod native {
 
         let path = video_picker_path(&text(window, VIDEO_PATH), &form.assets);
         let directory = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(&form.assets) };
-        let initial_directory = wide(&directory.to_string_lossy().replace('/', "\\"));
+        let library = video_picker_path("", &form.assets);
+        let directory = if directory.is_dir() { directory } else { &library };
+        let initial_directory = wide(&directory.to_string_lossy());
         if let Err(error) = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() {
             label(window, STATUS, &format!("Could not open the video picker: {error}"));
             return;
@@ -848,8 +854,10 @@ mod native {
                 COMDLG_FILTERSPEC { pszName: w!("MP4 video"), pszSpec: w!("*.mp4") },
                 COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
             ])?;
-            let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(initial_directory.as_ptr()), None)?;
-            dialog.SetFolder(&folder)?;
+            if directory.is_dir() {
+                let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(initial_directory.as_ptr()), None)?;
+                dialog.SetFolder(&folder)?;
+            }
             if path.is_file() {
                 let filename = wide(&path.file_name().unwrap().to_string_lossy());
                 dialog.SetFileName(PCWSTR(filename.as_ptr()))?;
