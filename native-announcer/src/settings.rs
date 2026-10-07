@@ -213,7 +213,7 @@ mod tests {
     fn defaults_seed_the_bundled_character_catalog() {
         let settings = Settings::default();
         let ids: BTreeSet<_> = crate::characters::bundled_characters().keys().cloned().collect();
-        assert_eq!(ids.len(), 11);
+        assert_eq!(ids.len(), 12);
         assert_eq!(settings.installed_bundled_characters, ids);
         assert_eq!(settings.characters.keys().cloned().collect::<BTreeSet<_>>(), ids);
         assert!(settings.characters.values().all(|character| matches!(character.voice, crate::characters::CharacterVoice::Local { speaker: None }) && character.animation_path.as_ref().is_some_and(|path| !path.is_absolute())));
@@ -239,8 +239,8 @@ mod tests {
         assert_eq!(saved.animation_path, Some(PathBuf::from("C:\\Videos\\my-herald.mp4")));
         assert_eq!(saved.voice, crate::characters::CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert_eq!(settings.selected_character.as_deref(), Some("hatted-herald-01"));
-        assert_eq!(settings.characters.len(), 11);
-        assert_eq!(settings.installed_bundled_characters.len(), 11);
+        assert_eq!(settings.characters.len(), 12);
+        assert_eq!(settings.installed_bundled_characters.len(), 12);
         let serialized = serde_json::to_value(&settings).unwrap();
         assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
         assert!(serialized["characters"]["hatted-herald-01"].get("voiceDescription").is_none());

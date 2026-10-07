@@ -42,5 +42,9 @@
   "hatted-herald-11": {
     "name": "Golden Cap Herald",
     "animationPath": "videos/hatted-herald-11.mp4"
+  },
+  "sherlock-holmes": {
+    "name": "Sherlock Holmes",
+    "animationPath": "videos/sherlock-holmes.mp4"
   }
 }
