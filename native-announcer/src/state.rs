@@ -316,13 +316,7 @@ impl Inbox {
         if changed {
             self.save(current);
         }
-        current.is_some_and(|n| {
-            !self.is_open(n, timestamp())
-                || self
-                    .discarded
-                    .iter()
-                    .any(|(s, at)| s == &n.session_id && *at >= n.completed)
-        })
+        current.is_some_and(|n| !self.is_open(n, timestamp()))
     }
 
     pub fn save(&self, current: Option<&Notification>) {
@@ -509,28 +503,34 @@ mod tests {
     }
 
     #[test]
-    fn discard_cancels_current_and_rejects_old_notifications() {
+    fn discard_preserves_current_playback_and_rejects_old_notifications() {
         let data = test_directory();
         let mut inbox = Inbox::new(data.clone());
         let notification: Notification = serde_json::from_value(
             serde_json::json!({"id":"active","sessionID":"session","completed":10,"text":"Done."}),
         )
         .unwrap();
+        inbox.queue.push_back(notification.clone());
         write_command(
             &data,
-            "0",
+            "0-presence",
+            serde_json::json!({"type":"presence","clientID":"client","sessionID":"session","at":timestamp()}),
+        );
+        write_command(
+            &data,
+            "1-discard",
             serde_json::json!({"type":"discard","sessionID":"session","at":20}),
         );
         write_command(
             &data,
-            "1",
+            "2-old",
             serde_json::json!({"type":"notify","id":"old","sessionID":"session","completed":15,"text":"Old."}),
         );
-        assert!(inbox.read(Some(&notification)));
+        assert!(!inbox.read(Some(&notification)));
         assert!(inbox.queue.is_empty());
         write_command(
             &data,
-            "2",
+            "3-new",
             serde_json::json!({"type":"notify","id":"new","sessionID":"session","completed":25,"text":"New."}),
         );
         inbox.read(None);
