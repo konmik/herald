@@ -342,7 +342,7 @@ fn shade_bubble_scanlines(
 }
 
 fn bubble_contains(x: f32, y: f32, bottom: f32) -> bool {
-    rounded_contains(x, y, [8.0, 10.0, 316.0, bottom + 4.0], 20.0)
+    rounded_contains(x, y, [7.0, 8.0, 315.0, bottom + 2.0], 20.0)
         || triangle_contains(
             x,
             y,
@@ -370,7 +370,7 @@ fn draw_bubble(
             if rounded_contains(
                 x_position,
                 y_position,
-                [8.0, 10.0, 316.0, bottom + 4.0],
+                [7.0, 8.0, 315.0, bottom + 2.0],
                 20.0,
             ) {
                 buffer[y * width + x] = 0x080908;
@@ -390,7 +390,7 @@ fn draw_bubble(
             if rounded_contains(x_position, y_position, [6.0, 6.0, 314.0, bottom], 20.0) {
                 buffer[y * width + x] = 0x080908;
             }
-            if rounded_contains(x_position, y_position, [10.0, 10.0, 310.0, bottom - 4.0], 16.0) {
+            if rounded_contains(x_position, y_position, [8.0, 8.0, 312.0, bottom - 2.0], 18.0) {
                 buffer[y * width + x] = fill;
                 if (26.0..294.0).contains(&x_position)
                     && (bottom - 46.0..bottom - 45.0).contains(&y_position)
@@ -402,9 +402,9 @@ fn draw_bubble(
                 x_position,
                 y_position,
                 [
-                    [242.0, bottom - 8.0],
-                    [262.0, bottom - 8.0],
-                    [252.0, bottom + 10.0],
+                    [239.0, bottom - 6.0],
+                    [265.0, bottom - 6.0],
+                    [252.0, bottom + 14.0],
                 ],
             ) {
                 buffer[y * width + x] = fill;
@@ -474,17 +474,19 @@ mod tests {
         let mut buffer = vec![0xff00ff; 320 * 260];
         draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x191f2a);
         assert_eq!(buffer[6 * 320 + 150], 0x080908);
-        assert_eq!(buffer[10 * 320 + 150], 0x191f2a);
+        assert_eq!(buffer[8 * 320 + 150], 0x191f2a);
         assert_eq!(buffer[30 * 320 + 314], 0x080908);
         assert_eq!(buffer[17 * 320 + 40], 0x191f2a);
         assert_eq!(buffer[62 * 320 + 40], blend(0x191f2a, 0xffffff, 30));
-        assert_eq!(buffer[104 * 320 + 150], 0x191f2a);
+        assert_eq!(buffer[106 * 320 + 150], 0x191f2a);
         assert_eq!(buffer[108 * 320 + 150], 0x080908);
         assert_eq!(buffer[104 * 320 + 252], 0x191f2a);
-        assert_eq!(buffer[122 * 320 + 252], 0x080908);
+        assert_eq!(buffer[122 * 320 + 252], 0x191f2a);
+        assert_eq!(buffer[124 * 320 + 252], 0x080908);
         assert_eq!(buffer[30 * 320 + 6], 0x080908);
         assert_eq!(buffer[6 * 320 + 6], 0xff00ff);
         assert_eq!(buffer[30 * 320 + 315], 0x080908);
+        assert_eq!(buffer[30 * 320 + 316], 0xff00ff);
     }
 
     #[test]
