@@ -16,7 +16,7 @@ Run only when the user invokes this skill: `@generate-character <name> <descript
    C:\ComfyUI\venv\Scripts\python.exe development_tools/generate_character.py <name> --description "<character description>"
    ```
 
-   The helper checks CUDA and an idle ComfyUI queue, starts ComfyUI only if needed, generates a native 256×256 portrait, synthesizes mono 16 kHz speech outside the repository, and animates it with the existing Wan graph. It publishes a silent four-second, 64-frame, 16 fps MP4 without resizing the portrait. It removes its temporary inputs and ComfyUI outputs and closes only a server it started. It preserves an existing portrait after failure; rerun with `--resume` to finish that character. A completed name is never overwritten.
+    The helper checks CUDA and an idle ComfyUI queue, starts ComfyUI only if needed, generates a native 256×256 portrait, synthesizes mono 16 kHz speech outside the repository, and animates it with the existing Wan graph. It publishes a silent four-second, 64-frame, 16 fps MP4 without resizing the portrait. It removes its temporary inputs and ComfyUI outputs. Before reporting completion, confirm the generation process has exited and any ComfyUI server started for this job has stopped; enforce this cleanup on failure or cancellation too. Leave pre-existing servers running. It preserves an existing portrait after failure; rerun with `--resume` to finish that character. A completed name is never overwritten.
 3. Inspect the saved portrait and extract a temporary contact sheet outside the repository:
 
    ```powershell
