@@ -5,7 +5,8 @@ param(
     [string]$ClaudePluginDirectory,
     [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode',
     [switch]$Audible,
-    [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0
+    [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0,
+    [switch]$SkipLocalPreview
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -402,7 +403,7 @@ try {
             Send-Control 106 0x14E 0 | Out-Null
             Send-Control 105 0x405 1 1 | Out-Null
             Set-Silent-Sound $SilentSoundSeconds
-            if ($SilentSoundSeconds -gt 0) {
+            if ($SilentSoundSeconds -gt 0 -and -not $SkipLocalPreview) {
                 Snapshot 'controls-preview-silent-sound-draft' | Out-Null
                 foreach ($button in @(210, 112)) {
                     Select-Page $(if ($button -eq 210) { 0 } else { 1 })
@@ -440,6 +441,7 @@ try {
                     }
                     $requests = @(Get-Content $requestsFile | Select-Object -Skip $count | ForEach-Object { $_ | ConvertFrom-Json })
                     if ($requests.Count -ne 1 -or $requests[0].url -ne '/v1/text-to-dialogue?output_format=pcm_16000' -or $requests[0].body.model_id -ne 'eleven_v4' -or $requests[0].body.inputs[0].voice_id -ne $voice) { throw 'Preview ignored the draft model or voice.' }
+                    @{ control = $button; requestAt = $requests[0].at; finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } | ConvertTo-Json -Compress | Add-Content (Join-Path $evidencePath 'preview-events.jsonl') -Encoding utf8NoBOM
                     Write-Output "Preview control $button finished with draft V4 and $voice."
                     if ($SilentSoundSeconds -gt 0) { Snapshot "controls-remote-silent-sound-preview-$button-$voice" | Out-Null }
                     if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Remote preview saved unapplied settings.' }

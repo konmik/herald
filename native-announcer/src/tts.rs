@@ -202,14 +202,17 @@ fn pcm(samples: &[f32]) -> Vec<i16> {
     samples.iter().map(|sample| if sample.is_finite() { (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16 } else { 0 }).collect()
 }
 
-fn prepend_silent_sound(samples: Vec<i16>, sample_rate: usize, pending: &mut u16) -> Vec<i16> {
-    if *pending == 0 || samples.is_empty() { return samples; }
-    let silence_samples = sample_rate * usize::from(*pending);
-    *pending = 0;
-    let mut prefixed = Vec::with_capacity(silence_samples + samples.len());
-    prefixed.resize(silence_samples, 0);
-    prefixed.extend(samples);
-    prefixed
+fn speech_start<'a>(seconds: u16, playback: Option<&'a SpeechPlayback<'a>>, cancelled: &'a AtomicBool) -> crate::audio::SpeechStart<'a> {
+    crate::audio::SpeechStart::new(seconds, move || {
+        if cancelled.load(Ordering::Relaxed) { return false; }
+        let allowed = playback.is_none_or(|playback| playback.begin(cancelled));
+        if !allowed { cancelled.store(true, Ordering::Relaxed); }
+        allowed
+    })
+}
+
+fn chunk_start<'a>(samples: &[i16], start: &mut Option<crate::audio::SpeechStart<'a>>) -> Option<crate::audio::SpeechStart<'a>> {
+    if samples.is_empty() { None } else { start.take() }
 }
 
 pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_speaker: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, settings: &crate::settings::Settings, playback: Option<&SpeechPlayback<'_>>) -> Result<(), String> {
@@ -228,12 +231,8 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
         match remote {
             Ok(samples) => {
                 if samples.is_empty() || cancelled.load(Ordering::Relaxed) { return Ok(()); }
-                if let Some(playback) = playback {
-                    if !playback.begin(cancelled) { return Ok(()); }
-                }
-                let mut silent_sound_pending = settings.silent_sound_seconds;
-                let samples = prepend_silent_sound(samples, 16000, &mut silent_sound_pending);
-                return crate::audio::play_pcm(&samples, 16000, volume, settings.output_device.as_deref(), cancelled);
+                let start = speech_start(settings.silent_sound_seconds, playback, cancelled);
+                return crate::audio::play_pcm_with_start(&samples, 16000, volume, settings.output_device.as_deref(), cancelled, Some(start));
             }
             Err(crate::elevenlabs::SpeechError::Cancelled) => return Ok(()),
             Err(error) => {
@@ -248,7 +247,7 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
     local_speak(text, source_character, preferred, settings.output_device.as_deref(), volume, cancelled, playback, settings.silent_sound_seconds)
 }
 
-fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, playback: Option<&SpeechPlayback<'_>>, mut silent_sound_pending: u16) -> Result<(), String> {
+fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_device: Option<&str>, volume: &AtomicU16, cancelled: &Arc<AtomicBool>, playback: Option<&SpeechPlayback<'_>>, silent_sound_seconds: u16) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let text = text.to_owned();
     let config = GenerationConfig { sid: speaker(character, preferred), ..Default::default() };
@@ -265,19 +264,15 @@ fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_devi
         })
     });
     let mut result = Ok(());
-    let mut ready_sent = false;
+    let mut start = Some(speech_start(silent_sound_seconds, playback, cancelled));
     for samples in &chunks {
         if cancelled.load(Ordering::Relaxed) { break; }
         if samples.is_empty() { continue; }
-        if !ready_sent {
-            ready_sent = true;
-            if let Some(playback) = playback {
-                if !playback.begin(cancelled) { break; }
-            }
-        }
-        if cancelled.load(Ordering::Relaxed) { break; }
-        let samples = prepend_silent_sound(samples, 24000, &mut silent_sound_pending);
-        if let Err(error) = crate::audio::play_pcm(&samples, 24000, volume, output_device, cancelled) {
+        let playback_result = match chunk_start(&samples, &mut start) {
+            Some(start) => crate::audio::play_pcm_with_start(&samples, 24000, volume, output_device, cancelled, Some(start)),
+            None => crate::audio::play_pcm(&samples, 24000, volume, output_device, cancelled),
+        };
+        if let Err(error) = playback_result {
             cancelled.store(true, Ordering::Relaxed);
             result = Err(error);
             break;
@@ -285,7 +280,7 @@ fn local_speak(text: &str, character: &str, preferred: Option<&str>, output_devi
     }
     drop(chunks);
     let generation = generator.join().map_err(|_| "Kitten TTS generation failed".to_string())?;
-    if cancelled.load(Ordering::Relaxed) { result } else if result.is_ok() && generation.is_ok() && !ready_sent { Err("Kitten TTS generated no audio".into()) } else { result.and(generation) }
+    if cancelled.load(Ordering::Relaxed) { result } else if result.is_ok() && generation.is_ok() && start.is_some() { Err("Kitten TTS generated no audio".into()) } else { result.and(generation) }
 }
 
 #[cfg(test)]
@@ -321,37 +316,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn silent_sound_prefix_is_exact_and_preserves_speech_at_both_rates() {
-        let speech = vec![i16::MIN, -1, 0, 1, i16::MAX];
-        for sample_rate in [16000, 24000] {
-            for seconds in [0, 1, 2, 10] {
-                let mut pending = seconds;
-                let samples = speech.clone();
-                let pointer = samples.as_ptr();
-                let prefixed = prepend_silent_sound(samples, sample_rate, &mut pending);
-                let silence_samples = sample_rate * usize::from(seconds);
-                assert_eq!(prefixed.len(), silence_samples + speech.len());
-                assert!(prefixed[..silence_samples].iter().all(|sample| *sample == 0));
-                assert_eq!(&prefixed[silence_samples..], speech.as_slice());
-                assert_eq!(pending, 0);
-                if seconds == 0 { assert_eq!(prefixed.as_ptr(), pointer); }
-            }
-        }
-    }
-
-    #[test]
-    fn silent_sound_only_prefixes_the_first_nonempty_local_chunk() {
-        for sample_rate in [16000, 24000] {
-            let mut pending = 2;
-            assert!(prepend_silent_sound(Vec::new(), sample_rate, &mut pending).is_empty());
-            assert_eq!(pending, 2);
-            let first = prepend_silent_sound(vec![7, -9], sample_rate, &mut pending);
-            assert_eq!(first.len(), sample_rate * 2 + 2);
-            assert_eq!(&first[sample_rate * 2..], &[7, -9]);
-            assert!(prepend_silent_sound(Vec::new(), sample_rate, &mut pending).is_empty());
-            assert_eq!(prepend_silent_sound(vec![11, -13], sample_rate, &mut pending), [11, -13]);
-            assert_eq!(pending, 0);
-        }
+    fn only_first_nonempty_local_chunk_takes_the_start_plan() {
+        let cancelled = AtomicBool::new(false);
+        let mut start = Some(speech_start(2, None, &cancelled));
+        assert!(chunk_start(&[], &mut start).is_none());
+        assert!(start.is_some());
+        assert!(chunk_start(&[7, -9], &mut start).is_some());
+        assert!(start.is_none());
+        assert!(chunk_start(&[], &mut start).is_none());
+        assert!(chunk_start(&[11, -13], &mut start).is_none());
     }
 
     #[cfg(windows)]

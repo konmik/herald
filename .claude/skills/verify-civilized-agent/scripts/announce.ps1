@@ -1,4 +1,4 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture)
 $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -24,6 +24,7 @@ if ($AppDirectory) {
     }
 }
 $process = $null
+$server = $null
 $transcribing = $false
 $oldData = $env:CIVILIZED_AGENT_DATA
 . (Join-Path $PSScriptRoot 'process.ps1')
@@ -40,6 +41,21 @@ try {
     $env:CIVILIZED_AGENT_DATA = $scratch
     $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false }
     if ($PSBoundParameters.ContainsKey('SilentSoundSeconds')) { $settings.silentSoundSeconds = $SilentSoundSeconds }
+    if ($SpeechFixture) {
+        $addressFile = Join-Path $scratch 'speech-api-address.txt'
+        $requestsFile = Join-Path $evidencePath 'speech-api-requests.jsonl'
+        $serverInfo = [Diagnostics.ProcessStartInfo]::new($node)
+        $serverInfo.UseShellExecute = $false
+        foreach ($argument in @((Join-Path $root 'development_tools/voice-api-fixture.mjs'), $addressFile, $requestsFile)) { $serverInfo.ArgumentList.Add($argument) }
+        $server = [Diagnostics.Process]::Start($serverInfo)
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path $addressFile)) {
+            if ($server.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Speech fixture did not start.' }
+            Start-Sleep -Milliseconds 50
+        }
+        $settings.elevenlabsApiKey = 'character-ui-test-key'
+        $settings.speechModel = 'eleven_v4'
+    }
     if ($AppearanceSettings) {
         $appearance = Get-Content -LiteralPath $AppearanceSettings -Raw | ConvertFrom-Json
         $settings.announcementBodyFont = $appearance.announcementBodyFont
@@ -51,6 +67,7 @@ try {
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
+    if ($SpeechFixture) { $info.Environment['ELEVENLABS_API_BASE_URL'] = Get-Content $addressFile -Raw }
     if ($AppDirectory) { $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null }
     else { $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
@@ -93,11 +110,12 @@ try {
     throw
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    if ($server -and -not $server.HasExited) { $server.Kill(); $server.WaitForExit() }
     if (Test-Path $scratch) {
         if (Test-Path (Join-Path $scratch 'errors.log')) { Copy-Item (Join-Path $scratch 'errors.log') (Join-Path $evidencePath 'errors.log') }
         Remove-Item -LiteralPath $scratch -Recurse -Force
     }
     $env:CIVILIZED_AGENT_DATA = $oldData
-    if (Test-Path $evidencePath) { @{ scratchRemoved = -not (Test-Path $scratch); processExited = (-not $process -or $process.HasExited) } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json') }
+    if (Test-Path $evidencePath) { @{ scratchRemoved = -not (Test-Path $scratch); processExited = (-not $process -or $process.HasExited); serverExited = (-not $server -or $server.HasExited) } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json') }
     if ($transcribing) { Stop-Transcript | Out-Null }
 }

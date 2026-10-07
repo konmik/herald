@@ -51,6 +51,7 @@ struct Pending {
     notification: Notification,
     character: characters::ResolvedCharacter,
     requested: Instant,
+    readiness_timeout: Duration,
     duration: Duration,
     video: Option<video::Video>,
     video_path: PathBuf,
@@ -86,6 +87,10 @@ impl Presentation {
 }
 
 impl Pending {
+    fn readiness_timed_out(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.requested) >= self.readiness_timeout
+    }
+
     fn activate(self, silent: bool) -> Active {
         let started = Instant::now();
         Active {
@@ -105,6 +110,10 @@ impl Pending {
 }
 
 const SPEECH_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn speech_readiness_timeout(settings: &settings::Settings) -> Duration {
+    SPEECH_READY_TIMEOUT + Duration::from_secs(u64::from(settings.silent_sound_seconds))
+}
 
 impl Active {
     fn ready_to_end(&self, now: Instant) -> bool {
@@ -335,7 +344,7 @@ fn run() -> Result<(), String> {
                         }
                     }
                 }
-                let timed_out = matches!(&current, Presentation::Preparing(pending) if now.saturating_duration_since(pending.requested) >= SPEECH_READY_TIMEOUT);
+                let timed_out = matches!(&current, Presentation::Preparing(pending) if pending.readiness_timed_out(now));
                 if timed_out {
                     if let Some(pending) = current.take_preparing(None) {
                         state::log(&data, format!("Speech readiness timed out for {}", pending.notification.id));
@@ -380,7 +389,8 @@ fn run() -> Result<(), String> {
                             }
                         };
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
-                        let pending = Pending { notification, character, requested: Instant::now(), duration, video, video_path: path };
+                        let readiness_timeout = speech_readiness_timeout(settings);
+                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path };
                         if muted {
                             activation = Some((pending, true));
                         } else {
@@ -559,10 +569,12 @@ mod tests {
             emotion: "neutral".into(),
         };
         let requested = Instant::now();
+        let mut live_settings = settings::Settings { silent_sound_seconds: 10, ..settings::Settings::default() };
         let mut presentation = Presentation::Preparing(Pending {
             notification,
             character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode", None),
             requested,
+            readiness_timeout: speech_readiness_timeout(&live_settings),
             duration: Duration::from_secs(10),
             video: None,
             video_path: PathBuf::new(),
@@ -571,6 +583,11 @@ mod tests {
         assert!(presentation.take_preparing(Some("other")).is_none());
         assert!(matches!(&presentation, Presentation::Preparing(_)));
         let pending = presentation.take_preparing(Some("pending")).unwrap();
+        live_settings.silent_sound_seconds = 0;
+        assert_eq!(speech_readiness_timeout(&live_settings), Duration::from_secs(30));
+        assert!(!pending.readiness_timed_out(requested + Duration::from_secs(30)));
+        assert!(!pending.readiness_timed_out(requested + Duration::from_secs(39)));
+        assert!(pending.readiness_timed_out(requested + Duration::from_secs(40)));
         assert!(matches!(presentation, Presentation::Idle));
         let active = pending.activate(true);
         assert!(active.started >= requested);

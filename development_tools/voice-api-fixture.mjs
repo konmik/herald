@@ -12,7 +12,7 @@ const server = createServer(async (request, response) => {
     const body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
     const slowUsage = request.headers['xi-api-key'] === 'slow-usage-test-key'
     const unknownLimit = request.headers['xi-api-key'] === 'unknown-limit-test-key'
-    await appendFile(requestsFile, `${JSON.stringify({ method: request.method, url: request.url, body, usageAccount: slowUsage ? 'slow' : undefined })}\n`)
+    await appendFile(requestsFile, `${JSON.stringify({ at: Date.now(), method: request.method, url: request.url, body, usageAccount: slowUsage ? 'slow' : undefined })}\n`)
     if (request.headers['xi-api-key'] === 'missing-permission-test-key') {
       response.writeHead(401, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ detail: { status: 'missing_permissions', message: 'The API key is missing user_read permission.' } }))
