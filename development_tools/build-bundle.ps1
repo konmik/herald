@@ -29,7 +29,6 @@ try {
         $osArch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
         if ($arch -ne $osArch) { throw 'Build with Node matching the Windows architecture' }
         $rustTarget = @{ x64 = 'x86_64-pc-windows-msvc'; arm64 = 'aarch64-pc-windows-msvc' }[$arch]
-        Invoke-Checked 'node' @((Join-Path $PSScriptRoot 'prepare-tts.mjs'))
         $oldTarget = $env:CARGO_TARGET_DIR
         try {
             $env:CARGO_TARGET_DIR = $target
@@ -43,17 +42,7 @@ try {
         $runtime = Join-Path $stage 'native-announcer'
         New-Item -ItemType Directory -Path "$runtime/bin", "$runtime/resources" -Force | Out-Null
         Copy-Item -LiteralPath "$target/$rustTarget/release/civilized-announcer.exe" -Destination "$runtime/bin/civilized-announcer-win32-$arch.exe"
-        foreach ($name in @('onnxruntime.dll', 'sherpa-onnx-c-api.dll')) { Copy-Item -LiteralPath "$target/$rustTarget/release/$name" -Destination "$runtime/bin/$name" }
-        $licenses = Join-Path $runtime 'licenses'
-        New-Item -ItemType Directory -Path $licenses | Out-Null
-        $onnxVersion = (Get-Item "$runtime/bin/onnxruntime.dll").VersionInfo.FileVersion
-        if ($onnxVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Could not identify the ONNX Runtime version for its license' }
-        $sherpaVersion = Select-String -LiteralPath (Join-Path $root 'native-announcer/Cargo.lock') -Pattern '^name = "sherpa-onnx-sys"$' -Context 0, 1
-        if ($sherpaVersion.Context.PostContext[0] -notmatch '^version = "([0-9.]+)"$') { throw 'Could not identify the sherpa-onnx version for its license' }
-        $sherpaVersion = $Matches[1]
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v$sherpaVersion/LICENSE" -OutFile (Join-Path $licenses 'sherpa-onnx-LICENSE') -TimeoutSec 60
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/onnxruntime/v$onnxVersion/LICENSE" -OutFile (Join-Path $licenses 'onnxruntime-LICENSE') -TimeoutSec 60
-        foreach ($name in @('characters.json', 'videos', 'tts/kitten-nano-en-v0_8-int8')) {
+        foreach ($name in @('characters.json', 'videos')) {
             $destination = Join-Path $runtime "resources/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "native-announcer/resources/$name") -Destination $destination -Recurse -Force
@@ -64,6 +53,7 @@ try {
         Copy-Item -LiteralPath $node -Destination (Join-Path $stage 'claude-plugin/native-announcer/bin/node.exe')
         $nodeVersion = & node -p 'process.version'
         if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v\d+\.\d+\.\d+$') { throw 'Could not identify the bundled Node version for its license' }
+        New-Item -ItemType Directory -Path (Join-Path $stage 'claude-plugin/native-announcer/licenses') -Force | Out-Null
         Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE" -OutFile (Join-Path $stage 'claude-plugin/native-announcer/licenses/node-LICENSE') -TimeoutSec 60
     }
     $package = Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json

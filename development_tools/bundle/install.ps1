@@ -66,17 +66,18 @@ function Test-Bundle {
     $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($file in $manifest.files) {
         Assert-SafePayloadPath $file.path
+        if ($file.path -match '(?i)/bin/(onnxruntime|sherpa-onnx-c-api)\.dll$|/resources/tts/') { throw 'Offline voice must be installed from Settings, not included in the bundle' }
         if ($file.path -eq 'bundle-manifest.json' -or -not $paths.Add($file.path) -or $file.sha256 -notmatch '^[a-f0-9]{64}$' -or $file.size -lt 0) { throw 'Invalid or duplicate manifest entry' }
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/native-announcer/bin/node.exe', "native-announcer/bin/civilized-announcer-win32-$architecture.exe", 'native-announcer/bin/onnxruntime.dll', 'native-announcer/bin/sherpa-onnx-c-api.dll', "claude-plugin/native-announcer/bin/civilized-announcer-win32-$architecture.exe", 'claude-plugin/native-announcer/bin/onnxruntime.dll', 'claude-plugin/native-announcer/bin/sherpa-onnx-c-api.dll')) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/native-announcer/bin/node.exe', "native-announcer/bin/civilized-announcer-win32-$architecture.exe", "claude-plugin/native-announcer/bin/civilized-announcer-win32-$architecture.exe")) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
     }
     if (-not $paths.Contains('shortcut.ps1')) { throw 'Required runtime file missing: shortcut.ps1' }
     foreach ($entry in @('index.ts', 'tui.ts')) { if (-not $paths.Contains($entry)) { throw "Required OpenCode entry missing: $entry" } }
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
-        foreach ($name in @('characters.json', 'tts/kitten-nano-en-v0_8-int8/model.int8.onnx', 'tts/kitten-nano-en-v0_8-int8/voices.bin', 'tts/kitten-nano-en-v0_8-int8/tokens.txt', 'tts/kitten-nano-en-v0_8-int8/espeak-ng-data/en_dict', 'tts/kitten-nano-en-v0_8-int8/LICENSE')) {
+        foreach ($name in @('characters.json')) {
             if (-not $paths.Contains("$prefix/resources/$name")) { throw "Required runtime asset missing: $prefix/resources/$name" }
         }
         $characters = Get-Content -LiteralPath (Join-Path $Directory "$prefix/resources/characters.json") -Raw | ConvertFrom-Json -AsHashtable

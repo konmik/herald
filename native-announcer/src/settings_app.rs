@@ -44,6 +44,8 @@ mod native {
     const DEFAULT_VOICE_ID: i32 = 121;
     const DEFAULT_VOICE_ID_LABEL: i32 = 122;
     const DEFAULT_VOICE_ID_HINT: i32 = 123;
+    const OFFLINE_STATUS: i32 = 124;
+    const OFFLINE_INSTALL: i32 = 125;
     const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
@@ -74,6 +76,7 @@ mod native {
         Audio,
         QuietHours,
         SpeechService,
+        OfflineVoice,
     }
 
     impl Page {
@@ -135,7 +138,7 @@ mod native {
         MY_VOICES,
     ];
 
-    static PAGE_SPECS: [PageSpec; 4] = [
+    static PAGE_SPECS: [PageSpec; 5] = [
         PageSpec {
             page: Page::Characters,
             label: "Characters",
@@ -159,6 +162,12 @@ mod native {
             label: "Speech service",
             hint: "Choose a model and optionally configure ElevenLabs.",
             controls: SPEECH_SERVICE_PAGE_CONTROLS,
+        },
+        PageSpec {
+            page: Page::OfflineVoice,
+            label: "Offline voice",
+            hint: "Install Kitten CPU speech for use without ElevenLabs or an internet connection.",
+            controls: &[OFFLINE_STATUS, OFFLINE_INSTALL],
         },
     ];
 
@@ -245,6 +254,7 @@ mod native {
         character_ids: Vec<String>,
         removed_characters: std::collections::BTreeSet<String>,
         voice_usage: VoiceUsageState,
+        offline_install: Option<Receiver<Result<(), String>>>,
         updating: bool,
         active_page: Page,
         ui: UiResources,
@@ -484,6 +494,7 @@ mod native {
         SendMessageW(GetDlgItem(window, SIDEBAR), LB_SETCURSEL, page.index(), 0);
         refresh_page_visibility(window, form);
         if entering && page == Page::SpeechService { refresh_voice_usage(window, form, false); }
+        if entering && page == Page::OfflineVoice && form.offline_install.is_none() { render_offline_voice(window, form); }
     }
 
     unsafe fn populate_pages(window: HWND, form: &Form) {
@@ -567,8 +578,8 @@ mod native {
 
     fn api_key_status(api_key: Option<&str>) -> String {
         match api_key.filter(|key| !key.trim().is_empty()).map(crate::elevenlabs::validate_api_key) {
-            Some(Ok(())) => "Using the key entered in Settings. Kitten CPU provides local speech.".into(),
-            None => "Enter an ElevenLabs key, or leave blank to use Kitten CPU.".into(),
+            Some(Ok(())) => "Using the key entered in Settings. Install Offline voice for local fallback.".into(),
+            None => "Enter an ElevenLabs key, or install local speech in Offline voice.".into(),
             Some(Err(error)) => format!("ElevenLabs API key unavailable: {error}"),
         }
     }
@@ -652,6 +663,47 @@ mod native {
             Err(error) => VoiceUsageState::Failed(error),
         };
         render_voice_usage(window, form);
+    }
+
+    unsafe fn render_offline_voice(window: HWND, form: &Form) {
+        let installing = form.offline_install.is_some();
+        let installed = crate::tts::installed();
+        label(window, OFFLINE_STATUS, if installing {
+            "Installing… Downloading and checking the voice engine and model."
+        } else if installed {
+            "Installed. Kitten CPU speech is available offline."
+        } else {
+            "Not installed. Download the voice engine and model to enable offline speech."
+        });
+        label(window, OFFLINE_INSTALL, if installed { "Installed" } else { "Install" });
+        EnableWindow(GetDlgItem(window, OFFLINE_INSTALL), (!installing && !installed) as i32);
+        EnableWindow(GetDlgItem(window, CLOSE), (!installing) as i32);
+    }
+
+    unsafe fn install_offline_voice(window: HWND, form: &mut Form) {
+        if form.offline_install.is_some() { return; }
+        let (sender, receiver) = mpsc::channel();
+        form.offline_install = Some(receiver);
+        render_offline_voice(window, form);
+        SetTimer(window, 5, 100, None);
+        std::thread::spawn(move || { let _ = sender.send(crate::tts::install().and_then(|_| crate::tts::prepare())); });
+    }
+
+    unsafe fn poll_offline_voice(window: HWND, form: &mut Form) {
+        let Some(receiver) = &form.offline_install else { return; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Offline voice installation stopped unexpectedly.".into()),
+        };
+        KillTimer(window, 5);
+        form.offline_install = None;
+        render_offline_voice(window, form);
+        if let Err(error) = result {
+            label(window, OFFLINE_STATUS, &format!("Installation failed: {error}"));
+            label(window, OFFLINE_INSTALL, "Retry install");
+            EnableWindow(GetDlgItem(window, OFFLINE_INSTALL), 1);
+        }
     }
 
     unsafe fn browse_video(window: HWND, form: &mut Form) {
@@ -788,6 +840,8 @@ mod native {
         move_control(VOICE_USAGE, main_left, usage_y, main_width, usage_height);
         move_control(USAGE_REFRESH, main_right - 120, usage_button_y, 120, 34);
         move_control(MY_VOICES, main_left, usage_button_y, 180, 34);
+        move_control(OFFLINE_STATUS, main_left, 128, main_width, 160);
+        move_control(OFFLINE_INSTALL, main_left, 308, 150, 34);
 
         move_control(STATUS, 24, height - 96, width - 268, 80);
         move_control(APPLY, width - 228, height - 48, 100, 32);
@@ -884,6 +938,7 @@ mod native {
                         populate_outputs(window, &mut *form, selected.as_deref());
                     }
                     USAGE_REFRESH => refresh_voice_usage(window, &mut *form, false),
+                    OFFLINE_INSTALL => install_offline_voice(window, &mut *form),
                     MY_VOICES => {
                         let result = windows_sys::Win32::UI::Shell::ShellExecuteW(
                             window,
@@ -991,6 +1046,14 @@ mod native {
                 poll_voice_usage(window, &mut *form);
                 0
             }
+            WM_TIMER if !form.is_null() && wparam == 5 => {
+                poll_offline_voice(window, &mut *form);
+                0
+            }
+            WM_CLOSE if !form.is_null() && (*form).offline_install.is_some() => {
+                label(window, STATUS, "Wait for offline voice installation to finish before closing.");
+                0
+            }
             WM_CLOSE => { DestroyWindow(window); 0 }
             WM_DESTROY => { if !form.is_null() { stop_previews(window, &mut *form); } KillTimer(window, 4); PostQuitMessage(0); 0 }
             _ => DefWindowProcW(window, message, wparam, lparam),
@@ -1036,6 +1099,7 @@ mod native {
             active_draft: None,
             character_ids: Vec::new(),
             voice_usage,
+            offline_install: None,
             removed_characters: std::collections::BTreeSet::new(),
             updating: false,
             active_page: Page::Audio,
@@ -1113,6 +1177,8 @@ mod native {
                 control(window, "STATIC", &voice_usage_text(&form.voice_usage), VOICE_USAGE, 0, (252, 372, 660, 128))?;
                 control(window, "BUTTON", "Refresh", USAGE_REFRESH, WS_TABSTOP, (808, 526, 120, 34))?;
                 control(window, "BUTTON", "Open My Voices", MY_VOICES, WS_TABSTOP, (252, 526, 180, 34))?;
+                control(window, "STATIC", "", OFFLINE_STATUS, 0, (252, 128, 676, 160))?;
+                control(window, "BUTTON", "Install", OFFLINE_INSTALL, WS_TABSTOP, (252, 308, 150, 34))?;
 
                 control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
                 control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
@@ -1146,6 +1212,7 @@ mod native {
             refresh_characters(window, &mut form);
             refresh_page_visibility(window, &form);
             render_voice_usage(window, &form);
+            render_offline_voice(window, &form);
             let mut client = RECT::default();
             GetClientRect(window, &mut client);
             layout(window, client.right, client.bottom);

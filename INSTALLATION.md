@@ -6,7 +6,7 @@ PowerShell 7 is required. Build on Windows with Bun, Node and Cargo matching the
 npm run build:bundle
 ```
 
-The release ZIP is written to `temp/bundles`. Building prepares speech assets and reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The separate build cache keeps release builds away from the running checkout executable.
+The release ZIP is written to `temp/bundles`. Building reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The voice engine and model are not bundled. The separate build cache keeps release builds away from the running checkout executable.
 
 To repackage an already extracted complete bundle without rebuilding native code or downloading assets:
 
@@ -25,7 +25,7 @@ pwsh -NoProfile -File .\install.ps1 -WhatIf
 pwsh -NoProfile -File .\install.ps1
 ```
 
-Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Host registration uses the installed Claude CLI. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise an existing `.claude-whg`, otherwise `.claude`. OpenCode uses `XDG_CONFIG_HOME/opencode`, otherwise `.config/opencode`. Both hosts are registered by default.
+Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Open Settings > Offline voice and click Install to download the checksum-verified voice engine and model. The tab shows installation status and offers a retry if installation fails. Offline voice is stored with user data and shared by both plugins across upgrades. Without it, ElevenLabs can still provide speech and visual announcements still work. Host registration uses the installed Claude CLI. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise an existing `.claude-whg`, otherwise `.claude`. OpenCode uses `XDG_CONFIG_HOME/opencode`, otherwise `.config/opencode`. Both hosts are registered by default.
 
 The Start menu shortcut uses Windows' native Unicode shell-link interface, including when checking an existing shortcut's ownership. PowerShell 7 compiles this helper internally; no separate compiler installation is needed. Local speech uses Windows short filenames for non-ASCII paths. If the volume does not provide those names, install into an ASCII path.
 

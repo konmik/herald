@@ -47,10 +47,11 @@ test('retains the previous installation when publishing fails', async t => {
   assert.deepEqual(await readdir(root), ['installed'])
 })
 
-test('Windows builds prepare CPU speech without GPU assets', async () => {
-  const source = await readFile(new URL('../build-announcer.mjs', import.meta.url), 'utf8')
-  assert.match(source, /import\('\.\/prepare-tts\.mjs'\)/)
-  assert.doesNotMatch(source, /gpu|cuda/i)
+test('builds do not download or bundle the optional voice engine', async () => {
+  for (const name of ['build-announcer.mjs', 'build-bundle.ps1']) {
+    const source = await readFile(new URL(`../${name}`, import.meta.url), 'utf8')
+    assert.doesNotMatch(source, /prepare-tts|onnxruntime\.dll|sherpa-onnx-c-api\.dll|tts\/kitten|gpu|cuda/i)
+  }
 })
 
 test('bundled characters cover every library video with usable names and no voice descriptions', async () => {

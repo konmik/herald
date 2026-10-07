@@ -61,8 +61,7 @@ try {
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/native-announcer/bin/node.exe')
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
-        $required += "$prefix/bin/civilized-announcer-win32-$arch.exe", "$prefix/bin/onnxruntime.dll", "$prefix/bin/sherpa-onnx-c-api.dll", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
-        foreach ($name in @('model.int8.onnx', 'voices.bin', 'tokens.txt', 'espeak-ng-data/en_dict', 'LICENSE')) { $required += "$prefix/resources/tts/kitten-nano-en-v0_8-int8/$name" }
+        $required += "$prefix/bin/civilized-announcer-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
     }
     foreach ($file in $required) {
         $path = Join-Path $payload $file
@@ -78,6 +77,7 @@ try {
     Expand-Archive -LiteralPath $zip -DestinationPath $bundle
     Test-Bundle $bundle | Out-Null
     Assert-True (-not (Test-Path "$bundle/node_modules")) 'Compiled bundle contains a dependency tree'
+    Assert-True (-not (Test-Path "$bundle/native-announcer/resources/tts") -and -not (Test-Path "$bundle/native-announcer/bin/sherpa-onnx-c-api.dll")) 'Bundle includes the optional voice engine'
     foreach ($package in @('@opencode-plugin-2.0.24', 'effect-4.0.0-rc.112', 'jsonc-parser-3.3.1')) {
         Assert-True (@(Get-ChildItem -LiteralPath "$bundle/licenses/javascript/$package" -File).Count -gt 0) "Bundled JavaScript license missing: $package"
     }
@@ -135,11 +135,11 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Repeated installation changed native settings'
     $lock = [IO.File]::Open((Join-Path $root '.install.lock'), 'Open', 'ReadWrite', 'None')
     try { Assert-Rejected { Install-Payload $bundle $root } 'Concurrent installation acquired the same root' } finally { $lock.Dispose() }
-    'corrupt' | Set-Content "$app/native-announcer/bin/onnxruntime.dll"
+    'corrupt' | Set-Content "$app/native-announcer/resources/videos/fixture.mp4"
     $repair = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
-    Assert-True ($repair -eq $app -and (Get-Content "$app/native-announcer/bin/onnxruntime.dll") -eq 'fixture') 'Corrupt owned runtime was not repaired'
+    Assert-True ($repair -eq $app -and (Get-Content "$app/native-announcer/resources/videos/fixture.mp4") -eq 'fixture') 'Corrupt owned runtime was not repaired'
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Repair changed native settings'
-    $file = "$bundle/native-announcer/bin/onnxruntime.dll"
+    $file = "$bundle/native-announcer/resources/videos/fixture.mp4"
     $bytes = [IO.File]::ReadAllBytes($file)
     'tampered' | Set-Content $file
     $untouched = Join-Path $temporary 'untouched'
