@@ -18,7 +18,8 @@ mod native {
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::{Controls::*, WindowsAndMessaging::*};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, VK_CONTROL, VK_MENU};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 
     const TBM_GETPOS: u32 = WM_USER;
 
@@ -328,7 +329,19 @@ mod native {
     }
 
     unsafe fn label(window: HWND, id: i32, value: &str) {
-        SetWindowTextW(GetDlgItem(window, id), wide(value).as_ptr());
+        if text(window, id) != value {
+            SetWindowTextW(GetDlgItem(window, id), wide(value).as_ptr());
+        }
+    }
+
+    unsafe extern "system" fn edit_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, id: usize, _data: usize) -> LRESULT {
+        if message == WM_KEYDOWN && wparam == b'A' as usize && GetKeyState(VK_CONTROL as i32) < 0 && GetKeyState(VK_MENU as i32) >= 0 {
+            SendMessageW(window, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        if message == WM_CHAR && wparam == 1 { return 0; }
+        if message == WM_NCDESTROY { RemoveWindowSubclass(window, Some(edit_proc), id); }
+        DefSubclassProc(window, message, wparam, lparam)
     }
 
     unsafe fn checked(window: HWND, id: i32) -> bool {
@@ -344,6 +357,9 @@ mod native {
         let control = CreateWindowExW(0, wide(class).as_ptr(), wide(title).as_ptr(), WS_CHILD | WS_VISIBLE | style,
             x, y, width, height, window, id as usize as HMENU, GetModuleHandleW(std::ptr::null()), std::ptr::null());
         if control.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
+        if class == "EDIT" && SetWindowSubclass(control, Some(edit_proc), id as usize, 0) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
         SendMessageW(control, WM_SETFONT, GetStockObject(DEFAULT_GUI_FONT) as usize, 1);
         Ok(())
     }

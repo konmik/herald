@@ -5,6 +5,7 @@ param(
     [switch]$VideoPickerOnly,
     [switch]$CharacterPromptsOnly,
     [switch]$DefaultAssets,
+    [switch]$TextEditingOnly,
     [string]$AssetsDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/resources')
 )
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,33 @@ public static class CivilizedCharacterTest {
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder name, int length);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32.dll")] public static extern bool GetKeyboardState(byte[] state);
+    [DllImport("user32.dll")] public static extern bool SetKeyboardState(byte[] state);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] public static extern IntPtr ReadSelection(IntPtr window, uint message, out int start, out int end);
+    public static int[] Selection(IntPtr window) {
+        ReadSelection(window, 0xB0, out var start, out var end);
+        return new[] { start, end };
+    }
+    public static void SelectAll(IntPtr window) {
+        var thread = GetCurrentThreadId();
+        var owner = GetWindowThreadProcessId(window, out var process);
+        if (!AttachThreadInput(thread, owner, true)) throw new Exception("Could not attach to the settings input queue.");
+        var previous = new byte[256];
+        try {
+            if (!GetKeyboardState(previous)) throw new Exception("Could not read the keyboard state.");
+            var state = (byte[])previous.Clone();
+            state[0x11] = 0x80;
+            state[0x12] = 0;
+            if (!SetKeyboardState(state)) throw new Exception("Could not set the keyboard state.");
+            SendMessage(window, 0x100, new IntPtr(0x41), IntPtr.Zero);
+            SendMessage(window, 0x102, new IntPtr(1), IntPtr.Zero);
+        } finally {
+            SetKeyboardState(previous);
+            AttachThreadInput(thread, owner, false);
+        }
+    }
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
@@ -114,7 +142,7 @@ function Send-Control {
 }
 function Set-Control {
     param([int]$Id, [string]$Value)
-    if ($Id -eq 218) { $Value = $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") }
+    if ($Id -in @(134, 218)) { $Value = $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") }
     if ($Id -eq 216) {
         Send-Control $Id 0xB1 0 -1 | Out-Null
         [CivilizedCharacterTest]::SetText((Get-Control $Id), 0xC2, [IntPtr]1, $Value) | Out-Null
@@ -240,6 +268,43 @@ try {
         $settingsInfo.ArgumentList.Add($AssetsDirectory)
     }
     Open-Settings
+    if ($TextEditingOnly) {
+        Select-CharactersPage
+        Send-Control 201 0x186 0 | Out-Null
+        [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
+        foreach ($entry in @(@{ Id = 218; Page = 0 }, @{ Id = 134; Page = 5 })) {
+            Select-SettingsPage $entry.Page
+            $id = $entry.Id
+            $prompt = (1..80 | ForEach-Object { "Line ${_}: Report the task outcome as this character." }) -join "`n"
+            Set-Control $id $prompt
+            [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x28, (Get-Control $id), [IntPtr]1) | Out-Null
+            [CivilizedCharacterTest]::SelectAll((Get-Control $id))
+            $length = $prompt.Replace("`n", "`r`n").Length
+            Wait-Until {
+                $selection = [CivilizedCharacterTest]::Selection((Get-Control $id))
+                return $selection[0] -eq 0 -and $selection[1] -eq $length
+            } "Ctrl+A did not select all text in control $id."
+            Send-Control $id 0xB1 200 225 | Out-Null
+            Send-Control $id 0xB6 0 -32767 | Out-Null
+            Send-Control $id 0xB6 0 20 | Out-Null
+            $line = Send-Control $id 0xCE
+            if ($line -le 0) { throw "Control $id did not scroll before Apply." }
+            $selection = [CivilizedCharacterTest]::Selection((Get-Control $id))
+            [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x28, (Get-Control 107), [IntPtr]1) | Out-Null
+            Send-Control 107 0xF5 | Out-Null
+            if ((Read-Control 109) -notlike 'Saved.*') { throw "Apply did not save control $id." }
+            if ((Send-Control $id 0xCE) -ne $line) { throw "Apply reset the scroll position of control $id." }
+            $after = [CivilizedCharacterTest]::Selection((Get-Control $id))
+            if ($after[0] -ne $selection[0] -or $after[1] -ne $selection[1]) { throw "Apply reset the text selection of control $id." }
+            Add-Content (Join-Path $Evidence 'actions.txt') "Control ${id}: Ctrl+A selected $length characters; Apply preserved line $line and selection $($after -join ',')."
+        }
+        Copy-Item $settingsPath (Join-Path $Evidence 'settings-after.json')
+        Send-Control 108 0xF5 | Out-Null
+        if (-not $process.WaitForExit(5000)) { throw 'Text editing settings did not close.' }
+        @{ passed = $true; textEditingOnly = $true } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
+        Write-Output 'PASS: Ctrl+A and Apply preserve selection and scroll in both prompt editors.'
+        return
+    }
     if ($CharacterPromptsOnly) {
         Select-CharactersPage
         $firstPrompt = "Speak as a herald.`nReport the result explicitly and briefly."
