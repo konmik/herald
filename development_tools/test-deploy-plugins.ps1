@@ -21,6 +21,7 @@ try {
     'old binary' | Set-Content "$cache/bin/obsolete.exe"
     'new hooks' | Set-Content "$source/hooks/register.ts"
     'new runtime' | Set-Content "$source/scripts/runtime.mjs"
+    'new summary prompt' | Set-Content "$source/scripts/summary-prompt.mjs"
     'shared asset' | Set-Content "$shared/resources/keep.txt"
     $registry = @{ version = 2; plugins = @{ $PluginId = @(@{ scope = 'user'; installPath = $cache }, @{ scope = 'local'; installPath = 'not-user' }) } }
     $registry | ConvertTo-Json -Depth 6 | Set-Content "$profile/plugins/installed_plugins.json"

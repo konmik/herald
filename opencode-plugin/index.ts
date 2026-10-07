@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin"
+import type { OpenCode, SessionMessageAssistant, SessionMessageAssistantText } from "@opencode/client"
 import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -6,6 +7,16 @@ import { Completions } from "./completions"
 import { send } from "./bridge"
 import { consumeEvents } from "./events"
 import { canAnnounceFromLocalServer } from "./state-client"
+import { createSummaryPrompt } from "../claude-plugin/scripts/summary-prompt.mjs"
+
+async function latestAssistantText(session: Pick<ReturnType<typeof OpenCode.make>["session"], "context">, sessionID: string) {
+  const messages = await session.context({ sessionID })
+  const assistant = messages.findLast((message): message is SessionMessageAssistant => message.type === "assistant")
+  return assistant?.content
+    .filter((part): part is SessionMessageAssistantText => part.type === "text")
+    .map((part) => part.text)
+    .join("\n") ?? ""
+}
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -23,10 +34,12 @@ export default Plugin.define({
       child.unref()
     }
     const completions = new Completions(
-      async (sessionID, failed) => {
+      async (sessionID, failed, isCurrent) => {
+        const report = await latestAssistantText(ctx.session, sessionID)
+        if (!isCurrent()) return ""
         const result = await ctx.session.generate({
           sessionID,
-          prompt: `Summarize the most recently ${failed ? "failed" : "completed"} task in exactly one short spoken sentence of at most 30 words. Include the actual outcome and any important failure or remaining blocker. Focus on work actually performed and its results. Omit statements about actions not taken, such as not deploying or not reloading. Use plain English, no Markdown, no introduction, no file paths, no greetings, no catchphrases, and no theatrical language. Do not claim success unless confirmed. Do not run tools. Output only that sentence.`,
+          prompt: createSummaryPrompt(failed ? "failed" : "completed", report),
         })
         return result.text
       },

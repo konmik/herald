@@ -1,4 +1,4 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings)
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
@@ -37,7 +37,14 @@ try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $env:CIVILIZED_AGENT_DATA = $scratch
-    @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false } | ConvertTo-Json | Set-Content (Join-Path $scratch 'settings.json') -Encoding utf8NoBOM
+    $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false }
+    if ($AppearanceSettings) {
+        $appearance = Get-Content -LiteralPath $AppearanceSettings -Raw | ConvertFrom-Json
+        $settings.announcementBodyFont = $appearance.announcementBodyFont
+        $settings.announcementTitleFont = $appearance.announcementTitleFont
+    }
+    $settings | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $scratch 'settings.json') -Encoding utf8NoBOM
+    Copy-Item (Join-Path $scratch 'settings.json') (Join-Path $evidencePath 'settings.json')
     if ($Meeting) { @{ active = $true; updated = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000 } | ConvertTo-Json | Set-Content (Join-Path $scratch 'meeting.json') -Encoding utf8NoBOM }
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false

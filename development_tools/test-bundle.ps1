@@ -59,7 +59,7 @@ try {
     $settingsBytes = [Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath))
     $payload = Join-Path $temporary 'payload'
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
-    $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/native-announcer/bin/node.exe')
+    $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/scripts/summary-prompt.mjs', 'claude-plugin/native-announcer/bin/node.exe')
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
         $required += "$prefix/bin/civilized-announcer-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
     }
@@ -72,6 +72,7 @@ try {
     '{"name":"civilized-agent-local"}' | Set-Content "$payload/claude-plugin/.claude-plugin/marketplace.json"
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
     Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-plugin/hooks/register.ts') -Destination "$payload/claude-plugin/hooks/register.ts" -Force
+    Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-plugin/scripts/summary-prompt.mjs') -Destination "$payload/claude-plugin/scripts/summary-prompt.mjs" -Force
     $zip = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $payload -OutputDirectory (Join-Path $temporary 'output')
     $bundle = Join-Path $temporary 'extracted'
     Expand-Archive -LiteralPath $zip -DestinationPath $bundle

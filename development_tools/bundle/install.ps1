@@ -88,7 +88,7 @@ function Test-Bundle {
         }
     }
     if (-not $paths.Contains('claude-plugin/.claude-plugin/packaged.json')) { throw 'Claude packaged runtime marker is missing' }
-    foreach ($name in @('claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
+    foreach ($name in @('claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/scripts/summary-prompt.mjs')) {
         if (-not $paths.Contains($name)) { throw "Required Claude runtime missing: $name" }
     }
     if ($paths.Contains('claude-plugin/.claude-plugin/development.json')) { throw 'Development fallback markers cannot be installed' }
@@ -250,7 +250,7 @@ function Deploy-ClaudeFiles {
     $runtime = if ($Announcer) { $Announcer } else { Join-Path $Source 'native-announcer' }
     Get-PayloadFiles $Source | Out-Null
     Get-PayloadFiles $runtime | Out-Null
-    foreach ($required in @('.claude-plugin/plugin.json', 'hooks/register.ts', 'scripts/runtime.mjs')) {
+    foreach ($required in @('.claude-plugin/plugin.json', 'hooks/register.ts', 'scripts/runtime.mjs', 'scripts/summary-prompt.mjs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Source $required))) { throw "Missing Claude runtime: $required" }
     }
     $parent = Split-Path $destination -Parent

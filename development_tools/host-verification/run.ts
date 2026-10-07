@@ -9,11 +9,14 @@ const [host, scenario, model, scratch, evidence, root, claude, app = root, claud
 if (!host || !scenario || !scratch || !evidence || !root) throw new Error("Missing host verification arguments")
 const proof = join(evidence, "host-proof.jsonl")
 const marker = process.env.CIVILIZED_AGENT_HOST_MARKER!
+const summaryMarker = process.env.CIVILIZED_AGENT_HOST_SUMMARY_MARKER
 type ProofRow = {
   type: string
   at: number
   sessionID?: string
   hasPriorContext?: boolean
+  hasConfiguredPrompt?: boolean
+  prompt?: string
   result?: { isAnswered: boolean }
   event?: { agentId?: string; type?: string; created?: number; data?: { sessionID?: string } }
   background?: { status: string; type?: string }[]
@@ -104,6 +107,7 @@ try {
         assert.equal(generation.length, 1, "Expected one summary fork")
         assert.equal(generation[0].sessionID, sessionID)
         assert.equal(generation[0].hasPriorContext, true)
+        assert.equal(generation[0].hasConfiguredPrompt, true)
         const active = await client!.session.active(request())
         assert.equal(sessionID! in active, false, "Root still running at announcement")
         const shells = await client!.shell.list({ location: { directory: scratch } }, request())
@@ -162,6 +166,7 @@ try {
         assert.equal(fork.length, 1)
         assert.equal(fork[0].sessionID, sessionID)
         assert.equal(fork[0].result?.isAnswered, true)
+        if (summaryMarker) assert.equal(fork[0].prompt?.includes(summaryMarker), true, "Claude did not use the saved summary prompt")
         const final = rows.findLast((row) => row.type === "turn.complete" && !row.event?.agentId)
         assert.ok(final && fork[0].at >= final.at, "Fork ran before the main final report")
         if (!(await verifyPlaybackFinished())) return undefined
@@ -180,6 +185,6 @@ try {
   }
   passed = true
 } finally {
-  await writeFile(join(evidence, "host-result.json"), JSON.stringify({ host, scenario, passed, sessionsRemoved: removed, scope: "real host generation, completion timing, isolated native history", skipped: ["TUI tab visibility", "mouse dismissal", "audio quality"] }, null, 2))
+  await writeFile(join(evidence, "host-result.json"), JSON.stringify({ host, scenario, passed, sessionsRemoved: removed, customSummary: Boolean(summaryMarker), scope: "real host generation, completion timing, isolated native history", skipped: ["TUI tab visibility", "mouse dismissal", "audio quality"] }, null, 2))
 }
 console.log(`PASS: ${host} ${scenario}; real conversation fork and one final main announcement`)

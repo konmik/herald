@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview')][string]$Feature = 'Settings',
+    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview', 'Announcements')][string]$Feature = 'Settings',
     [string]$Evidence = ('temp/verification/' + [guid]::NewGuid()),
     [string]$AppDirectory,
     [string]$ClaudePluginDirectory,
@@ -31,6 +31,12 @@ public static class CivilizedVerify {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] public static extern IntPtr SetText(IntPtr window, uint message, IntPtr wparam, string text);
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] public static extern IntPtr ReadText(IntPtr window, uint message, IntPtr length, StringBuilder text);
+    [DllImport("user32.dll", EntryPoint="PostMessageW")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", EntryPoint="GetClassNameW", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder text, int length);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint="FindWindowW", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string title);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
 }
 '@
 function Control([int]$Id) {
@@ -41,10 +47,161 @@ function Control([int]$Id) {
 function Send-Control([int]$Id, [uint32]$Message, [long]$Wparam = 0, [long]$Lparam = 0) {
     return [CivilizedVerify]::SendMessageW((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam).ToInt64()
 }
+function Post-Control([int]$Id, [uint32]$Message, [long]$Wparam = 0, [long]$Lparam = 0) {
+    if (-not [CivilizedVerify]::PostMessage((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam)) { throw "Could not post message $Message to control $Id" }
+}
 function Read-Control([int]$Id) {
-    $buffer = [Text.StringBuilder]::new(512)
-    [CivilizedVerify]::ReadText((Control $Id), 0xD, [IntPtr]512, $buffer) | Out-Null
+    $control = Control $Id
+    $length = [CivilizedVerify]::SendMessageW($control, 0xE, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+    if ($length -lt 0) { throw "Could not read control $Id text length" }
+    $capacity = [Math]::Max(256, [int]$length + 1)
+    while ($true) {
+        $buffer = [Text.StringBuilder]::new($capacity)
+        $copied = [CivilizedVerify]::ReadText($control, 0xD, [IntPtr]$capacity, $buffer).ToInt64()
+        if ($copied -lt ($capacity - 1)) {
+            $value = $buffer.ToString()
+            if ($Id -eq 134) { $value = $value.Replace("`r`n", "`n") }
+            return $value
+        }
+        if ($capacity -ge 1048576) { throw "Control $Id text exceeded the verification buffer limit" }
+        $capacity *= 2
+    }
+}
+function Control-Class([int]$Id) {
+    $buffer = [Text.StringBuilder]::new(256)
+    [CivilizedVerify]::GetClassName((Control $Id), $buffer, $buffer.Capacity) | Out-Null
     return $buffer.ToString()
+}
+function Read-Combo-Item([int]$Id, [int]$Index) {
+    $length = Send-Control $Id 0x149 $Index
+    if ($length -lt 0) { throw "Combo control $Id has no item at index $Index" }
+    $capacity = [Math]::Max(1, [int]$length + 1)
+    $buffer = [Text.StringBuilder]::new($capacity)
+    $copied = [CivilizedVerify]::ReadText((Control $Id), 0x148, [IntPtr]$Index, $buffer).ToInt64()
+    if ($copied -lt 0) { throw "Could not read combo control $Id item $Index" }
+    return $buffer.ToString()
+}
+function Read-Combo-Control([int]$Id) {
+    $index = Send-Control $Id 0x147
+    if ($index -lt 0) { return '' }
+    return Read-Combo-Item $Id $index
+}
+function Notify-Control([int]$Id, [uint32]$Code) {
+    $control = Control $Id
+    [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](([long]$Id) -bor (([long]$Code) -shl 16)), $control) | Out-Null
+}
+function Set-Control-Text([int]$Id, [string]$Value) {
+    $nativeValue = if ($Id -eq 134) { $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") } else { $Value }
+    if ([CivilizedVerify]::SetText((Control $Id), 0xC, [IntPtr]::Zero, $nativeValue) -eq [IntPtr]::Zero) { throw "Could not set control $Id" }
+    if ((Read-Control $Id) -cne $Value) { throw "Control $Id did not accept its draft text" }
+    Notify-Control $Id 0x300
+}
+function Select-Combo-Index([int]$Id, [int]$Index) {
+    $count = Send-Control $Id 0x146
+    if ($Index -lt 0 -or $count -le $Index) { throw "Combo control $Id has no item at index $Index" }
+    $selected = Send-Control $Id 0x14E $Index
+    if ($selected -ne $Index) { throw "Combo control $Id did not select item $Index" }
+    Notify-Control $Id 1
+}
+function Select-Combo-Text([int]$Id, [string]$Value) {
+    if ((Control-Class $Id) -notmatch 'COMBOBOX') { throw "Control $Id is not a combo box" }
+    $count = Send-Control $Id 0x146
+    if ($count -le 0) { throw "Combo control $Id has no items" }
+    $match = -1
+    for ($index = 0; $index -lt $count; $index++) {
+        if ((Read-Combo-Item $Id $index) -ceq $Value) { $match = $index; break }
+    }
+    if ($match -lt 0) { throw "Combo control $Id does not contain '$Value'" }
+    Select-Combo-Index $Id $match
+    if ((Read-Combo-Control $Id) -cne $Value) { throw "Combo control $Id did not select '$Value'" }
+}
+function Read-Announcement-Size([int]$Id) {
+    $text = if ((Control-Class $Id) -match 'COMBOBOX') { Read-Combo-Control $Id } else { Read-Control $Id }
+    $match = [regex]::Match($text, '^\s*(\d+)\s*(?:pt|px)?\s*$')
+    if (-not $match.Success) { throw "Font size control $Id contains '$text'" }
+    return [int]$match.Groups[1].Value
+}
+function Set-Announcement-Size([int]$Id, [int]$Value) {
+    if ((Control-Class $Id) -match 'COMBOBOX') {
+        $count = Send-Control $Id 0x146
+        $match = -1
+        for ($index = 0; $index -lt $count; $index++) {
+            $item = Read-Combo-Item $Id $index
+            if ($item.Trim() -ceq [string]$Value -or $item.Trim() -cmatch "^$Value\s*(?:pt|px)$") { $match = $index; break }
+        }
+        if ($match -lt 0) { throw "Combo control $Id does not contain font size $Value" }
+        Select-Combo-Index $Id $match
+    } else {
+        Set-Control-Text $Id ([string]$Value)
+    }
+    if ((Read-Announcement-Size $Id) -ne $Value) { throw "Font size control $Id did not select $Value" }
+}
+function Set-Invalid-Announcement-Size([int]$Id) {
+    if ((Control-Class $Id) -match 'COMBOBOX') {
+        $selected = Send-Control $Id 0x14E -1
+        if ($selected -ne -1) { throw "Combo control $Id did not clear its invalid selection" }
+        Notify-Control $Id 1
+    } else {
+        Set-Control-Text $Id '0'
+    }
+}
+function Get-Installed-Fonts {
+    try { Add-Type -AssemblyName System.Drawing } catch { throw "Could not load the installed font catalog: $($_.Exception.Message)" }
+    $families = [System.Drawing.Text.InstalledFontCollection]::new().Families
+    $names = @($families | ForEach-Object { $_.Name })
+    foreach ($required in @('Consolas', 'Segoe UI')) { if (-not ($names -ccontains $required)) { throw "Required installed font '$required' is unavailable" } }
+    return $names
+}
+function Assert-Announcements-Page {
+    foreach ($id in @(130, 131, 132, 133, 134, 135)) {
+        $handle = Control $id
+        if (-not [CivilizedVerify]::IsWindowVisible($handle)) { throw "Announcements control $id is hidden" }
+    }
+    if ((Control-Class 130) -notmatch 'COMBOBOX' -or (Control-Class 132) -notmatch 'COMBOBOX') { throw 'Announcement font controls are not non-editable combo boxes' }
+    foreach ($id in @(130, 132)) { if (([CivilizedVerify]::GetWindowLongPtr((Control $id), -16).ToInt64() -band 3) -ne 3) { throw "Announcement font control $id is editable" } }
+    if ((Read-Announcement-Size 131) -le 0 -or (Read-Announcement-Size 133) -le 0) { throw 'Announcement font sizes are not positive' }
+    if ([string]::IsNullOrWhiteSpace((Read-Control 134))) { throw 'The announcement summary prompt is empty' }
+}
+function Assert-Installed-Announcement-Fonts {
+    foreach ($id in @(130, 132)) {
+        $selected = Read-Combo-Control $id
+        if (-not ($script:installedFonts -ccontains $selected)) { throw "Announcement font control $id selected an uninstalled font '$selected'" }
+    }
+}
+function Assert-Exact-Lf([string]$Name, [string]$Value) {
+    if ($Value.Contains("`r")) { throw "$Name contains CR characters" }
+    if ($Value -notmatch "`n") { throw "$Name does not contain LF lines" }
+}
+function Assert-Preserved-Preferences($Before, $After) {
+    foreach ($name in @('quietMode', 'scheduleEnabled', 'quietStart', 'quietEnd', 'volume', 'outputDevice', 'speechModel', 'defaultVoiceId')) {
+        if ($After.$name -ne $Before.$name) { throw "Apply changed existing preference $name" }
+    }
+    foreach ($name in @('claude', 'opencode')) {
+        if ($After.voices.$name -ne $Before.voices.$name) { throw "Apply changed existing voice preference $name" }
+    }
+}
+function Get-Owned-Settings-Dialog {
+    $dialog = [CivilizedVerify]::FindWindow('#32770', 'Civilized Agent settings')
+    if ($dialog -eq [IntPtr]::Zero -or -not [CivilizedVerify]::IsWindowVisible($dialog)) { return [IntPtr]::Zero }
+    [uint32]$owner = 0
+    [CivilizedVerify]::GetWindowThreadProcessId($dialog, [ref]$owner) | Out-Null
+    if ($owner -eq $process.Id) { return $dialog }
+    return [IntPtr]::Zero
+}
+function Apply-Invalid-Announcement-Draft([string]$BeforeBytes, [string]$ExpectedStatus, [string]$Description) {
+    Post-Control 107 0xF5
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    $status = ''
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ((Get-Owned-Settings-Dialog) -ne [IntPtr]::Zero) { throw "$Description opened a modal dialog" }
+        $status = Read-Control 109
+        if ($status -match $ExpectedStatus) { break }
+        if ((Get-Content $settingsPath -Raw) -ne $BeforeBytes) { throw "$Description changed the saved settings" }
+        Start-Sleep -Milliseconds 50
+    }
+    if ($status -notmatch $ExpectedStatus) { throw "$Description did not report a validation status: '$status'" }
+    if ((Get-Content $settingsPath -Raw) -ne $BeforeBytes) { throw "$Description changed the saved settings" }
+    Write-Output "$Description rejected without a modal dialog: $status"
 }
 function Select-Page([int]$Index) {
     Send-Control 200 0x100 0x24 | Out-Null
@@ -57,7 +214,14 @@ function Select-Page([int]$Index) {
 }
 function Snapshot([string]$Name) {
     $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); voicePreview = (Read-Control 210); voiceId = (Read-Control 216); model = (Send-Control 113 0x147) }
-    $state | ConvertTo-Json | Set-Content (Join-Path $evidencePath "$Name.json") -Encoding utf8NoBOM
+    $bodyFont = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, 130)
+    if ($bodyFont -ne [IntPtr]::Zero) {
+        $state.announcementBodyFont = [ordered]@{ family = (Read-Combo-Control 130); size = (Read-Announcement-Size 131) }
+        $state.announcementTitleFont = [ordered]@{ family = (Read-Combo-Control 132); size = (Read-Announcement-Size 133) }
+        $state.summaryPrompt = (Read-Control 134)
+        $state.announcementControls = [ordered]@{ bodyFamilyVisible = [bool][CivilizedVerify]::IsWindowVisible($bodyFont); bodySizeVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 131)); titleFamilyVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 132)); titleSizeVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 133)); promptVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 134)); resetVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 135)) }
+    }
+    $state | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $evidencePath "$Name.json") -Encoding utf8NoBOM
     return $state
 }
 function Launch {
@@ -91,8 +255,9 @@ try {
     $transcribing = $true
     $binaryHash = (Get-FileHash $binary).Hash
     $settingsPath = Join-Path $scratch 'settings.json'
-    @{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 0; outputDevice = 'unavailable-verification-device'; voices = @{ claude = 'Mark' } } | ConvertTo-Json | Set-Content $settingsPath -Encoding utf8NoBOM
+    @{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 0; outputDevice = 'unavailable-verification-device'; speechModel = 'eleven_flash_v2_5'; defaultVoiceId = 'JBFqnCBsd6RMkjVDRZzb'; voices = @{ claude = 'Mark'; opencode = 'Luna' } } | ConvertTo-Json | Set-Content $settingsPath -Encoding utf8NoBOM
     Copy-Item $settingsPath (Join-Path $evidencePath 'settings-before.json')
+    $beforeSettings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
     $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
@@ -122,6 +287,11 @@ try {
     }
     Write-Output "Launch: $binary --settings; feature=$Feature; audible=$Audible"
     Launch
+    if ($Feature -eq 'Announcements') {
+        $script:installedFonts = Get-Installed-Fonts
+        Select-Page 5
+        Assert-Announcements-Page
+    }
     $before = Snapshot 'controls-before'
     if ($Feature -eq 'Output') {
         Write-Output 'Check unavailable device uses system default; Refresh devices; Apply.'
@@ -243,6 +413,67 @@ try {
             if ((Read-Control 109) -ne 'Preview stopped.') { throw 'Preview did not stop' }
         }
         if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Preview saved unapplied settings' }
+    } elseif ($Feature -eq 'Announcements') {
+        $customPrompt = [string]::Join("`n", @('Custom first line.', 'Summarize {{status}}.', 'Report data {{report}}'))
+        $longPrompt = 'Long prompt ' + ('x' * 700) + ' {{status}} {{report}}' + "`nSummarize {{status}}.`nReport data {{report}}"
+        $missingReportPrompt = [string]::Join("`n", @('Custom first line.', 'Summarize {{status}}.'))
+        Write-Output 'Select Announcements; reset the default prompt; close without Apply; confirm the reset was discarded.'
+        Select-Page 5
+        Assert-Announcements-Page
+        $resetBytes = Get-Content $settingsPath -Raw
+        Send-Control 135 0xF5 | Out-Null
+        $defaultPrompt = Read-Control 134
+        if ([string]::IsNullOrWhiteSpace($defaultPrompt) -or $defaultPrompt -notmatch '\{\{status\}\}' -or $defaultPrompt -notmatch '\{\{report\}\}') { throw 'Reset did not populate the full editable default prompt' }
+        Assert-Exact-Lf 'Reset prompt' $defaultPrompt
+        Snapshot 'controls-reset' | Out-Null
+        if ((Get-Content $settingsPath -Raw) -ne $resetBytes) { throw 'Reset changed the saved settings before Apply' }
+        Set-Control-Text 134 $customPrompt
+        Close-Settings
+        if ((Get-Content $settingsPath -Raw) -ne $resetBytes) { throw 'Close saved the reset prompt without Apply' }
+        Launch
+        Select-Page 5
+        Assert-Announcements-Page
+        Write-Output 'Choose installed Consolas and Segoe UI fonts; set sizes 22 and 12; enter the custom LF prompt.'
+        Select-Combo-Text 130 'Consolas'
+        Set-Announcement-Size 131 22
+        Select-Combo-Text 132 'Segoe UI'
+        Set-Announcement-Size 133 12
+        Assert-Installed-Announcement-Fonts
+        Set-Control-Text 134 $longPrompt
+        $longRead = Read-Control 134
+        if ($longRead.Length -le 512 -or $longRead -cne $longPrompt) { throw 'Dynamic Read-Control did not return the complete prompt longer than 512 characters' }
+        Assert-Exact-Lf 'Long prompt' $longRead
+        Snapshot 'controls-long-prompt' | Out-Null
+        Write-Output 'Insert a 16384-character prompt with emoji through the edit control and Apply.'
+        $unicodePrompt = ([char]::ConvertFromUtf32(0x1f600) * 16374) + '{{report}}'
+        Set-Control-Text 134 ''
+        [CivilizedVerify]::SetText((Control 134), 0xC2, [IntPtr]1, $unicodePrompt) | Out-Null
+        if ((Read-Control 134) -cne $unicodePrompt) { throw 'The editor truncated a valid Unicode prompt at the character limit' }
+        Send-Control 107 0xF5 | Out-Null
+        if ((Get-Content $settingsPath -Raw | ConvertFrom-Json).summaryPrompt -cne $unicodePrompt) { throw 'The maximum-length Unicode prompt was not saved' }
+        $unicodeSaved = Get-Content $settingsPath -Raw
+        Set-Control-Text 134 ($unicodePrompt + 'x')
+        Apply-Invalid-Announcement-Draft $unicodeSaved '(?i)(16384|characters)' 'Oversized Unicode prompt'
+        Set-Control-Text 134 $customPrompt
+        Assert-Exact-Lf 'Custom prompt' (Read-Control 134)
+        if ((Send-Control 134 0xBA) -ne 3) { throw 'The multiline prompt did not display its three separate lines' }
+        $beforeInvalid = Get-Content $settingsPath -Raw
+        Write-Output 'Reject an invalid body size without saving or showing a modal dialog.'
+        Set-Invalid-Announcement-Size 131
+        Apply-Invalid-Announcement-Draft $beforeInvalid '(?i)(size|font)' 'Invalid font size'
+        Set-Announcement-Size 131 22
+        Write-Output 'Reject a summary prompt without {{report}} without saving or showing a modal dialog.'
+        Set-Control-Text 134 $missingReportPrompt
+        Apply-Invalid-Announcement-Draft $beforeInvalid '(?i)(report|prompt)' 'Missing report placeholder'
+        Set-Control-Text 134 $customPrompt
+        Assert-Exact-Lf 'Custom prompt' (Read-Control 134)
+        Snapshot 'controls-draft' | Out-Null
+        Send-Control 107 0xF5 | Out-Null
+        $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        if ((Read-Control 109) -ne 'Saved. Changes apply to the next announcement.') { throw 'Announcement Apply did not report saved state' }
+        if ($settings.announcementBodyFont.family -cne 'Consolas' -or [int]$settings.announcementBodyFont.size -ne 22 -or $settings.announcementTitleFont.family -cne 'Segoe UI' -or [int]$settings.announcementTitleFont.size -ne 12 -or $settings.summaryPrompt -cne $customPrompt) { throw 'Applied announcement settings did not persist' }
+        Assert-Exact-Lf 'Persisted summary prompt' ([string]$settings.summaryPrompt)
+        Assert-Preserved-Preferences $beforeSettings $settings
     } else {
         Write-Output 'Set quiet hours to 22:30 and 08:15; choose 35% volume and ElevenLabs v4; Apply.'
         Select-Page 2
@@ -265,25 +496,49 @@ try {
     Snapshot 'controls-after' | Out-Null
     Copy-Item $settingsPath (Join-Path $evidencePath 'settings-after.json')
     $applied = Get-Content $settingsPath -Raw
-    Write-Output 'Change volume to 15% without Apply; Close; confirm disk unchanged.'
-    Select-Page 1
-    Send-Control 105 0x405 1 15 | Out-Null
-    Close-Settings
-    if ((Get-Content $settingsPath -Raw) -ne $applied) { throw 'Close saved an unapplied edit' }
-    Write-Output 'Reopen settings; read controls from the new window.'
-    Launch
-    $reopened = Snapshot 'controls-reopened'
-    $persisted = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if ($reopened.volume -ne $persisted.volume -or $reopened.quiet -ne [int]$persisted.quietMode -or $reopened.schedule -ne [int]$persisted.scheduleEnabled) { throw 'Saved state did not survive reopening' }
-    if ($Feature -eq 'Settings' -or $Feature -eq 'Quiet') {
-        Select-Page 2
-        Snapshot 'controls-reopened-quiet' | Out-Null
-        if ((Read-Control 103) -ne '22:30' -or (Read-Control 104) -ne '08:15') { throw 'Saved schedule did not survive reopening' }
-        Select-Page 3
-        Snapshot 'controls-reopened-speech' | Out-Null
-        if ((Send-Control 113 0x147) -ne 1) { throw 'Saved speech model did not survive reopening' }
+    if ($Feature -eq 'Announcements') {
+        Write-Output 'Change body and title sizes and the prompt without Apply; Close; confirm disk unchanged.'
+        Select-Page 5
+        Assert-Announcements-Page
+        Set-Announcement-Size 131 18
+        Set-Announcement-Size 133 14
+        $unappliedPrompt = [string]::Join("`n", @('Unapplied first line.', 'Summarize {{status}}.', 'Report data {{report}}'))
+        Set-Control-Text 134 $unappliedPrompt
+        Assert-Exact-Lf 'Unapplied prompt' (Read-Control 134)
+        Snapshot 'controls-unapplied' | Out-Null
+        Close-Settings
+        if ((Get-Content $settingsPath -Raw) -ne $applied) { throw 'Close saved unapplied announcement edits' }
+        Write-Output 'Reopen settings; select Announcements and verify the applied values.'
+        Launch
+        Select-Page 5
+        Assert-Announcements-Page
+        Assert-Installed-Announcement-Fonts
+        $reopened = Snapshot 'controls-reopened'
+        $persisted = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        if ($reopened.announcementBodyFont.family -cne 'Consolas' -or $reopened.announcementBodyFont.size -ne 22 -or $reopened.announcementTitleFont.family -cne 'Segoe UI' -or $reopened.announcementTitleFont.size -ne 12 -or $reopened.summaryPrompt -cne $customPrompt) { throw 'Reopening did not restore the applied announcement settings' }
+        if ($persisted.summaryPrompt -cne $customPrompt) { throw 'Reopening did not preserve the saved summary prompt' }
+        Assert-Exact-Lf 'Reopened prompt' $reopened.summaryPrompt
+    } else {
+        Write-Output 'Change volume to 15% without Apply; Close; confirm disk unchanged.'
+        Select-Page 1
+        Send-Control 105 0x405 1 15 | Out-Null
+        Close-Settings
+        if ((Get-Content $settingsPath -Raw) -ne $applied) { throw 'Close saved an unapplied edit' }
+        Write-Output 'Reopen settings; read controls from the new window.'
+        Launch
+        $reopened = Snapshot 'controls-reopened'
+        $persisted = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        if ($reopened.volume -ne $persisted.volume -or $reopened.quiet -ne [int]$persisted.quietMode -or $reopened.schedule -ne [int]$persisted.scheduleEnabled) { throw 'Saved state did not survive reopening' }
+        if ($Feature -eq 'Settings' -or $Feature -eq 'Quiet') {
+            Select-Page 2
+            Snapshot 'controls-reopened-quiet' | Out-Null
+            if ((Read-Control 103) -ne '22:30' -or (Read-Control 104) -ne '08:15') { throw 'Saved schedule did not survive reopening' }
+            Select-Page 3
+            Snapshot 'controls-reopened-speech' | Out-Null
+            if ((Send-Control 113 0x147) -ne 1) { throw 'Saved speech model did not survive reopening' }
+        }
+        if ($Feature -eq 'Output' -and ($reopened.outputIndex -ne 0 -or $reopened.output -ne 'System default')) { throw 'Default output did not survive reopening' }
     }
-    if ($Feature -eq 'Output' -and ($reopened.outputIndex -ne 0 -or $reopened.output -ne 'System default')) { throw 'Default output did not survive reopening' }
     Close-Settings
     @{ passed = $true; feature = $Feature; audible = [bool]$Audible; exitCode = $process.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'result.json')
     Write-Output "PASS: $Feature; evidence: $evidencePath"

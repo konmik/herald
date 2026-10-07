@@ -1,10 +1,14 @@
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 use fontdue::Font;
 use image::RgbaImage;
-use std::path::PathBuf;
+use crate::settings::{FontPreference, Settings};
 
 pub struct Renderer {
-    font: Font,
+    catalog: crate::fonts::FontCatalog,
+    body_font: Font,
+    title_font: Font,
+    body_preference: FontPreference,
+    title_preference: FontPreference,
     pub text: String,
     pub title: String,
     pub text_interference: f32,
@@ -20,33 +24,22 @@ struct TextBlock<'a> {
 }
 
 impl Renderer {
+    #[cfg(test)]
     pub fn new() -> Result<Self, String> {
-        let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
-            let directory = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-            vec![
-                PathBuf::from(&directory).join("Fonts/GOTHIC.TTF"),
-                PathBuf::from(directory).join("Fonts/segoeui.ttf"),
-            ]
-        } else if cfg!(target_os = "macos") {
-            vec![
-                "/Library/Fonts/Century Gothic.ttf".into(),
-                "/System/Library/Fonts/Supplemental/Arial.ttf".into(),
-            ]
-        } else {
-            vec![
-                "/usr/share/fonts/truetype/msttcorefonts/Century_Gothic.ttf".into(),
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into(),
-                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf".into(),
-            ]
-        };
-        let bytes = candidates
-            .into_iter()
-            .find_map(|path| std::fs::read(path).ok())
-            .ok_or("No system font found")?;
-        let font =
-            Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(str::to_owned)?;
+        let settings = Settings::default();
+        Self::with_settings(&settings)
+    }
+
+    pub fn with_settings(settings: &Settings) -> Result<Self, String> {
+        let catalog = crate::fonts::FontCatalog::new()?;
+        let body_font = catalog.get(&settings.announcement_body_font.family);
+        let title_font = catalog.get(&settings.announcement_title_font.family);
         Ok(Self {
-            font,
+            catalog,
+            body_font,
+            title_font,
+            body_preference: settings.announcement_body_font.clone(),
+            title_preference: settings.announcement_title_font.clone(),
             text: String::new(),
             title: String::new(),
             text_interference: 0.0,
@@ -54,13 +47,27 @@ impl Renderer {
         })
     }
 
+    pub fn set_preferences(&mut self, body: &FontPreference, title: &FontPreference) {
+        if &self.body_preference == body && &self.title_preference == title { return; }
+        self.body_preference = body.clone();
+        self.title_preference = title.clone();
+        self.body_font = self.catalog.get(&body.family);
+        self.title_font = self.catalog.get(&title.family);
+    }
+
+    #[cfg(test)]
+    pub fn body_preference(&self) -> &FontPreference { &self.body_preference }
+
+    #[cfg(test)]
+    pub fn title_preference(&self) -> &FontPreference { &self.title_preference }
+
     pub fn message_height(&self) -> u32 {
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         layout.reset(&LayoutSettings {
             max_width: Some(268.0),
             ..LayoutSettings::default()
         });
-        layout.append(&[&self.font], &TextStyle::new(&self.text, 18.0, 0));
+        layout.append(&[&self.body_font], &TextStyle::new(&self.text, f32::from(self.body_preference.size), 0));
         layout.height().ceil() as u32
     }
 
@@ -70,6 +77,7 @@ impl Renderer {
         width: usize,
         height: usize,
         scale: f32,
+        font: &Font,
         block: TextBlock<'_>,
     ) {
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
@@ -80,14 +88,14 @@ impl Renderer {
             ..LayoutSettings::default()
         });
         layout.append(
-            &[&self.font],
+            &[font],
             &TextStyle::new(block.text, block.size * scale, 0),
         );
         for glyph in layout.glyphs() {
             if glyph.y + glyph.height as f32 > block.max_height * scale {
                 continue;
             }
-            let (_, pixels) = self.font.rasterize_config(glyph.key);
+            let (_, pixels) = font.rasterize_config(glyph.key);
             for row in 0..glyph.height {
                 for column in 0..glyph.width {
                     let mut x = glyph.x as i32 + column as i32;
@@ -146,10 +154,11 @@ impl Renderer {
             width,
             height,
             scale,
+            &self.body_font,
             TextBlock {
                 text: &self.text,
                 y: 26.0,
-                size: 18.0,
+                size: f32::from(self.body_preference.size),
                 color: 0xeef2f7,
                 max_height: title_y - 10.0,
             },
@@ -157,7 +166,7 @@ impl Renderer {
         let mut title = self.title.clone();
         while title
             .chars()
-            .map(|c| self.font.metrics(c, 14.0).advance_width)
+            .map(|c| self.title_font.metrics(c, f32::from(self.title_preference.size)).advance_width)
             .sum::<f32>()
             > 268.0
         {
@@ -175,12 +184,13 @@ impl Renderer {
             width,
             height,
             scale,
+            &self.title_font,
             TextBlock {
                 text: &title,
                 y: title_y,
-                size: 14.0,
+                size: f32::from(self.title_preference.size),
                 color: 0x9daabd,
-                max_height: title_y + 22.0,
+                max_height: title_y + f32::from(self.title_preference.size) + 8.0,
             },
         );
         shade_bubble_scanlines(buffer, width, height, scale, logical_height - 152.0);
@@ -688,5 +698,39 @@ mod tests {
                 .unwrap()
         };
         assert!((120..210).any(|y| peak(&clean, y).abs_diff(peak(&distorted, y)) >= 5));
+    }
+
+    #[test]
+    fn separate_font_sizes_change_body_height_and_preserve_unavailable_preferences() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = "A message that wraps across more than one line.".into();
+        let body = FontPreference::new("Unavailable body family", 32);
+        let title = FontPreference::new("Unavailable title family", 8);
+        renderer.set_preferences(&body, &title);
+        let large_height = renderer.message_height();
+        assert_eq!(renderer.body_preference(), &body);
+        assert_eq!(renderer.title_preference(), &title);
+        renderer.set_preferences(&FontPreference::new("Unavailable body family", 8), &FontPreference::new("Unavailable title family", 32));
+        assert!(renderer.message_height() < large_height);
+        assert_eq!(renderer.body_preference().family, "Unavailable body family");
+        assert_eq!(renderer.title_preference().family, "Unavailable title family");
+    }
+
+    #[test]
+    fn title_font_size_changes_title_rendering_without_changing_message_height() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = "Message".into();
+        renderer.title = "A title".into();
+        let mut small = vec![0; 320 * 240];
+        renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 8));
+        let height = renderer.message_height();
+        renderer.draw(&mut small, 320, 240, 1.0, None, 0.0);
+        let mut large = vec![0; 320 * 240];
+        renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 32));
+        assert_eq!(renderer.message_height(), height);
+        renderer.seed = 567891;
+        renderer.draw(&mut large, 320, 240, 1.0, None, 0.0);
+        assert_eq!(&small[..320 * 52], &large[..320 * 52]);
+        assert_ne!(&small[320 * 52..320 * 92], &large[320 * 52..320 * 92]);
     }
 }

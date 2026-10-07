@@ -5,6 +5,7 @@ mod capture;
 mod audio;
 mod characters;
 mod elevenlabs;
+mod fonts;
 mod history;
 mod platform;
 mod private;
@@ -227,7 +228,7 @@ fn run() -> Result<(), String> {
     let context = softbuffer::Context::new(window.clone()).map_err(|e| e.to_string())?;
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
-    let mut renderer = Renderer::new()?;
+    let mut renderer = Renderer::with_settings(&settings_store.current)?;
     let local = chrono::Local::now();
     let preload_speech = settings_store.current.volume > 0
         && !settings_store.current.quiet_at(local.hour() * 60 + local.minute())
@@ -286,6 +287,9 @@ fn run() -> Result<(), String> {
                         Ok(true) => {
                             speech.set_volume(settings_store.current.volume);
                             signal.stop();
+                            if matches!(&current, Presentation::Idle) {
+                                renderer.set_preferences(&settings_store.current.announcement_body_font, &settings_store.current.announcement_title_font);
+                            }
                         }
                         Err(error) => state::log(&data, format!("Settings: {error}")),
                         _ => {}
@@ -340,6 +344,7 @@ fn run() -> Result<(), String> {
                     }
                 }
                 if activation.is_none() && matches!(current, Presentation::Idle) {
+                    renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
                         renderer.text = notification.text.clone();

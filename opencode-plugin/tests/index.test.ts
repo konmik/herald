@@ -7,6 +7,7 @@ type Event = { type: string; id: string; created: number; data: Record<string, u
 type Session = { id: string; parentID?: string; outcome?: string; location: { directory: string }; title: string }
 const commands: Record<string, unknown>[] = []
 const generated: string[] = []
+const generatedPrompts: string[] = []
 const spawned: string[][] = []
 const binary = process.env.CIVILIZED_AGENT_BINARY
 process.env.CIVILIZED_AGENT_BINARY = process.execPath
@@ -38,8 +39,10 @@ test("an installed OpenCode package ignores a checkout executable override", asy
   try {
     delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
     mkdirSync(join(directory, "opencode-plugin"))
+    mkdirSync(join(directory, "claude-plugin", "scripts"), { recursive: true })
     const source = fileURLToPath(new URL("..", import.meta.url))
     for (const name of readdirSync(source).filter(name => name.endsWith(".ts"))) copyFileSync(join(source, name), join(directory, "opencode-plugin", name))
+    copyFileSync(fileURLToPath(new URL("../../claude-plugin/scripts/summary-prompt.mjs", import.meta.url)), join(directory, "claude-plugin", "scripts", "summary-prompt.mjs"))
     writeFileSync(join(directory, "bundle-manifest.json"), "{}")
     const { default: installed } = await import(pathToFileURL(join(directory, "opencode-plugin/index.ts")).href)
     await expect(installed.setup({})).rejects.toThrow("Reinstall the application bundle")
@@ -53,6 +56,7 @@ test("an installed OpenCode package ignores a checkout executable override", asy
 async function fixture(stored?: unknown, minimumSeconds = 0) {
   commands.length = 0
   generated.length = 0
+  generatedPrompts.length = 0
   spawned.length = 0
   discovered = true
   serverPID = process.pid
@@ -61,6 +65,7 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
   const shells = new Map<string, { id: string; status: string; directory: string; metadata: { sessionID: string } }>()
   const inbox = new Map<string, unknown[]>()
   let finalReply = true
+  let reportTexts = ["Done."]
   let pageSize = 100
   let snapshot: unknown
   const queue: { event: Event; resolve: () => void }[] = []
@@ -80,8 +85,8 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
       },
       active: async () => Object.fromEntries([...active].map((id) => [id, { type: "running" }])),
       inbox: { list: async ({ sessionID }: { sessionID: string }) => inbox.get(sessionID) ?? [] },
-      context: async () => finalReply ? [{ type: "assistant", finish: "stop", content: [{ type: "text", text: "Done." }] }] : [],
-      generate: async ({ sessionID }: { sessionID: string }) => { generated.push(sessionID); return { text: "Root completed." } },
+      context: async () => finalReply ? reportTexts.map((text) => ({ type: "assistant", finish: "stop", content: [{ type: "text", text }] })) : [],
+      generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }) => { generated.push(sessionID); generatedPrompts.push(prompt); return { text: "Root completed." } },
     },
     shell: { list: async ({ location }: { location: { directory: string } }) => ({ data: [...shells.values()].filter((shell) => shell.directory === location.directory) }) },
   }
@@ -120,9 +125,76 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
   }
   const start = () => emit("session.inbox.enqueued", "root", 0, { item: { type: "user" } })
   const finish = (at = 70_000) => emit("session.execution.succeeded", "root", at)
+  const fail = (at = 70_000) => emit("session.execution.failed", "root", at)
   const notices = () => commands.filter((command) => command.type === "notify")
-  return { sessions, active, shells, inbox, emit, child, start, finish, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, paginate: () => { pageSize = 1 } }
+  return { sessions, session: client.session, active, shells, inbox, emit, child, start, finish, fail, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, setReports: (texts: string[]) => { reportTexts = texts }, paginate: () => { pageSize = 1 } }
 }
+
+test("cancels generation during report loading and allows the next summary", async () => {
+  const f = await fixture()
+  const context = f.session.context
+  let reads = 0
+  let release!: () => void
+  let loaded!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const loading = new Promise<void>(resolve => { loaded = resolve })
+  const reader = spyOn(f.session, "context").mockImplementation(async () => {
+    if (++reads === 2) {
+      loaded()
+      await waiting
+    }
+    return context()
+  })
+  try {
+    await f.start()
+    await f.finish()
+    await loading
+    await f.emit("session.inbox.enqueued", "root", 80_000, { item: { type: "user" } })
+    release()
+    await Bun.sleep(0)
+    expect(generated).toEqual([])
+    await f.finish(150_000)
+    expect(generated).toEqual(["root"])
+    expect(f.notices()).toMatchObject([{ type: "notify", sessionID: "root", text: "Root completed." }])
+  } finally {
+    release()
+    reader.mockRestore()
+    await f.cleanup()
+  }
+})
+
+test("generates from the latest assistant report and rereads the saved prompt", async () => {
+  const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
+  mkdirSync(temporary, { recursive: true })
+  const data = mkdtempSync(join(temporary, "summary-prompt-"))
+  const previousData = process.env.CIVILIZED_AGENT_DATA
+  const firstPrompt = "First line {{status}}\nUnicode: Ω 😀\nReport: {{report}}\nUnknown: {{future}}"
+  const secondPrompt = "Second {{status}} {{report}}"
+  try {
+    process.env.CIVILIZED_AGENT_DATA = data
+    writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: firstPrompt }))
+    const f = await fixture()
+    try {
+      f.setReports(["Old report.", "Latest {{status}} {{report}}."])
+      await f.start()
+      await f.finish()
+      expect(generatedPrompts).toEqual(['First line completed\nUnicode: Ω 😀\nReport: "Latest {{status}} {{report}}."\nUnknown: {{future}}'])
+      writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: secondPrompt }))
+      f.setReports(["结果 😀"])
+      await f.start()
+      await f.fail(80_000)
+      expect(generatedPrompts).toEqual([
+        'First line completed\nUnicode: Ω 😀\nReport: "Latest {{status}} {{report}}."\nUnknown: {{future}}',
+        'Second failed "结果 😀"',
+      ])
+      expect(generated).toEqual(["root", "root"])
+    } finally { await f.cleanup() }
+  } finally {
+    if (previousData === undefined) delete process.env.CIVILIZED_AGENT_DATA
+    else process.env.CIVILIZED_AGENT_DATA = previousData
+    rmSync(data, { recursive: true, force: true })
+  }
+})
 
 test("queries nested cross-location work even when its start events were missed", async () => {
   const f = await fixture()

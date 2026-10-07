@@ -34,7 +34,7 @@ try {
             $env:CARGO_TARGET_DIR = $target
             Invoke-Checked 'cargo' @('build', '--release', '--locked', '--target', $rustTarget, '-j', '6', '--manifest-path', (Join-Path $root 'native-announcer/Cargo.toml'))
         } finally { $env:CARGO_TARGET_DIR = $oldTarget }
-        foreach ($name in @('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts', 'scripts/bridge.mjs', 'scripts/runtime.mjs', 'scripts/session-title.mjs')) {
+        foreach ($name in @('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts', 'scripts/bridge.mjs', 'scripts/runtime.mjs', 'scripts/session-title.mjs', 'scripts/summary-prompt.mjs')) {
             $destination = Join-Path $stage "claude-plugin/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination $destination -Recurse -Force

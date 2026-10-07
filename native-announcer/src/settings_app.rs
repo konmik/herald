@@ -8,7 +8,7 @@ mod native {
     use crate::audio::OutputDevice;
     use crate::characters::{validate_registry, Character, CharacterVoice};
     use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
-    use crate::settings::{format_time, parse_time, Settings};
+    use crate::settings::{format_time, parse_time, FontPreference, Settings, MAX_FONT_SIZE, MIN_FONT_SIZE, DEFAULT_SUMMARY_PROMPT};
     use chrono::Timelike;
     use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
@@ -47,6 +47,12 @@ mod native {
     const DEFAULT_VOICE_ID_HINT: i32 = 123;
     const OFFLINE_STATUS: i32 = 124;
     const OFFLINE_INSTALL: i32 = 125;
+    const BODY_FONT: i32 = 130;
+    const BODY_SIZE: i32 = 131;
+    const TITLE_FONT: i32 = 132;
+    const TITLE_SIZE: i32 = 133;
+    const SUMMARY_PROMPT: i32 = 134;
+    const RESET_DEFAULT: i32 = 135;
     const SIDEBAR: i32 = 200;
     const CHARACTER_LIST: i32 = 201;
     const NEW_CHARACTER: i32 = 202;
@@ -68,6 +74,12 @@ mod native {
     const VIDEO_LABEL: i32 = 313;
     const PAGE_TITLE: i32 = 400;
     const PAGE_HINT: i32 = 401;
+    const BODY_FONT_LABEL: i32 = 330;
+    const BODY_SIZE_LABEL: i32 = 331;
+    const TITLE_FONT_LABEL: i32 = 332;
+    const TITLE_SIZE_LABEL: i32 = 333;
+    const SUMMARY_PROMPT_LABEL: i32 = 334;
+    const SUMMARY_PROMPT_HINT: i32 = 335;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
     const VOICE_EXAMPLE: &str = "I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.";
 
@@ -78,6 +90,7 @@ mod native {
         QuietHours,
         SpeechService,
         OfflineVoice,
+        Announcements,
     }
 
     impl Page {
@@ -138,8 +151,22 @@ mod native {
         USAGE_REFRESH,
         MY_VOICES,
     ];
+    const ANNOUNCEMENTS_PAGE_CONTROLS: &[i32] = &[
+        BODY_FONT_LABEL,
+        BODY_FONT,
+        BODY_SIZE_LABEL,
+        BODY_SIZE,
+        TITLE_FONT_LABEL,
+        TITLE_FONT,
+        TITLE_SIZE_LABEL,
+        TITLE_SIZE,
+        SUMMARY_PROMPT_LABEL,
+        SUMMARY_PROMPT,
+        SUMMARY_PROMPT_HINT,
+        RESET_DEFAULT,
+    ];
 
-    static PAGE_SPECS: [PageSpec; 5] = [
+    static PAGE_SPECS: [PageSpec; 6] = [
         PageSpec {
             page: Page::Characters,
             label: "Characters",
@@ -169,6 +196,12 @@ mod native {
             label: "Offline voice",
             hint: "Install Kitten CPU speech for use without ElevenLabs or an internet connection.",
             controls: &[OFFLINE_STATUS, OFFLINE_INSTALL],
+        },
+        PageSpec {
+            page: Page::Announcements,
+            label: "Announcements",
+            hint: "Choose announcement fonts, sizes, and the completed-task summary prompt.",
+            controls: ANNOUNCEMENTS_PAGE_CONTROLS,
         },
     ];
 
@@ -259,6 +292,7 @@ mod native {
         updating: bool,
         active_page: Page,
         ui: UiResources,
+        font_families: Vec<String>,
     }
 
     fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
@@ -277,6 +311,17 @@ mod native {
         let mut buffer = vec![0u16; GetWindowTextLengthW(control) as usize + 1];
         let length = GetWindowTextW(control, buffer.as_mut_ptr(), buffer.len() as i32);
         String::from_utf16_lossy(&buffer[..length as usize])
+    }
+
+    unsafe fn combo_text(window: HWND, id: i32) -> String {
+        let combo = GetDlgItem(window, id);
+        let index = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if index < 0 { return text(window, id); }
+        let length = SendMessageW(combo, CB_GETLBTEXTLEN, index as usize, 0);
+        if length < 0 { return String::new(); }
+        let mut buffer = vec![0u16; length as usize + 1];
+        let length = SendMessageW(combo, CB_GETLBTEXT, index as usize, buffer.as_mut_ptr() as isize);
+        if length < 0 { String::new() } else { String::from_utf16_lossy(&buffer[..length as usize]) }
     }
 
     unsafe fn label(window: HWND, id: i32, value: &str) {
@@ -508,6 +553,39 @@ mod native {
         SendMessageW(sidebar, LB_SETCURSEL, form.active_page.index(), 0);
     }
 
+    unsafe fn populate_font_combo(window: HWND, id: i32, families: &[String], selected: &str) {
+        let combo = GetDlgItem(window, id);
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        let mut selected_index = -1;
+        let mut values = families.to_vec();
+        if !values.iter().any(|family| family == selected) {
+            values.insert(0, selected.to_owned());
+        }
+        for (index, family) in values.iter().enumerate() {
+            SendMessageW(combo, CB_ADDSTRING, 0, wide(family).as_ptr() as isize);
+            if family == selected { selected_index = index as isize; }
+        }
+        if selected_index >= 0 { SendMessageW(combo, CB_SETCURSEL, selected_index as usize, 0); }
+    }
+
+    unsafe fn populate_size_combo(window: HWND, id: i32, selected: u16) {
+        let combo = GetDlgItem(window, id);
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        for size in MIN_FONT_SIZE..=MAX_FONT_SIZE {
+            SendMessageW(combo, CB_ADDSTRING, 0, wide(&size.to_string()).as_ptr() as isize);
+        }
+        let index = selected.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) - MIN_FONT_SIZE;
+        SendMessageW(combo, CB_SETCURSEL, index as usize, 0);
+    }
+
+    unsafe fn populate_announcement_controls(window: HWND, form: &Form, body: &FontPreference, title: &FontPreference, prompt: &str) {
+        populate_font_combo(window, BODY_FONT, &form.font_families, &body.family);
+        populate_size_combo(window, BODY_SIZE, body.size);
+        populate_font_combo(window, TITLE_FONT, &form.font_families, &title.family);
+        populate_size_combo(window, TITLE_SIZE, title.size);
+        label(window, SUMMARY_PROMPT, &prompt.replace("\r\n", "\n").replace('\n', "\r\n"));
+    }
+
     unsafe fn populate_outputs(window: HWND, form: &mut Form, selected: Option<&str>) {
         let output = GetDlgItem(window, OUTPUT);
         SendMessageW(output, CB_RESETCONTENT, 0, 0);
@@ -536,6 +614,10 @@ mod native {
         }
     }
 
+    unsafe fn selected_size(window: HWND, id: i32, label: &str) -> Result<u16, String> {
+        combo_text(window, id).parse::<u16>().ok().filter(|size| (MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(size)).ok_or_else(|| format!("{label} font size must be between {MIN_FONT_SIZE} and {MAX_FONT_SIZE} logical pixels."))
+    }
+
     unsafe fn read_speech_settings(window: HWND, form: &Form) -> Settings {
         let mut settings = form.settings.clone();
         settings.volume = SendMessageW(GetDlgItem(window, VOLUME), TBM_GETPOS, 0, 0) as u16;
@@ -555,6 +637,9 @@ mod native {
         settings.quiet_start = parse_time(&text(window, START), false)?;
         settings.quiet_end = parse_time(&text(window, END), true)?;
         settings.selected_character = form.selected_character.clone();
+        settings.announcement_body_font = FontPreference::new(combo_text(window, BODY_FONT), selected_size(window, BODY_SIZE, "Announcement body")?);
+        settings.announcement_title_font = FontPreference::new(combo_text(window, TITLE_FONT), selected_size(window, TITLE_SIZE, "Announcement title")?);
+        settings.summary_prompt = text(window, SUMMARY_PROMPT).replace("\r\n", "\n");
         if let Some(id) = settings.selected_character.clone() {
             if let Some(draft) = form.drafts.get(&id) {
                 settings.characters.insert(id, draft.clone());
@@ -862,6 +947,23 @@ mod native {
         move_control(OFFLINE_STATUS, main_left, 128, main_width, 160);
         move_control(OFFLINE_INSTALL, main_left, 308, 150, 34);
 
+        let announcement_size_x = main_right - 120;
+        let announcement_value_width = (announcement_size_x - main_left - 16).max(100);
+        move_control(BODY_FONT_LABEL, main_left, 128, announcement_value_width, 24);
+        move_control(BODY_SIZE_LABEL, announcement_size_x, 128, 120, 24);
+        move_control(BODY_FONT, main_left, 158, announcement_value_width, 220);
+        move_control(BODY_SIZE, announcement_size_x, 158, 120, 220);
+        move_control(TITLE_FONT_LABEL, main_left, 214, announcement_value_width, 24);
+        move_control(TITLE_SIZE_LABEL, announcement_size_x, 214, 120, 24);
+        move_control(TITLE_FONT, main_left, 244, announcement_value_width, 220);
+        move_control(TITLE_SIZE, announcement_size_x, 244, 120, 220);
+        move_control(SUMMARY_PROMPT_LABEL, main_left, 300, main_width - 144, 24);
+        move_control(RESET_DEFAULT, main_right - 132, 296, 132, 34);
+        let prompt_y = 332;
+        let prompt_height = (footer_y - prompt_y - 72).max(100);
+        move_control(SUMMARY_PROMPT, main_left, prompt_y, main_width, prompt_height);
+        move_control(SUMMARY_PROMPT_HINT, main_left, prompt_y + prompt_height + 8, main_width, 56);
+
         move_control(STATUS, 24, height - 96, width - 268, 80);
         move_control(APPLY, width - 228, height - 48, 100, 32);
         move_control(CLOSE, width - 116, height - 48, 100, 32);
@@ -895,7 +997,7 @@ mod native {
                 let dc = wparam as HDC;
                 let control = lparam as HWND;
                 SetBkMode(dc, 1);
-                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS].contains(&GetDlgCtrlID(control)) {
+                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, SUMMARY_PROMPT_HINT, STATUS].contains(&GetDlgCtrlID(control)) {
                     SetTextColor(dc, color(92, 101, 112));
                 } else {
                     SetTextColor(dc, color(32, 37, 43));
@@ -945,8 +1047,15 @@ mod native {
                     }
                     APPLY => match save(window, &mut *form) {
                         Ok(()) => {}
+                        Err(error) if error.contains("Announcement body") || error.contains("Announcement title") || error.contains("Summary prompt") => label(window, STATUS, &error),
                         Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Civilized Agent settings").as_ptr(), MB_OK | MB_ICONERROR); }
                     },
+                    RESET_DEFAULT => {
+                        let body = FontPreference::new("Century Gothic", 18);
+                        let title = FontPreference::new("Century Gothic", 14);
+                        populate_announcement_controls(window, &*form, &body, &title, DEFAULT_SUMMARY_PROMPT);
+                        label(window, STATUS, "Announcement defaults restored. Apply saves them; Close discards them.");
+                    }
                     CLOSE => { DestroyWindow(window); }
                     SIDEBAR if code == LBN_SELCHANGE => {
                         let index = SendMessageW(GetDlgItem(window, SIDEBAR), LB_GETCURSEL, 0, 0);
@@ -1112,6 +1221,7 @@ mod native {
     pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
         let settings = Settings::load(data)?;
         let voice_usage = initial_voice_usage_state(settings.elevenlabs_api_key.as_deref());
+        let font_families = crate::fonts::available_families().unwrap_or_default();
         let mut form = Box::new(Form {
             data: data.into(),
             assets: assets.into(),
@@ -1130,6 +1240,7 @@ mod native {
             updating: false,
             active_page: Page::Audio,
             ui: unsafe { UiResources::new()? },
+            font_families,
         });
         unsafe {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -1206,6 +1317,20 @@ mod native {
                 control(window, "STATIC", "", OFFLINE_STATUS, 0, (252, 128, 676, 160))?;
                 control(window, "BUTTON", "Install", OFFLINE_INSTALL, WS_TABSTOP, (252, 308, 150, 34))?;
 
+                control(window, "STATIC", "Body font family", BODY_FONT_LABEL, 0, (252, 128, 556, 24))?;
+                control(window, "STATIC", "Body size", BODY_SIZE_LABEL, 0, (808, 128, 120, 24))?;
+                control(window, "COMBOBOX", "Body font family", BODY_FONT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 158, 540, 220))?;
+                control(window, "COMBOBOX", "Body size", BODY_SIZE, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (808, 158, 120, 220))?;
+                control(window, "STATIC", "Title font family", TITLE_FONT_LABEL, 0, (252, 214, 556, 24))?;
+                control(window, "STATIC", "Title size", TITLE_SIZE_LABEL, 0, (808, 214, 120, 24))?;
+                control(window, "COMBOBOX", "Title font family", TITLE_FONT, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (252, 244, 540, 220))?;
+                control(window, "COMBOBOX", "Title size", TITLE_SIZE, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, (808, 244, 120, 220))?;
+                control(window, "STATIC", "Summary prompt", SUMMARY_PROMPT_LABEL, 0, (252, 300, 540, 24))?;
+                control(window, "BUTTON", "Reset defaults", RESET_DEFAULT, WS_TABSTOP, (796, 296, 132, 34))?;
+                control(window, "EDIT", "", SUMMARY_PROMPT, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32, (252, 332, 676, 124))?;
+                SendMessageW(GetDlgItem(window, SUMMARY_PROMPT), EM_SETLIMITTEXT, 32_768, 0);
+                control(window, "STATIC", "Sizes use logical pixels. Use {{status}} for the task status. The required {{report}} placeholder supplies the completed report.", SUMMARY_PROMPT_HINT, 0, (252, 464, 676, 56))?;
+
                 control(window, "LISTBOX", "Characters", CHARACTER_LIST, WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_NOINTEGRALHEIGHT as u32, (252, 126, 220, 420))?;
                 control(window, "BUTTON", "New", NEW_CHARACTER, WS_TABSTOP, (252, 558, 220, 34))?;
                 control(window, "STATIC", "Select a character or choose New to create one.", CHARACTER_EMPTY, 0, (502, 152, 426, 110))?;
@@ -1229,6 +1354,7 @@ mod native {
             }
             apply_fonts(window, &form);
             populate_pages(window, &form);
+            populate_announcement_controls(window, &form, &form.settings.announcement_body_font, &form.settings.announcement_title_font, &form.settings.summary_prompt);
             set_checked(window, QUIET, form.settings.quiet_mode);
             set_checked(window, SCHEDULE, form.settings.schedule_enabled);
             EnableWindow(GetDlgItem(window, START), form.settings.schedule_enabled as i32);

@@ -6,12 +6,15 @@ export default Plugin.define({
   async setup(ctx) {
     const proof = process.env.CIVILIZED_AGENT_HOST_PROOF
     const marker = process.env.CIVILIZED_AGENT_HOST_MARKER
+    const summaryMarker = process.env.CIVILIZED_AGENT_HOST_SUMMARY_MARKER
     if (!proof || !marker) throw new Error("Host verification requires an evidence path and context marker")
     const write = (value: object) => appendFile(proof, JSON.stringify({ at: Date.now(), ...value }) + "\n")
     await ctx.session.hook("generate", async (event) => {
       const hasPriorContext = JSON.stringify(event.messages).includes(marker)
-      await write({ type: "generate", sessionID: event.sessionID, hasPriorContext, messageCount: event.messages.length })
+      const hasConfiguredPrompt = !summaryMarker || JSON.stringify(event.messages).includes(summaryMarker)
+      await write({ type: "generate", sessionID: event.sessionID, hasPriorContext, hasConfiguredPrompt, messageCount: event.messages.length })
       if (!hasPriorContext) throw new Error("Announcement generation lost the original conversation")
+      if (!hasConfiguredPrompt) throw new Error("Announcement generation did not use the saved summary prompt")
     })
     const controller = new AbortController()
     const events = (async () => {

@@ -48,6 +48,7 @@ public static class CivilizedSettingsLayoutNative {
     [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr window);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+    [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr window, IntPtr rect, IntPtr region, uint flags);
     public static int[] ClientSize(IntPtr window) { Rect rect; if (!GetClientRect(window, out rect)) throw new InvalidOperationException("Could not read the settings client rectangle."); return new[] { rect.Right - rect.Left, rect.Bottom - rect.Top }; }
     public static int[] WindowSize(IntPtr window) { Rect rect; if (!GetWindowRect(window, out rect)) throw new InvalidOperationException("Could not read the settings window rectangle."); return new[] { rect.Right - rect.Left, rect.Bottom - rect.Top }; }
     public static int[] MinimumSize(IntPtr window) {
@@ -74,10 +75,10 @@ public static class CivilizedSettingsLayoutNative {
 }
 '@
 
-$pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service')
-$pageControls = @{ Characters = @(201, 202); Audio = @(105, 106, 111, 112); 'Quiet hours' = @(101, 102, 103, 104); 'Speech service' = @(113, 114, 121, 122, 123) }
+$pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service', 'Offline voice', 'Announcements')
+$pageControls = @{ Characters = @(201, 202); Audio = @(105, 106, 111, 112); 'Quiet hours' = @(101, 102, 103, 104); 'Speech service' = @(113, 114, 121, 122, 123); 'Offline voice' = @(124, 125); Announcements = @(130, 131, 132, 133, 134, 135) }
 $editorControls = @(203, 206, 216, 217, 210, 214)
-$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 121, 122, 123, 200, 201, 202, 203, 206, 216, 217, 210, 214, 400)
+$snapshotIds = @(101, 102, 103, 104, 105, 106, 107, 108, 109, 111, 112, 113, 114, 121, 122, 123, 124, 125, 130, 131, 132, 133, 134, 135, 200, 201, 202, 203, 206, 216, 217, 210, 214, 400)
 $wmKeyDown = 0x100
 $wmKeyUp = 0x101
 $wmCommand = 0x111
@@ -105,14 +106,25 @@ function Send-Control([int]$Id, [uint32]$Message, [long]$Wparam = 0, [long]$Lpar
 function Send-Window([uint32]$Message, [long]$Wparam = 0, [long]$Lparam = 0) {
     [CivilizedSettingsLayoutNative]::SendMessage($script:windowHandle, $Message, [IntPtr]$Wparam, [IntPtr]$Lparam).ToInt64()
 }
+function Read-Combo-Control([int]$Id) {
+    $index = Send-Control $Id 0x147
+    if ($index -lt 0) { return '' }
+    $length = Send-Control $Id 0x149 $index
+    if ($length -lt 0) { throw "Could not read combo control $Id" }
+    $text = [Text.StringBuilder]::new([int]$length + 1)
+    [CivilizedSettingsLayoutNative]::SendMessage((Control $Id), 0x148, [IntPtr]$index, $text) | Out-Null
+    if ($Id -eq 134) { $text.ToString().Replace("`r`n", "`n") } else { $text.ToString() }
+}
 function Read-Control([int]$Id) {
+    if ($Id -in @(106, 113, 130, 131, 132, 133)) { return Read-Combo-Control $Id }
     $text = [Text.StringBuilder]::new(4096)
     [CivilizedSettingsLayoutNative]::SendMessage((Control $Id), 0xD, [IntPtr]$text.Capacity, $text) | Out-Null
     $text.ToString()
 }
 function Set-Control([int]$Id, [string]$Value) {
     $control = Control $Id
-    if ([CivilizedSettingsLayoutNative]::SetText($control, 0xC, [IntPtr]::Zero, $Value) -eq [IntPtr]::Zero) { throw "Could not set control $Id" }
+    $nativeValue = if ($Id -eq 134) { $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") } else { $Value }
+    if ([CivilizedSettingsLayoutNative]::SetText($control, 0xC, [IntPtr]::Zero, $nativeValue) -eq [IntPtr]::Zero) { throw "Could not set control $Id" }
     if ((Read-Control $Id) -ne $Value) { throw "Control $Id did not accept its draft text" }
     Send-Window $wmCommand (([long]$Id) -bor (([long]$enChange) -shl 16)) $control.ToInt64() | Out-Null
 }
@@ -152,6 +164,14 @@ function Assert-NoVisibleOverlaps([string]$Name) {
         }
     }
 }
+function Assert-PromptRegion([string]$Name) {
+    $children = @([CivilizedSettingsLayoutNative]::Children($script:windowHandle) | Where-Object Visible)
+    $prompt = @($children | Where-Object { $_.Id -eq 134 })
+    if ($prompt.Count -ne 1) { throw "$Name does not expose one visible prompt region" }
+    foreach ($child in @($children | Where-Object { $_.Id -ne 134 })) {
+        if ($prompt[0].Right -gt $child.Left -and $child.Right -gt $prompt[0].Left -and $prompt[0].Bottom -gt $child.Top -and $child.Bottom -gt $prompt[0].Top) { throw "$Name prompt region overlaps control $($child.Id)" }
+    }
+}
 function Page-Index { [int](Send-Control 200 $lbGetCurSel) }
 function Page-Title { Read-Control 400 }
 function Save-ControlSnapshot([string]$Name) {
@@ -165,6 +185,7 @@ function Save-ControlSnapshot([string]$Name) {
     $snapshot
 }
 function Save-WindowPng([string]$Name) {
+    if (-not [CivilizedSettingsLayoutNative]::RedrawWindow($script:windowHandle, [IntPtr]::Zero, [IntPtr]::Zero, 0x585)) { throw 'Could not repaint the settings window before capture' }
     $size = [CivilizedSettingsLayoutNative]::WindowSize($script:windowHandle)
     $bitmap = $null; $graphics = $null; $dc = [IntPtr]::Zero
     try {
@@ -206,7 +227,7 @@ function Select-Page([int]$Index) {
     for ($step = 0; $step -lt $Index; $step++) { [CivilizedSettingsLayoutNative]::SendMessage($nav, $wmKeyDown, [IntPtr]$vkDown, [IntPtr]1) | Out-Null; [CivilizedSettingsLayoutNative]::SendMessage($nav, $wmKeyUp, [IntPtr]$vkDown, [IntPtr]0) | Out-Null }
     Wait-Until { (Page-Index) -eq $Index -and (Page-Title) -eq $pageNames[$Index] } "Could not select page $($pageNames[$Index]) through the sidebar keyboard path."
 }
-function Capture-Page([int]$Index, [string]$Name, [bool]$Editor = $false) { Assert-Page $Index $Editor; Save-ControlSnapshot $Name | Out-Null; Save-WindowPng $Name }
+function Capture-Page([int]$Index, [string]$Name, [bool]$Editor = $false) { Assert-Page $Index $Editor; if ($Index -eq 5) { Assert-NoVisibleOverlaps $Name; Assert-PromptRegion $Name }; Save-ControlSnapshot $Name | Out-Null; Save-WindowPng $Name }
 function Doctor {
     if (-not $script:process) { throw 'Settings process is missing' }
     $script:process.Refresh()
@@ -248,7 +269,8 @@ try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $binaryHash = (Get-FileHash $binaryPath -Algorithm SHA256).Hash
-    $fixture = [ordered]@{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 35; outputDevice = $null; speechModel = 'eleven_flash_v2_5'; voices = @{ claude = 'Mark' }; characters = @{ 'layout-verification-character' = @{ name = 'Stored layout character'; animationPath = $null } }; selectedCharacter = $null }
+    $layoutPrompt = [string]::Join("`n", @('Summary {{status}}.', 'Report data {{report}}'))
+    $fixture = [ordered]@{ quietMode = $false; scheduleEnabled = $true; quietStart = 1320; quietEnd = 480; volume = 35; outputDevice = $null; speechModel = 'eleven_flash_v2_5'; voices = @{ claude = 'Mark' }; characters = @{ 'layout-verification-character' = @{ name = 'Stored layout character'; animationPath = $null } }; selectedCharacter = $null; announcementBodyFont = [ordered]@{ family = 'Segoe UI'; size = 16 }; announcementTitleFont = [ordered]@{ family = 'Segoe UI'; size = 26 }; summaryPrompt = $layoutPrompt }
     $fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'settings-before.json')
     $emptyEnvironment = Join-Path $scratch 'empty.env'
@@ -263,12 +285,14 @@ try {
     Launch-Settings
     Doctor
     $navItems = @([CivilizedSettingsLayoutNative]::ListBoxItems((Control 200)))
-    if ($navItems.Count -ne 4 -or ($navItems -join '|') -ne ($pageNames -join '|')) { throw 'The settings sidebar items do not match the native navigation contract' }
+    if ($navItems.Count -ne 6 -or ($navItems -join '|') -ne ($pageNames -join '|')) { throw 'The settings sidebar items do not match the native navigation contract' }
     if (([CivilizedSettingsLayoutNative]::GetWindowLongPtr((Control 200), -16).ToInt64() -band 1) -eq 0) { throw 'The settings sidebar listbox does not use LBS_NOTIFY' }
     if ((Page-Index) -ne 1 -or (Page-Title) -ne 'Audio') { throw 'Audio is not the default settings page' }
     Capture-Page 1 'page-audio'
     Select-Page 2; Capture-Page 2 'page-quiet-hours'
     Select-Page 3; Capture-Page 3 'page-speech-service'
+    Select-Page 4; Capture-Page 4 'page-offline-voice'
+    Select-Page 5; Capture-Page 5 'page-announcements'
     if ((Read-Control 121) -ne $existingDefault) { throw "An old settings file did not show the existing default voice ID '$existingDefault'." }
     if ((Read-Control 122) -ne 'Default voice ID' -or (Read-Control 123) -notmatch 'custom ElevenLabs voice') { throw 'The default voice controls do not explain their purpose.' }
     Set-Control 121 $configuredDefault
@@ -329,20 +353,25 @@ try {
     if (-not [CivilizedSettingsLayoutNative]::SetWindowPos($script:windowHandle, [IntPtr]::Zero, 0, 0, $minimum[0], $minimum[1], 0x16)) { throw 'Could not request the enforced minimum-size resize' }
     Start-Sleep -Milliseconds 200
     Assert-VisibleChildren 'characters-minimum'; Assert-NoVisibleOverlaps 'characters-minimum'; Save-ControlSnapshot 'characters-minimum' | Out-Null; Save-WindowPng 'characters-minimum'
-    foreach ($index in @(1, 2, 3)) {
+    foreach ($index in @(1, 2, 3, 4, 5)) {
         Select-Page $index
         Assert-Page $index
         if ($index -eq 3) { Assert-NoVisibleOverlaps 'speech-service-minimum' }
+        if ($index -eq 5) { Assert-NoVisibleOverlaps 'announcements-minimum'; Assert-PromptRegion 'announcements-minimum' }
         Save-ControlSnapshot ('minimum-page-' + $index) | Out-Null
+        Save-WindowPng ('minimum-page-' + $index)
     }
     Select-Page 0
     Assert-Page 0 $true
     if (-not [CivilizedSettingsLayoutNative]::SetWindowPos($script:windowHandle, [IntPtr]::Zero, 0, 0, 1200, 900, 0x16)) { throw 'Could not request large resize' }
     Start-Sleep -Milliseconds 200
     Assert-VisibleChildren 'characters-large'; Assert-NoVisibleOverlaps 'characters-large'; Save-ControlSnapshot 'characters-large' | Out-Null; Save-WindowPng 'characters-large'
+    Select-Page 5
+    Assert-Page 5
+    Assert-NoVisibleOverlaps 'announcements-large'; Assert-PromptRegion 'announcements-large'; Save-ControlSnapshot 'announcements-large' | Out-Null; Save-WindowPng 'announcements-large'
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'settings-after.json')
     Close-Settings
-    @{ passed = $true; binary = $binaryPath; sha256 = $binaryHash; screenshots = @('page-characters.png', 'page-audio.png', 'page-quiet-hours.png', 'page-speech-service.png', 'characters-minimum.png', 'characters-large.png'); launches = $launchCount } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidencePath 'result.json') -Encoding utf8NoBOM
+    @{ passed = $true; binary = $binaryPath; sha256 = $binaryHash; screenshots = @('page-characters.png', 'page-audio.png', 'page-quiet-hours.png', 'page-speech-service.png', 'page-offline-voice.png', 'page-announcements.png', 'minimum-page-4.png', 'minimum-page-5.png', 'characters-minimum.png', 'characters-large.png', 'announcements-large.png'); launches = $launchCount } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidencePath 'result.json') -Encoding utf8NoBOM
     Write-Output "PASS: settings sidebar layout, native navigation, draft retention, resizing, preview, Apply, Close and reopen; evidence: $evidencePath"
 } catch {
     if (Test-Path -LiteralPath $evidencePath) {
