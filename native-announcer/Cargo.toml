@@ -37,6 +37,9 @@ tokio = { version = "1", features = ["rt", "time"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWindow"] }
 
+[build-dependencies]
+winresource = "0.1"
+
 [profile.dev]
 debug = 0
 

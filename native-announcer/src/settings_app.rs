@@ -2158,6 +2158,7 @@ mod native {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES });
             let instance = GetModuleHandleW(std::ptr::null());
             let window_class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class.as_ptr(),
+                hIcon: LoadIconW(instance, 1 as *const u16),
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), ..WNDCLASSW::default() };
             if RegisterClassW(&window_class) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
             let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Herald settings").as_ptr(),

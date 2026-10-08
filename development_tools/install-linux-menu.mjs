@@ -13,7 +13,9 @@ export async function installLinuxMenu(root, { env = process.env, refresh = true
   await access(opener)
   const applications = join(env.XDG_DATA_HOME || join(env.HOME || homedir(), '.local/share'), 'applications')
   const path = join(applications, 'herald-settings.desktop')
-  const content = `[Desktop Entry]\nType=Application\nName=Herald Settings\nComment=Edit Herald announcement settings\nExec=sh ${execArgument(opener)}\nIcon=preferences-system\nTerminal=false\nCategories=Settings;\n`
+  const icon = join(root, 'native-announcer', 'resources', 'portraits', 'flamboyant-herald.png')
+  await access(icon)
+  const content = `[Desktop Entry]\nType=Application\nName=Herald Settings\nComment=Edit Herald announcement settings\nExec=sh ${execArgument(opener)}\nIcon=${icon}\nTerminal=false\nCategories=Settings;\n`
   await mkdir(applications, { recursive: true })
   const previous = await readFile(path, 'utf8').catch(error => {
     if (error.code === 'ENOENT') return undefined

@@ -62,6 +62,7 @@ namespace herald {
                 link.SetArguments(arguments);
                 link.SetWorkingDirectory(directory);
                 link.SetDescription("Herald settings");
+                link.SetIconLocation(target, 0);
                 ((IPersistFile)instance).Save(path, true);
             } finally { Marshal.FinalReleaseComObject(instance); }
         }

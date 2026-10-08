@@ -53,3 +53,20 @@ test('builds do not download or bundle the optional voice engine', async () => {
     assert.doesNotMatch(source, /prepare-tts|onnxruntime\.dll|sherpa-onnx-c-api\.dll|tts\/kitten|gpu|cuda/i)
   }
 })
+
+test('app icon includes standard Windows sizes from 16 to 256 pixels', async () => {
+  const icon = await readFile(new URL('../../native-announcer/resources/herald.ico', import.meta.url))
+  assert.equal(icon.readUInt16LE(0), 0)
+  assert.equal(icon.readUInt16LE(2), 1)
+  assert.equal(icon.readUInt16LE(4), 7)
+  const sizes = []
+  for (let index = 0; index < 7; index++) {
+    const entry = 6 + index * 16
+    const size = icon[entry] || 256
+    assert.equal(icon[entry + 1] || 256, size)
+    assert.equal(icon.readUInt16LE(entry + 6), 32)
+    assert.ok(icon.readUInt32LE(entry + 12) + icon.readUInt32LE(entry + 8) <= icon.length)
+    sizes.push(size)
+  }
+  assert.deepEqual(sizes, [16, 24, 32, 48, 64, 128, 256])
+})

@@ -25,6 +25,7 @@ test('installs a repeatable settings entry without replacing other applications'
   const content = await readFile(path, 'utf8')
   assert.ok(content.includes('Name=Herald Settings\n'))
   assert.ok(content.includes(`Exec=sh "${join(root, 'development_tools/open-linux-settings.sh')}"\n`))
+  assert.ok(content.includes(`Icon=${join(root, 'native-announcer/resources/portraits/flamboyant-herald.png')}\n`))
   assert.ok(content.includes('Terminal=false\n'))
   await installLinuxMenu(root, { env, refresh: false })
   assert.equal(await readFile(path, 'utf8'), content)

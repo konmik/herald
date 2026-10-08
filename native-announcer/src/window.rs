@@ -346,6 +346,7 @@ mod native {
                     style: CS_HREDRAW | CS_VREDRAW,
                     lpfnWndProc: Some(procedure),
                     hInstance: module,
+                    hIcon: LoadIconW(module, 1 as *const u16),
                     lpszClassName: name.as_ptr(),
                     hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
                     ..WNDCLASSW::default()
