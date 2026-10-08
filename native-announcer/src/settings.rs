@@ -271,7 +271,7 @@ mod tests {
     fn silent_sound_defaults_to_zero_and_survives_save_load_and_reload() {
         assert_eq!(Settings::default().silent_sound_seconds, 0);
         assert_eq!(Settings::decode(br#"{"volume":35}"#).unwrap().silent_sound_seconds, 0);
-        let data = std::env::temp_dir().join("opencode").join(format!("civilized-silent-sound-{}-{}", std::process::id(), crate::state::timestamp()));
+        let data = std::env::temp_dir().join("opencode").join(format!("herald-silent-sound-{}-{}", std::process::id(), crate::state::timestamp()));
         let mut settings = Settings::default();
         settings.save(&data).unwrap();
         let mut store = Store::new(&data).unwrap();
@@ -319,7 +319,7 @@ mod tests {
         let serialized = serde_json::to_value(&settings).unwrap();
         assert!(serialized["characters"]["hatted-herald-01"].get("sampleText").is_none());
         assert!(serialized["characters"]["hatted-herald-01"].get("voiceDescription").is_none());
-        let data = std::env::temp_dir().join(format!("civilized-legacy-sample-{}", crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-legacy-sample-{}", crate::state::timestamp()));
         settings.save(&data).unwrap();
         let saved_json: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
         let saved_character = &saved_json["characters"]["hatted-herald-01"];
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn deleting_a_bundled_character_survives_save_load_and_reload() {
-        let data = std::env::temp_dir().join(format!("civilized-bundled-delete-{}", crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-bundled-delete-{}", crate::state::timestamp()));
         let deleted = "hatted-herald-01";
         let mut settings = Settings::default();
         settings.characters.remove(deleted);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn default_voice_id_migrates_persists_and_validates_with_saved_preferences() {
-        let data = std::env::temp_dir().join(format!("civilized-default-voice-{}-{}", std::process::id(), crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-default-voice-{}-{}", std::process::id(), crate::state::timestamp()));
         std::fs::create_dir_all(&data).unwrap();
         let old = serde_json::json!({
             "voices": {"claude": "Mark", "opencode": "Luna"},
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn hot_reload_keeps_last_good_settings_and_saves_existing_files() {
-        let data = std::env::temp_dir().join("opencode").join(format!("civilized-settings-{}", std::process::id()));
+        let data = std::env::temp_dir().join("opencode").join(format!("herald-settings-{}", std::process::id()));
         let mut settings = Settings::default();
         settings.save(&data).unwrap();
         let mut store = Store::new(&data).unwrap();
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn startup_restart_preserves_complete_saved_preferences_without_rewriting_settings() {
-        let data = std::env::temp_dir().join(format!("civilized-settings-restart-{}-{}", std::process::id(), crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-settings-restart-{}-{}", std::process::id(), crate::state::timestamp()));
         let saved_bytes = br#"{
             "quietMode":true,"scheduleEnabled":true,"quietStart":1305,"quietEnd":390,
             "volume":35,"outputDevice":"saved-output-device","elevenlabsApiKey":"saved-api-key",
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn announcement_preferences_persist_without_changing_prompt_text() {
-        let data = std::env::temp_dir().join(format!("civilized-announcement-settings-{}", crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-announcement-settings-{}", crate::state::timestamp()));
         let mut settings = Settings::default();
         settings.announcement_body_font = FontPreference::new("A font that is not installed", 32);
         settings.announcement_title_font = FontPreference::new("Another unavailable font", 8);

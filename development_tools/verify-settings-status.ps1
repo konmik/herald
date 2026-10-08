@@ -1,5 +1,5 @@
 param(
-    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/civilized-announcer.exe'),
+    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/herald.exe'),
     [string]$Evidence = ('temp/verification/settings-status-' + [guid]::NewGuid())
 )
 $ErrorActionPreference = 'Stop'
@@ -111,10 +111,10 @@ function Preview-Error([string]$TtsPath) {
     Send-Control 112 $bmClick | Out-Null; Wait-Until { (Read-Control 109).StartsWith($expectedPrefix) } "Preview did not produce the expected missing-model error for $TtsPath."; [ordered]@{ tts = $TtsPath; status = (Read-Control 109) }
 }
 function Launch([string]$TtsPath) {
-    $info = [Diagnostics.ProcessStartInfo]::new($binaryPath); $info.UseShellExecute = $false; $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch; $info.Environment['CIVILIZED_AGENT_TTS'] = $TtsPath; $info.Environment['CIVILIZED_AGENT_ENV'] = (Join-Path $scratch 'empty.env'); $info.Environment['ELEVENLABS_API_KEY'] = ''; foreach ($argument in @('--settings', '--assets', (Join-Path $root 'native-announcer/resources'))) { $info.ArgumentList.Add($argument) }
+    $info = [Diagnostics.ProcessStartInfo]::new($binaryPath); $info.UseShellExecute = $false; $info.Environment['HERALD_DATA'] = $scratch; $info.Environment['HERALD_TTS'] = $TtsPath; $info.Environment['HERALD_ENV'] = (Join-Path $scratch 'empty.env'); $info.Environment['ELEVENLABS_API_KEY'] = ''; foreach ($argument in @('--settings', '--assets', (Join-Path $root 'native-announcer/resources'))) { $info.ArgumentList.Add($argument) }
     $script:process = [Diagnostics.Process]::Start($info); $script:launchCount++; $script:ownedPid = $script:process.Id; $script:ownedStart = $script:process.StartTime; $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do { Start-Sleep -Milliseconds 50; $script:process.Refresh(); if ($script:process.HasExited) { throw "Settings exited early with $($script:process.ExitCode)." } } while ($script:process.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
-    if ($script:process.MainWindowHandle -eq [IntPtr]::Zero -or $script:process.MainWindowTitle -ne 'Civilized Agent settings' -or [IO.Path]::GetFullPath($script:process.Path) -ne $binaryPath) { throw 'The owned settings window did not open with the requested binary.' }
+    if ($script:process.MainWindowHandle -eq [IntPtr]::Zero -or $script:process.MainWindowTitle -ne 'Herald settings' -or [IO.Path]::GetFullPath($script:process.Path) -ne $binaryPath) { throw 'The owned settings window did not open with the requested binary.' }
     $script:windowHandle = $script:process.MainWindowHandle; $identity = [ordered]@{ binary = $binaryPath; sha256 = $binaryHash; pid = $script:ownedPid; started = $script:ownedStart.ToUniversalTime().ToString('o'); hwnd = $script:windowHandle.ToInt64(); scratch = $scratch; tts = $TtsPath }; $identity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidencePath ("instance-$launchCount.json")) -Encoding utf8NoBOM; $identity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidencePath 'instance.json') -Encoding utf8NoBOM; Wait-Layout
 }
 function Close-Settings { Send-Control 108 $bmClick | Out-Null; if (-not $script:process.WaitForExit(5000) -or $script:process.ExitCode -ne 0) { throw 'Close did not exit the owned settings process cleanly.' }; $script:windowHandle = [IntPtr]::Zero }

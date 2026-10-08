@@ -6,12 +6,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot -Parent
-$names = @('CARGO_TARGET_DIR', 'CIVILIZED_AGENT_TTS', 'CIVILIZED_AGENT_TTS_THREADS', 'CIVILIZED_AGENT_TTS_BENCHMARK', 'PATH')
+$names = @('CARGO_TARGET_DIR', 'HERALD_TTS', 'HERALD_TTS_THREADS', 'HERALD_TTS_BENCHMARK', 'PATH')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 try {
-    $env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'Temp/opencode/civilized-announcer-build'
-    $env:CIVILIZED_AGENT_TTS = Join-Path $repository 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
+    $env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'Temp/opencode/herald-build'
+    $env:HERALD_TTS = Join-Path $repository 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
     & node (Join-Path $PSScriptRoot 'prepare-tts.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Could not prepare Kitten assets' }
     $messages = & cargo test --locked --no-run -j 6 --manifest-path (Join-Path $repository 'native-announcer/Cargo.toml') --message-format=json
@@ -25,11 +25,11 @@ try {
     $results = @()
     foreach ($count in $Threads) {
         for ($run = 1; $run -le $Runs; $run++) {
-            $env:CIVILIZED_AGENT_TTS_THREADS = "$count"
-            $env:CIVILIZED_AGENT_TTS_BENCHMARK = Join-Path $env:LOCALAPPDATA "Temp/opencode/kitten-native-$count-$run.json"
+            $env:HERALD_TTS_THREADS = "$count"
+            $env:HERALD_TTS_BENCHMARK = Join-Path $env:LOCALAPPDATA "Temp/opencode/kitten-native-$count-$run.json"
             $process = Start-Process -FilePath $artifacts[0].executable -ArgumentList @('--exact', 'tts::tests::benchmark_native_kitten', '--ignored', '--nocapture') -Wait -PassThru -NoNewWindow
             if ($process.ExitCode -ne 0) { throw "Kitten benchmark failed: $($process.ExitCode)" }
-            $result = Get-Content -LiteralPath $env:CIVILIZED_AGENT_TTS_BENCHMARK -Raw | ConvertFrom-Json
+            $result = Get-Content -LiteralPath $env:HERALD_TTS_BENCHMARK -Raw | ConvertFrom-Json
             $results += [pscustomobject]@{ Threads = $count; Run = $run; LoadingMs = [math]::Round($result.loadingMs); FirstGenerationMs = [math]::Round($result.firstGenerationMs); WarmGenerationMs = [math]::Round($result.warmGenerationMs) }
         }
     }

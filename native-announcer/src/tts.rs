@@ -17,7 +17,7 @@ const LIBRARIES: [&str; 2] = ["onnxruntime.dll", "sherpa-onnx-c-api.dll"];
 static ENGINE: Mutex<Option<OfflineTts>> = Mutex::new(None);
 
 pub(crate) fn model_directory() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CIVILIZED_AGENT_TTS") { return Ok(path.into()); }
+    if let Some(path) = std::env::var_os("HERALD_TTS") { return Ok(path.into()); }
     Ok(installation_directory().join(MODEL_DIRECTORY))
 }
 
@@ -108,7 +108,7 @@ fn load_runtime() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::LibraryLoader::*;
 
-    let directory = if std::env::var_os("CIVILIZED_AGENT_TTS").is_some() {
+    let directory = if std::env::var_os("HERALD_TTS").is_some() {
         std::env::current_exe().map_err(|error| error.to_string())?.parent().ok_or("Missing executable directory")?.to_path_buf()
     } else {
         installation_directory().join("lib")
@@ -146,7 +146,7 @@ fn native_model_directory(directory: &Path) -> Result<PathBuf, String> {
         path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
     };
     if !path.is_ascii() {
-        return Err("Kitten TTS requires an ASCII installation path because Windows short names are unavailable for this directory. Reinstall the Civilized Agent bundle in an ASCII path.".into());
+        return Err("Kitten TTS requires an ASCII installation path because Windows short names are unavailable for this directory. Reinstall the Herald bundle in an ASCII path.".into());
     }
     Ok(path.into())
 }
@@ -189,7 +189,7 @@ fn with_engine<T>(action: impl FnOnce(&OfflineTts) -> Result<T, String>) -> Resu
 }
 
 pub fn prepare() -> Result<(), String> {
-    if !installed() && std::env::var_os("CIVILIZED_AGENT_TTS").is_none() { return Ok(()); }
+    if !installed() && std::env::var_os("HERALD_TTS").is_none() { return Ok(()); }
     with_engine(|_| Ok(()))
 }
 
@@ -335,7 +335,7 @@ mod tests {
             fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
         }
         let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Temp/opencode").join(format!("Civilized Agent TTS {} {unique}", std::process::id()));
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Temp/opencode").join(format!("Herald TTS {} {unique}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let scratch = Scratch(root);
         std::fs::write(scratch.0.join("tokens.txt"), b"ASCII bundled tokens").unwrap();
@@ -356,7 +356,7 @@ mod tests {
             }
             Err(error) => {
                 assert!(error.contains("Windows short names are unavailable"), "{error}");
-                assert!(error.contains("Reinstall the Civilized Agent bundle in an ASCII path"), "{error}");
+                assert!(error.contains("Reinstall the Herald bundle in an ASCII path"), "{error}");
             }
         }
     }
@@ -364,8 +364,8 @@ mod tests {
     #[test]
     #[ignore = "Measures native Kitten loading and synthesis with installed model assets"]
     fn benchmark_native_kitten() {
-        let output = PathBuf::from(std::env::var_os("CIVILIZED_AGENT_TTS_BENCHMARK").expect("Set benchmark output path"));
-        let threads = std::env::var("CIVILIZED_AGENT_TTS_THREADS").unwrap_or_else(|_| "4".into()).parse().unwrap();
+        let output = PathBuf::from(std::env::var_os("HERALD_TTS_BENCHMARK").expect("Set benchmark output path"));
+        let threads = std::env::var("HERALD_TTS_THREADS").unwrap_or_else(|_| "4".into()).parse().unwrap();
         benchmark(&output, threads).unwrap();
     }
 
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn offline_voice_requires_both_the_model_and_engine() {
-        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Temp/opencode").join(format!("civilized-offline-test-{}", std::process::id()));
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Temp/opencode").join(format!("herald-offline-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         assert!(!complete_installation(&root));
         for file in MODEL_FILES {

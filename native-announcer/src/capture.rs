@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn exports_only_rendered_pixels_with_a_plain_background_and_timing() {
-        let directory = std::env::temp_dir().join("opencode").join(format!("civilized-frames-{}-{}", std::process::id(), crate::state::timestamp()));
+        let directory = std::env::temp_dir().join("opencode").join(format!("herald-frames-{}-{}", std::process::id(), crate::state::timestamp()));
         let mut frames = Frames::new(&directory).unwrap();
         frames.save(&[0xff00ff, 0x123456], 2, 1, Duration::from_millis(15), None).unwrap();
         frames.save(&[0xffffff, 0], 2, 1, Duration::from_millis(80), Some(Duration::from_millis(70))).unwrap();

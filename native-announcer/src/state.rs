@@ -470,7 +470,7 @@ mod tests {
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join("opencode").join(format!(
-            "civilized-state-{}-{}",
+            "herald-state-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)

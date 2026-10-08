@@ -10,7 +10,7 @@ $profile = Join-Path $scratch 'claude-profile'
 $config = Join-Path $scratch 'opencode-profile/opencode.jsonc'
 $programs = Join-Path $scratch 'programs'
 $oldClaude = $env:CLAUDE_CONFIG_DIR
-$oldData = $env:CIVILIZED_AGENT_DATA
+$oldData = $env:HERALD_DATA
 $data = Join-Path $scratch 'saved-settings-data'
 $process = $null
 $transcribing = $false
@@ -23,7 +23,7 @@ try {
     $settingsPath = Join-Path $data 'settings.json'
     [IO.File]::WriteAllText($settingsPath, '{"quietMode":true,"scheduleEnabled":false,"quietStart":1350,"quietEnd":495,"volume":35,"outputDevice":"saved-device","voices":{"claude":"Mark","opencode":"Luna"},"selectedCharacter":"hatted-herald-01"}')
     $savedSettings = [Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath))
-    $env:CIVILIZED_AGENT_DATA = $data
+    $env:HERALD_DATA = $data
     $extract = Join-Path $scratch 'extracted'
     Expand-Archive -LiteralPath $Archive -DestinationPath $extract
     $app = & (Join-Path $extract 'install.ps1') -InstallDirectory (Join-Path $scratch 'installed') -SkipHostRegistration -NoStart
@@ -46,15 +46,15 @@ try {
     $registered = Get-Content -LiteralPath $config -Raw
     if ($registered.Contains($root.Replace('\', '\\')) -or -not $registered.Contains('/* preserved */') -or -not $registered.Contains('"minimumSeconds": 90') -or -not $registered.Contains('"unrelated-plugin"')) { throw 'OpenCode migration did not preserve settings or remove the checkout reference' }
     $marketplace = Get-Content -LiteralPath (Join-Path $profile 'plugins/known_marketplaces.json') -Raw | ConvertFrom-Json
-    if ($marketplace.'civilized-agent-local'.source.path -ne (Join-Path $app 'claude-plugin')) { throw 'Claude marketplace does not use the installed source' }
-    $binary = Join-Path $app "native-announcer/bin/civilized-announcer-win32-$($manifest.arch).exe"
+    if ($marketplace.'herald-local'.source.path -ne (Join-Path $app 'claude-plugin')) { throw 'Claude marketplace does not use the installed source' }
+    $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
     Install-SettingsShortcut $binary $programs
-    $shortcut = Read-NativeShortcut (Join-Path $programs 'Civilized Agent settings.lnk')
+    $shortcut = Read-NativeShortcut (Join-Path $programs 'Herald settings.lnk')
     if ($shortcut.TargetPath -ne $binary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
     Invoke-Checked 'claude' @('plugin', 'marketplace', 'add', (Join-Path $root 'claude-plugin'), '--scope', 'user')
     $blockedPrograms = Join-Path $scratch 'blocked-programs'
     New-Item -ItemType Directory -Path $blockedPrograms | Out-Null
-    $blockedShortcut = Join-Path $blockedPrograms 'Civilized Agent settings.lnk'
+    $blockedShortcut = Join-Path $blockedPrograms 'Herald settings.lnk'
     Write-NativeShortcut $blockedShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
     $rollbackPaths = @($config, (Join-Path $profile 'settings.json'), (Join-Path $profile 'plugins/known_marketplaces.json'), (Join-Path $profile 'plugins/installed_plugins.json'), $blockedShortcut)
     $rollbackBytes = @{}
@@ -78,8 +78,8 @@ try {
     if ([Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath)) -cne $savedSettings) { throw 'Host registration or reinstall changed saved native settings' }
     $start = [Diagnostics.ProcessStartInfo]::new($binary)
     $start.UseShellExecute = $false
-    $start.Environment['CIVILIZED_AGENT_DATA'] = $data
-    $start.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null
+    $start.Environment['HERALD_DATA'] = $data
+    $start.Environment.Remove('HERALD_TTS') | Out-Null
     foreach ($argument in @('--isolated', '--assets', (Join-Path $app 'native-announcer/resources'), '--test-seconds', '60')) { $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::Start($start)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -101,6 +101,6 @@ try {
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     $env:CLAUDE_CONFIG_DIR = $oldClaude
-    $env:CIVILIZED_AGENT_DATA = $oldData
+    $env:HERALD_DATA = $oldData
     if ($transcribing) { Stop-Transcript | Out-Null }
 }

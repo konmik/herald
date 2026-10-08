@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-foreach ($directory in @($PSScriptRoot, "$PSScriptRoot/../.claude/skills/verify-civilized-agent/scripts")) {
+foreach ($directory in @($PSScriptRoot, "$PSScriptRoot/../.claude/skills/verify-herald/scripts")) {
     foreach ($file in Get-ChildItem -LiteralPath $directory -Filter '*.ps1' -Recurse) {
         $tokens = $null
         $errors = $null
@@ -7,7 +7,7 @@ foreach ($directory in @($PSScriptRoot, "$PSScriptRoot/../.claude/skills/verify-
         if ($errors.Count) { throw "$($file.FullName): $($errors.Message -join '; ')" }
     }
 }
-. "$PSScriptRoot/../.claude/skills/verify-civilized-agent/scripts/process.ps1"
+. "$PSScriptRoot/../.claude/skills/verify-herald/scripts/process.ps1"
 $missingLog = Join-Path ([IO.Path]::GetTempPath()) ('opencode/missing-' + [guid]::NewGuid())
 function New-TestProcess {
     param([bool]$Exited, [string]$Path, [switch]$ExitDuringPath, [switch]$ThrowDuringPath)

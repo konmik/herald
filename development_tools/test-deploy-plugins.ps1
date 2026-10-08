@@ -10,14 +10,14 @@ $temporary = Join-Path $env:LOCALAPPDATA ('Temp/opencode/deployment-test-' + [gu
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
     $profile = Join-Path $temporary 'profile'
-    $cache = Join-Path $profile 'plugins/cache/civilized-agent-local/civilized-agent/0.3.0'
+    $cache = Join-Path $profile 'plugins/cache/herald-local/herald/0.3.0'
     $source = Join-Path $temporary 'source'
     $shared = Join-Path $temporary 'native-announcer'
     foreach ($directory in @("$cache/.claude-plugin", "$cache/bin", "$source/.claude-plugin", "$source/hooks", "$shared/resources")) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-    '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$cache/.claude-plugin/plugin.json"
-    '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$source/.claude-plugin/plugin.json"
+    '{"name":"herald","version":"0.3.0"}' | Set-Content "$cache/.claude-plugin/plugin.json"
+    '{"name":"herald","version":"0.3.0"}' | Set-Content "$source/.claude-plugin/plugin.json"
     'old binary' | Set-Content "$cache/bin/obsolete.exe"
     'new hooks' | Set-Content "$source/hooks/register.ts"
     'new hooks config' | Set-Content "$source/hooks/hooks.json"
@@ -33,7 +33,7 @@ try {
     Assert-True (-not (Get-Item "$cache/native-announcer").LinkType) 'Runtime must be a physical copy'
     Assert-True ((Get-Content "$cache/native-announcer/resources/keep.txt") -eq 'shared asset') 'Shared resources are not accessible'
     Assert-True (-not (Test-Path "$cache/scripts")) 'Removed Claude runtime scripts were deployed'
-    Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Staging or backup output survived deployment'
+    Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Staging or backup output survived deployment'
 
     $rejected = $false
     try { Deploy-ClaudeFiles $source $source $profile $shared } catch { $rejected = $true }
@@ -69,11 +69,11 @@ try {
     $programs = Join-Path $temporary 'programs Ω with spaces'
     $binary = Join-Path $shared 'announcer Ω.exe'
     Install-SettingsShortcut $binary $programs
-    $shortcut = Read-NativeShortcut (Join-Path $programs 'Civilized Agent settings.lnk')
+    $shortcut = Read-NativeShortcut (Join-Path $programs 'Herald settings.lnk')
     Assert-True ($shortcut.TargetPath -ceq $binary -and $shortcut.Arguments -ceq '--settings') 'Settings shortcut does not preserve the Unicode settings app path'
     Write-Output '8 deployment checks passed.'
 } finally {
-    $junction = Join-Path $temporary 'profile/plugins/cache/civilized-agent-local/civilized-agent/0.3.0/native-announcer'
+    $junction = Join-Path $temporary 'profile/plugins/cache/herald-local/herald/0.3.0/native-announcer'
     if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }

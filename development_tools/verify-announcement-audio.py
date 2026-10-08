@@ -120,7 +120,7 @@ def main():
             channels = output["maxInputChannels"]
             with device.open(format=audio.paInt16, channels=channels, rate=rate, input=True, input_device_index=output["index"], frames_per_buffer=1024, start=False) as stream:
                 helper = "verify.ps1" if args.settings_previews else "announce.ps1"
-                command = ["pwsh", "-NoProfile", "-File", str(root / ".claude/skills/verify-civilized-agent/scripts" / helper)]
+                command = ["pwsh", "-NoProfile", "-File", str(root / ".claude/skills/verify-herald/scripts" / helper)]
                 if args.settings_previews:
                     command.extend(["-Feature", "VoicePreview", "-Audible"])
                 else:

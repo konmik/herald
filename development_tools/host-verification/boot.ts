@@ -36,7 +36,7 @@ try {
     assert.equal(response.status, 200)
     const result = await response.json() as { data: { id: string; source: { type: string; path?: string } }[] }
     await writeFile(join(evidence, "plugins.json"), JSON.stringify(result, null, 2))
-    installed = result.data.find(plugin => plugin.id === "civilized-agent")
+    installed = result.data.find(plugin => plugin.id === "herald")
     if (!installed) await Bun.sleep(100)
   }
   assert.equal(installed?.source.type, "local")

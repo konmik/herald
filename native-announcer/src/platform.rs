@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn data_directory() -> PathBuf {
-    if let Some(path) = std::env::var_os("CIVILIZED_AGENT_DATA") {
+    if let Some(path) = std::env::var_os("HERALD_DATA") {
         return path.into();
     }
     let home = std::env::var_os(if cfg!(target_os = "windows") {
@@ -25,14 +25,14 @@ pub fn data_directory() -> PathBuf {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or(home.join("AppData/Local"))
-            .join("CivilizedAgent")
+            .join("herald")
     } else if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/CivilizedAgent")
+        home.join("Library/Application Support/herald")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or(home.join(".local/share"))
-            .join("CivilizedAgent")
+            .join("herald")
     }
 }
 
@@ -792,7 +792,7 @@ mod tests {
     fn interference_audio_has_silent_edges_and_a_faded_envelope() {
         let data = std::env::temp_dir()
             .join("opencode")
-            .join(format!("civilized-signal-{}", std::process::id()));
+            .join(format!("herald-signal-{}", std::process::id()));
         std::fs::create_dir_all(&data).unwrap();
         let signal = Signal::new(&data);
         let wav = std::fs::read(&signal.path).unwrap();

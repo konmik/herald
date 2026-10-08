@@ -9,8 +9,8 @@ const commands: Record<string, unknown>[] = []
 const generated: string[] = []
 const generatedPrompts: string[] = []
 const spawned: string[][] = []
-const binary = process.env.CIVILIZED_AGENT_BINARY
-process.env.CIVILIZED_AGENT_BINARY = process.execPath
+const binary = process.env.HERALD_BINARY
+process.env.HERALD_BINARY = process.execPath
 let stateClient: unknown
 let discovered = true
 let serverPID = process.pid
@@ -27,17 +27,17 @@ mock.module("@opencode/client/service", () => ({ Service: {
 } }))
 const { default: plugin } = await import("../index")
 afterAll(() => {
-  if (binary === undefined) delete process.env.CIVILIZED_AGENT_BINARY
-  else process.env.CIVILIZED_AGENT_BINARY = binary
+  if (binary === undefined) delete process.env.HERALD_BINARY
+  else process.env.HERALD_BINARY = binary
 })
 
 test("an installed OpenCode package ignores a checkout executable override", async () => {
   const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
   mkdirSync(temporary, { recursive: true })
   const directory = mkdtempSync(join(temporary, "installed-opencode-"))
-  const previousExternal = process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+  const previousExternal = process.env.HERALD_EXTERNAL_COMPANION
   try {
-    delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
+    delete process.env.HERALD_EXTERNAL_COMPANION
     mkdirSync(join(directory, "opencode-plugin"))
     mkdirSync(join(directory, "claude-plugin", "scripts"), { recursive: true })
     const source = fileURLToPath(new URL("..", import.meta.url))
@@ -47,8 +47,8 @@ test("an installed OpenCode package ignores a checkout executable override", asy
     const { default: installed } = await import(pathToFileURL(join(directory, "opencode-plugin/index.ts")).href)
     await expect(installed.setup({})).rejects.toThrow("Reinstall the application bundle")
   } finally {
-    if (previousExternal === undefined) delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
-    else process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = previousExternal
+    if (previousExternal === undefined) delete process.env.HERALD_EXTERNAL_COMPANION
+    else process.env.HERALD_EXTERNAL_COMPANION = previousExternal
     rmSync(directory, { recursive: true, force: true })
   }
 })
@@ -166,11 +166,11 @@ test("sends the saved prompt unchanged and rereads it", async () => {
   const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
   mkdirSync(temporary, { recursive: true })
   const data = mkdtempSync(join(temporary, "summary-prompt-"))
-  const previousData = process.env.CIVILIZED_AGENT_DATA
+  const previousData = process.env.HERALD_DATA
   const firstPrompt = "Report the task outcome.\nUnicode: Ω 😀\nBe explicit and concise."
   const secondPrompt = "Describe the result in one sentence."
   try {
-    process.env.CIVILIZED_AGENT_DATA = data
+    process.env.HERALD_DATA = data
     writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", characters: { herald: { selected: true, summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
     const f = await fixture()
     try {
@@ -188,8 +188,8 @@ test("sends the saved prompt unchanged and rereads it", async () => {
       expect(commands.filter(command => command.type === "notify").map(command => command.characterID)).toEqual(["herald", "robot"])
     } finally { await f.cleanup() }
   } finally {
-    if (previousData === undefined) delete process.env.CIVILIZED_AGENT_DATA
-    else process.env.CIVILIZED_AGENT_DATA = previousData
+    if (previousData === undefined) delete process.env.HERALD_DATA
+    else process.env.HERALD_DATA = previousData
     rmSync(data, { recursive: true, force: true })
   }
 })
@@ -325,15 +325,15 @@ test("missing discovery or a different server fails closed and retains the task"
 })
 
 test("an externally owned companion requires separate data and skips automatic launch", async () => {
-  const oldExternal = process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
-  const oldData = process.env.CIVILIZED_AGENT_DATA
-  const oldBinary = process.env.CIVILIZED_AGENT_BINARY
+  const oldExternal = process.env.HERALD_EXTERNAL_COMPANION
+  const oldData = process.env.HERALD_DATA
+  const oldBinary = process.env.HERALD_BINARY
   try {
-    process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = "1"
-    process.env.CIVILIZED_AGENT_BINARY = "not-an-executable"
-    delete process.env.CIVILIZED_AGENT_DATA
-    await expect(fixture()).rejects.toThrow("An external companion requires CIVILIZED_AGENT_DATA")
-    process.env.CIVILIZED_AGENT_DATA = "isolated-proof"
+    process.env.HERALD_EXTERNAL_COMPANION = "1"
+    process.env.HERALD_BINARY = "not-an-executable"
+    delete process.env.HERALD_DATA
+    await expect(fixture()).rejects.toThrow("An external companion requires HERALD_DATA")
+    process.env.HERALD_DATA = "isolated-proof"
     const f = await fixture()
     try {
       await f.start()
@@ -342,11 +342,11 @@ test("an externally owned companion requires separate data and skips automatic l
       expect(f.notices()).toHaveLength(1)
     } finally { await f.cleanup() }
   } finally {
-    if (oldExternal === undefined) delete process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION
-    else process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION = oldExternal
-    if (oldData === undefined) delete process.env.CIVILIZED_AGENT_DATA
-    else process.env.CIVILIZED_AGENT_DATA = oldData
-    if (oldBinary === undefined) delete process.env.CIVILIZED_AGENT_BINARY
-    else process.env.CIVILIZED_AGENT_BINARY = oldBinary
+    if (oldExternal === undefined) delete process.env.HERALD_EXTERNAL_COMPANION
+    else process.env.HERALD_EXTERNAL_COMPANION = oldExternal
+    if (oldData === undefined) delete process.env.HERALD_DATA
+    else process.env.HERALD_DATA = oldData
+    if (oldBinary === undefined) delete process.env.HERALD_BINARY
+    else process.env.HERALD_BINARY = oldBinary
   }
 })

@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn new_and_existing_paths_remain_private() {
-        let data = std::env::temp_dir().join(format!("civilized-private-{}-{}", std::process::id(), crate::state::timestamp()));
+        let data = std::env::temp_dir().join(format!("herald-private-{}-{}", std::process::id(), crate::state::timestamp()));
         std::fs::create_dir_all(&data).unwrap();
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
         directory(&data).unwrap();

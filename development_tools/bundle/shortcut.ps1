@@ -1,12 +1,12 @@
 function Initialize-NativeShortcut {
-    if ('CivilizedAgent.Shortcuts' -as [type]) { return }
+    if ('herald.Shortcuts' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace CivilizedAgent {
+namespace herald {
     [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
     internal class ShellLink {}
 
@@ -61,7 +61,7 @@ namespace CivilizedAgent {
                 link.SetPath(target);
                 link.SetArguments(arguments);
                 link.SetWorkingDirectory(directory);
-                link.SetDescription("Civilized Agent settings");
+                link.SetDescription("Herald settings");
                 ((IPersistFile)instance).Save(path, true);
             } finally { Marshal.FinalReleaseComObject(instance); }
         }
@@ -73,11 +73,11 @@ namespace CivilizedAgent {
 function Read-NativeShortcut {
     param([string]$Path)
     Initialize-NativeShortcut
-    [CivilizedAgent.Shortcuts]::Read([IO.Path]::GetFullPath($Path))
+    [herald.Shortcuts]::Read([IO.Path]::GetFullPath($Path))
 }
 
 function Write-NativeShortcut {
     param([string]$Path, [string]$TargetPath, [string]$Arguments, [string]$WorkingDirectory)
     Initialize-NativeShortcut
-    [CivilizedAgent.Shortcuts]::Write([IO.Path]::GetFullPath($Path), [IO.Path]::GetFullPath($TargetPath), $Arguments, [IO.Path]::GetFullPath($WorkingDirectory))
+    [herald.Shortcuts]::Write([IO.Path]::GetFullPath($Path), [IO.Path]::GetFullPath($TargetPath), $Arguments, [IO.Path]::GetFullPath($WorkingDirectory))
 }

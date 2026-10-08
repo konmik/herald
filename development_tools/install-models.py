@@ -24,7 +24,7 @@ def main():
             print(f"Already installed: {destination}", flush=True)
             continue
         print(f"Installing {name}", flush=True)
-        source = Path(hf_hub_download(repo, f"split_files/{folder}/{name}", local_dir=root / ".civilized-download"))
+        source = Path(hf_hub_download(repo, f"split_files/{folder}/{name}", local_dir=root / ".herald-download"))
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists():
             source.replace(destination)

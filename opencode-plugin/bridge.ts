@@ -3,11 +3,11 @@ import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 
-export const dataDirectory = process.env.CIVILIZED_AGENT_DATA ?? (process.platform === "win32"
-  ? join(process.env.LOCALAPPDATA!, "CivilizedAgent")
+export const dataDirectory = process.env.HERALD_DATA ?? (process.platform === "win32"
+  ? join(process.env.LOCALAPPDATA!, "herald")
   : process.platform === "darwin"
-    ? join(homedir(), "Library", "Application Support", "CivilizedAgent")
-    : join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "CivilizedAgent"))
+    ? join(homedir(), "Library", "Application Support", "herald")
+    : join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "herald"))
 export const inbox = join(dataDirectory, "inbox")
 
 export async function send(command: object) {

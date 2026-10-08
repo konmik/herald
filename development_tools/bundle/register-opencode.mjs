@@ -29,8 +29,8 @@ function ownedPackage(reference, directory, installed) {
     const metadata = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8'))
     const entry = metadata.exports?.['.']
     const extension = entry === './opencode-plugin/index.js' ? 'js' : 'ts'
-    if (metadata.name !== 'civilized-agent' || entry !== `./opencode-plugin/index.${extension}` || metadata.exports?.['./tui'] !== `./opencode-plugin/tui.${extension}`) return false
-    return /id:\s*["']civilized-agent["']/.test(readFileSync(join(path, entry), 'utf8'))
+    if (metadata.name !== 'herald' || entry !== `./opencode-plugin/index.${extension}` || metadata.exports?.['./tui'] !== `./opencode-plugin/tui.${extension}`) return false
+    return /id:\s*["']herald["']/.test(readFileSync(join(path, entry), 'utf8'))
   } catch { return false }
 }
 

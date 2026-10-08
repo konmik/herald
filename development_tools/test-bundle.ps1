@@ -18,11 +18,11 @@ function Assert-SettingsPreserved {
     Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($Path)) -ceq $Expected) $Message
 }
 
-$temporary = Join-Path $env:LOCALAPPDATA ('Temp/opencode/Civilized Agent Ω bundle-test-' + [guid]::NewGuid())
+$temporary = Join-Path $env:LOCALAPPDATA ('Temp/opencode/Herald Ω bundle-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $temporary | Out-Null
-$previousCivilizedAgentData = $env:CIVILIZED_AGENT_DATA
+$previousheraldData = $env:HERALD_DATA
 $nativeData = Join-Path $temporary 'native-data'
-$env:CIVILIZED_AGENT_DATA = $nativeData
+$env:HERALD_DATA = $nativeData
 try {
     New-Item -ItemType Directory -Path $nativeData | Out-Null
     $settingsPath = Join-Path $nativeData 'settings.json'
@@ -61,15 +61,15 @@ try {
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json')
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
-        $required += "$prefix/bin/civilized-announcer-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
+        $required += "$prefix/bin/herald-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
     }
     foreach ($file in $required) {
         $path = Join-Path $payload $file
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
         'fixture' | Set-Content -LiteralPath $path
     }
-    '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$payload/claude-plugin/.claude-plugin/plugin.json"
-    '{"name":"civilized-agent-local"}' | Set-Content "$payload/claude-plugin/.claude-plugin/marketplace.json"
+    '{"name":"herald","version":"0.3.0"}' | Set-Content "$payload/claude-plugin/.claude-plugin/plugin.json"
+    '{"name":"herald-local"}' | Set-Content "$payload/claude-plugin/.claude-plugin/marketplace.json"
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
     Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-plugin/hooks/register.ts') -Destination "$payload/claude-plugin/hooks/register.ts" -Force
     $zip = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $payload -OutputDirectory (Join-Path $temporary 'output')
@@ -83,15 +83,15 @@ try {
         Assert-True (@(Get-ChildItem -LiteralPath "$bundle/licenses/javascript/$package" -File).Count -gt 0) "Bundled JavaScript license missing: $package"
     }
     $entry = [uri]::new((Join-Path $bundle 'index.ts')).AbsoluteUri
-    & bun -e "const {default: plugin} = await import('$entry'); if (plugin.id !== 'civilized-agent') throw new Error('Wrong packaged plugin')"
+    & bun -e "const {default: plugin} = await import('$entry'); if (plugin.id !== 'herald') throw new Error('Wrong packaged plugin')"
     Assert-True ($LASTEXITCODE -eq 0) 'Compiled plugin failed to import outside the checkout'
     $tuiEntry = [uri]::new((Join-Path $bundle 'tui.ts')).AbsoluteUri
     $tuiScript = @"
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 const {default: plugin} = await import('$tuiEntry');
-if (plugin.id !== 'civilized-agent.tui' || typeof plugin.setup !== 'function') throw new Error('Wrong packaged TUI plugin');
-const inbox = join(process.env.CIVILIZED_AGENT_DATA, 'inbox');
+if (plugin.id !== 'herald.tui' || typeof plugin.setup !== 'function') throw new Error('Wrong packaged TUI plugin');
+const inbox = join(process.env.HERALD_DATA, 'inbox');
 async function waitForPresence(matches) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
@@ -185,7 +185,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-Rejected { Install-Payload $bundle $foreign } 'Installation through a junction was accepted'
     Remove-Item -LiteralPath $foreign -Force
     $profile = Join-Path $temporary 'claude'
-    $cache = Join-Path $profile 'plugins/cache/civilized-agent-local/civilized-agent/0.3.0'
+    $cache = Join-Path $profile 'plugins/cache/herald-local/herald/0.3.0'
     New-Item -ItemType Directory -Path "$cache/.claude-plugin" -Force | Out-Null
     Copy-Item "$payload/claude-plugin/.claude-plugin/plugin.json" "$cache/.claude-plugin/plugin.json"
     New-Item -ItemType Junction -Path "$cache/native-announcer" -Target "$payload/native-announcer" | Out-Null
@@ -195,8 +195,8 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $oldMarketplace = Join-Path $temporary 'old-marketplace'
     New-Item -ItemType Directory -Path "$oldMarketplace/.claude-plugin" -Force | Out-Null
     Copy-Item "$payload/claude-plugin/.claude-plugin/plugin.json" "$oldMarketplace/.claude-plugin/plugin.json"
-    '{"name":"civilized-agent-local"}' | Set-Content "$oldMarketplace/.claude-plugin/marketplace.json"
-    @{ 'civilized-agent-local' = @{ source = @{ source = 'directory'; path = $oldMarketplace } }; unrelated = @{ source = @{ source = 'github'; repo = 'keep/me' } } } | ConvertTo-Json -Depth 8 | Set-Content "$profile/plugins/known_marketplaces.json"
+    '{"name":"herald-local"}' | Set-Content "$oldMarketplace/.claude-plugin/marketplace.json"
+    @{ 'herald-local' = @{ source = @{ source = 'directory'; path = $oldMarketplace } }; unrelated = @{ source = @{ source = 'github'; repo = 'keep/me' } } } | ConvertTo-Json -Depth 8 | Set-Content "$profile/plugins/known_marketplaces.json"
     @{ version = 2; plugins = @{ $PluginId = @(@{ scope = 'user'; installPath = $cache }) } } | ConvertTo-Json -Depth 8 | Set-Content "$profile/plugins/installed_plugins.json"
     $script:claudeCalls = [Collections.Generic.List[string]]::new()
     function claude {
@@ -204,7 +204,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
         if ($args[1] -eq 'list') { @(@{ id = $PluginId; scope = 'user'; enabled = $true }) | ConvertTo-Json -AsArray }
         elseif ($args[1] -eq 'marketplace' -and $script:mutateClaude) {
             $registry = Get-Content "$profile/plugins/known_marketplaces.json" -Raw | ConvertFrom-Json -AsHashtable
-            $registry['civilized-agent-local'].source.path = $args[3]
+            $registry['herald-local'].source.path = $args[3]
             $registry | ConvertTo-Json -Depth 8 | Set-Content "$profile/plugins/known_marketplaces.json"
             '{"unrelated":"changed during installation"}' | Set-Content "$profile/settings.json"
         }
@@ -274,13 +274,13 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     '{"unrelated":"preserve"}' | Set-Content "$profile/settings.json"
     'previous hook' | Set-Content "$cache/hooks/register.ts"
     $successPrograms = Join-Path $temporary 'successful-programs'
-    $binary = "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
+    $binary = "$app/native-announcer/bin/herald-win32-$arch.exe"
     $script:mutateClaude = $false
     Register-BundleHosts $app @($config) $profile $binary $successPrograms
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful host registration changed native settings'
     $rollbackPrograms = Join-Path $temporary 'rollback-programs'
     New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
-    $rollbackShortcut = Join-Path $rollbackPrograms 'Civilized Agent settings.lnk'
+    $rollbackShortcut = Join-Path $rollbackPrograms 'Herald settings.lnk'
     Write-NativeShortcut $rollbackShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
     $rollbackPaths = @($config, "$profile/settings.json", "$profile/plugins/known_marketplaces.json", "$profile/plugins/installed_plugins.json", "$cache/hooks/register.ts", $rollbackShortcut)
     $beforeRollback = @{}
@@ -294,18 +294,18 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $absentConfig = Join-Path $openCode 'previously-absent.jsonc'
     Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms } 'Fresh config rollback did not fail'
     Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
-    Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Host rollback left a cache backup'
+    Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Host rollback left a cache backup'
     $script:mutateClaude = $false
     Rename-Item -LiteralPath $bundle -NewName 'source-unavailable'
     Remove-DeploymentDirectory $payload
     Test-Bundle $app | Out-Null
     Assert-True (-not (Get-ChildItem -LiteralPath $cache -Recurse -File | Where-Object Name -in @('node.exe', 'bridge.mjs', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE'))) 'Installed runtime contains a removed Node payload'
     $programs = Join-Path $temporary 'programs Ω with spaces'
-    Install-SettingsShortcut "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe" $programs
-    Install-SettingsShortcut "$app/native-announcer/bin/civilized-announcer-win32-$arch.exe" $programs
-    $shortcutPath = Join-Path $programs 'Civilized Agent settings.lnk'
+    Install-SettingsShortcut "$app/native-announcer/bin/herald-win32-$arch.exe" $programs
+    Install-SettingsShortcut "$app/native-announcer/bin/herald-win32-$arch.exe" $programs
+    $shortcutPath = Join-Path $programs 'Herald settings.lnk'
     $shortcut = Read-NativeShortcut $shortcutPath
-    $target = [IO.Path]::GetFullPath("$app/native-announcer/bin/civilized-announcer-win32-$arch.exe")
+    $target = [IO.Path]::GetFullPath("$app/native-announcer/bin/herald-win32-$arch.exe")
     Assert-True ($shortcut.TargetPath -ceq $target -and $shortcut.Arguments -ceq '--settings' -and $shortcut.WorkingDirectory -ceq (Split-Path $target -Parent)) 'Shortcut did not preserve the exact Unicode target, arguments and working directory'
     Write-NativeShortcut $shortcutPath $target '--other' (Split-Path $target -Parent)
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer overwrote a shortcut with unrelated arguments'
@@ -313,7 +313,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Write-NativeShortcut "$programs/Unrelated.lnk" (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
     Write-NativeShortcut $shortcutPath (Join-Path $env:SystemRoot 'notepad.exe') '--settings' $env:SystemRoot
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer overwrote an unrelated shortcut'
-    $foreignBinary = Join-Path $temporary "foreign-app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
+    $foreignBinary = Join-Path $temporary "foreign-app/native-announcer/bin/herald-win32-$arch.exe"
     New-Item -ItemType Directory -Path (Split-Path $foreignBinary -Parent) -Force | Out-Null
     'fixture' | Set-Content -LiteralPath $foreignBinary
     '{"name":"unrelated"}' | Set-Content (Join-Path $temporary 'foreign-app/package.json')
@@ -321,10 +321,10 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer trusted an unrelated package with an announcer executable name'
     Assert-True ((Read-NativeShortcut $shortcutPath).TargetPath -ceq $foreignBinary) 'Ownership rejection changed the existing shortcut'
     Assert-True ((Read-NativeShortcut "$programs/Unrelated.lnk").TargetPath -eq (Join-Path $env:SystemRoot 'notepad.exe')) 'Installer changed an unrelated shortcut'
-    Assert-True (@(Get-ChildItem $root -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Installation left staging or backup directories'
+    Assert-True (@(Get-ChildItem $root -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Installation left staging or backup directories'
     Write-Output 'Bundle unit checks passed: compiled imports and licenses, file integrity, copying, repair and mocked host migration. Native startup and real host installation require test:bundle:installed.'
 } finally {
-    if ($null -eq $previousCivilizedAgentData) { Remove-Item Env:CIVILIZED_AGENT_DATA -ErrorAction SilentlyContinue }
-    else { $env:CIVILIZED_AGENT_DATA = $previousCivilizedAgentData }
+    if ($null -eq $previousheraldData) { Remove-Item Env:HERALD_DATA -ErrorAction SilentlyContinue }
+    else { $env:HERALD_DATA = $previousheraldData }
     Remove-DeploymentDirectory $temporary
 }

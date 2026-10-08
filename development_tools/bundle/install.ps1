@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Bundle = $PSScriptRoot,
-    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'Programs/CivilizedAgent'),
+    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'Programs/herald'),
     [string]$ClaudeConfigDirectory,
     [string]$OpenCodeConfigDirectory,
     [string]$ProgramsDirectory = [Environment]::GetFolderPath('Programs'),
@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PluginId = 'civilized-agent@civilized-agent-local'
+$PluginId = 'herald@herald-local'
 . "$PSScriptRoot/shortcut.ps1"
 
 function Assert-NoLinks {
@@ -62,7 +62,7 @@ function Test-Bundle {
     $manifestPath = Join-Path $Directory 'bundle-manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $architecture = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported Windows architecture' } }
-    if ($manifest.schemaVersion -ne 1 -or $manifest.name -ne 'civilized-agent' -or $manifest.platform -ne 'win32' -or $manifest.arch -ne $architecture -or $manifest.version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Unsupported bundle manifest or architecture' }
+    if ($manifest.schemaVersion -ne 1 -or $manifest.name -ne 'herald' -or $manifest.platform -ne 'win32' -or $manifest.arch -ne $architecture -or $manifest.version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Unsupported bundle manifest or architecture' }
     $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($file in $manifest.files) {
         Assert-SafePayloadPath $file.path
@@ -71,7 +71,7 @@ function Test-Bundle {
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/civilized-announcer-win32-$architecture.exe", "claude-plugin/native-announcer/bin/civilized-announcer-win32-$architecture.exe")) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe")) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
     }
     foreach ($obsolete in @('claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
@@ -96,7 +96,7 @@ function Test-Bundle {
     $package = Get-Content -LiteralPath (Join-Path $Directory 'package.json') -Raw | ConvertFrom-Json -AsHashtable
     $plugin = Get-Content -LiteralPath (Join-Path $Directory 'claude-plugin/.claude-plugin/plugin.json') -Raw | ConvertFrom-Json
     $marketplace = Get-Content -LiteralPath (Join-Path $Directory 'claude-plugin/.claude-plugin/marketplace.json') -Raw | ConvertFrom-Json
-    if ($package.name -ne $manifest.name -or $package.version -ne $manifest.version -or $package.exports['.'] -ne './opencode-plugin/index.js' -or $package.exports['./tui'] -ne './opencode-plugin/tui.js' -or $plugin.name -ne $manifest.name -or $plugin.version -ne $manifest.version -or $marketplace.name -ne 'civilized-agent-local') { throw 'Runtime package identity does not match the bundle' }
+    if ($package.name -ne $manifest.name -or $package.version -ne $manifest.version -or $package.exports['.'] -ne './opencode-plugin/index.js' -or $package.exports['./tui'] -ne './opencode-plugin/tui.js' -or $plugin.name -ne $manifest.name -or $plugin.version -ne $manifest.version -or $marketplace.name -ne 'herald-local') { throw 'Runtime package identity does not match the bundle' }
     if ($package.dependencies.Count) { throw 'Plugin runtime dependencies must be compiled into the bundle' }
     if ($actual.Count -ne $paths.Count + 1) { throw 'Bundle contains unlisted files' }
     foreach ($file in $actual) {
@@ -130,8 +130,8 @@ function Install-Payload {
     New-Item -ItemType Directory -Path $Root -Force | Out-Null
     Assert-NoLinks (Join-Path $Root '.install.lock')
     $lock = if (-not $LockHeld) { [IO.File]::Open((Join-Path $Root '.install.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
-    $stage = Join-Path $Root ('.civilized-stage-' + [guid]::NewGuid())
-    $backup = Join-Path $Root ('.civilized-backup-' + [guid]::NewGuid())
+    $stage = Join-Path $Root ('.herald-stage-' + [guid]::NewGuid())
+    $backup = Join-Path $Root ('.herald-backup-' + [guid]::NewGuid())
     try {
         if (Test-Path -LiteralPath $destination) {
             Assert-NoLinks $destination
@@ -180,9 +180,9 @@ function Test-OpenCodeRuntime {
     $start.ArgumentList.Add('-NoProfile')
     $start.ArgumentList.Add('-NonInteractive')
     $start.ArgumentList.Add('-Command')
-    $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:CIVILIZED_AGENT_OPENCODE --version; exit $LASTEXITCODE')
+    $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:HERALD_OPENCODE --version; exit $LASTEXITCODE')
     $start.Environment['BUN_BE_BUN'] = '1'
-    $start.Environment['CIVILIZED_AGENT_OPENCODE'] = $OpenCodeCommand
+    $start.Environment['HERALD_OPENCODE'] = $OpenCodeCommand
     $probe = [Diagnostics.Process]::Start($start)
     try {
         $output = $probe.StandardOutput.ReadToEndAsync()
@@ -214,12 +214,12 @@ function Get-ClaudeMarketplaceSource {
     $registry = Join-Path $ConfigDirectory 'plugins/known_marketplaces.json'
     Assert-NoLinks $registry
     if (-not (Test-Path -LiteralPath $registry)) { return }
-    $entry = (Get-Content -LiteralPath $registry -Raw | ConvertFrom-Json -AsHashtable)['civilized-agent-local']
+    $entry = (Get-Content -LiteralPath $registry -Raw | ConvertFrom-Json -AsHashtable)['herald-local']
     if (-not $entry) { return }
     $source = $entry.source.path
     if (-not $source) { throw 'Cannot confirm ownership of existing Claude marketplace' }
     Assert-NoLinks $source
-    foreach ($identity in @(@{ file = 'marketplace.json'; name = 'civilized-agent-local' }, @{ file = 'plugin.json'; name = 'civilized-agent' })) {
+    foreach ($identity in @(@{ file = 'marketplace.json'; name = 'herald-local' }, @{ file = 'plugin.json'; name = 'herald' })) {
         $manifest = Join-Path $source ".claude-plugin/$($identity.file)"
         Assert-NoLinks $manifest
         if (-not (Test-Path -LiteralPath $manifest) -or (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name -ne $identity.name) { throw 'Cannot confirm ownership of existing Claude marketplace source' }
@@ -235,7 +235,7 @@ function Assert-ClaudeInstallation {
     if (-not $destination.StartsWith($cache, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to replace a plugin outside the Claude cache: $destination" }
     $manifest = Join-Path $destination '.claude-plugin/plugin.json'
     Assert-NoLinks $manifest
-    if (-not (Test-Path -LiteralPath $manifest) -or (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name -ne 'civilized-agent') { throw "Cannot confirm plugin ownership: $destination" }
+    if (-not (Test-Path -LiteralPath $manifest) -or (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name -ne 'herald') { throw "Cannot confirm plugin ownership: $destination" }
 }
 
 function Get-OwnedAnnouncerDirectories {
@@ -245,7 +245,7 @@ function Get-OwnedAnnouncerDirectories {
         Join-Path $source 'native-announcer'
         $parent = Split-Path $source -Parent
         $package = Join-Path $parent 'package.json'
-        if ((Test-Path -LiteralPath $package) -and (Get-Content -LiteralPath $package -Raw | ConvertFrom-Json).name -eq 'civilized-agent') { Join-Path $parent 'native-announcer' }
+        if ((Test-Path -LiteralPath $package) -and (Get-Content -LiteralPath $package -Raw | ConvertFrom-Json).name -eq 'herald') { Join-Path $parent 'native-announcer' }
     }
     foreach ($installation in @(Get-ClaudeInstallations $ConfigDirectory)) {
         Assert-ClaudeInstallation $installation.installPath $ConfigDirectory
@@ -257,7 +257,7 @@ function Stop-OwnedAnnouncers {
     param([string[]]$Directories)
     $prefixes = @($Directories | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar })
     if (-not $prefixes.Count) { return }
-    foreach ($process in Get-CimInstance Win32_Process -Filter "Name LIKE 'civilized-announcer%.exe'") {
+    foreach ($process in Get-CimInstance Win32_Process -Filter "Name LIKE 'herald%.exe'") {
         if (-not $process.ExecutablePath -or -not @($prefixes | Where-Object { $process.ExecutablePath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count) { continue }
         if ($process.CommandLine -match '(?:^|[\s"])--settings(?:$|[\s"])') { continue }
         $handle = Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
@@ -281,8 +281,8 @@ function Deploy-ClaudeFiles {
         if (-not (Test-Path -LiteralPath (Join-Path $Source $required))) { throw "Missing Claude runtime: $required" }
     }
     $parent = Split-Path $destination -Parent
-    $stage = Join-Path $parent ('.civilized-stage-' + [guid]::NewGuid())
-    $backup = Join-Path $parent ('.civilized-backup-' + [guid]::NewGuid())
+    $stage = Join-Path $parent ('.herald-stage-' + [guid]::NewGuid())
+    $backup = Join-Path $parent ('.herald-backup-' + [guid]::NewGuid())
     try {
         New-Item -ItemType Directory -Path $stage | Out-Null
         foreach ($name in @('.claude-plugin', 'hooks')) { Copy-Item -LiteralPath (Join-Path $Source $name) -Destination (Join-Path $stage $name) -Recurse -Force }
@@ -298,15 +298,15 @@ function Install-SettingsShortcut {
     param([string]$Binary, [string]$ProgramsDirectory = [Environment]::GetFolderPath('Programs'))
     Assert-NoLinks $ProgramsDirectory
     New-Item -ItemType Directory -Path $ProgramsDirectory -Force | Out-Null
-    $path = Join-Path $ProgramsDirectory 'Civilized Agent settings.lnk'
+    $path = Join-Path $ProgramsDirectory 'Herald settings.lnk'
     Assert-NoLinks $path
     if (Test-Path -LiteralPath $path) {
         $shortcut = Read-NativeShortcut $path
-        if ($shortcut.Arguments -ne '--settings' -or (Split-Path $shortcut.TargetPath -Leaf) -notlike 'civilized-announcer*.exe') { throw 'An unrelated shortcut already uses the Civilized Agent settings name' }
+        if ($shortcut.Arguments -ne '--settings' -or (Split-Path $shortcut.TargetPath -Leaf) -notlike 'herald*.exe') { throw 'An unrelated shortcut already uses the Herald settings name' }
         $appRoot = Split-Path (Split-Path (Split-Path $shortcut.TargetPath -Parent) -Parent) -Parent
         $packagePath = Join-Path $appRoot 'package.json'
         Assert-NoLinks $packagePath
-        if (-not (Test-Path -LiteralPath $packagePath) -or (Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json).name -ne 'civilized-agent') { throw 'Cannot confirm ownership of the existing settings shortcut' }
+        if (-not (Test-Path -LiteralPath $packagePath) -or (Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json).name -ne 'herald') { throw 'Cannot confirm ownership of the existing settings shortcut' }
     }
     $target = [IO.Path]::GetFullPath($Binary)
     Write-NativeShortcut $path $target '--settings' (Split-Path $target -Parent)
@@ -350,10 +350,10 @@ function Register-OpenCodeBundle {
         $start.ArgumentList.Add('-NoProfile')
         $start.ArgumentList.Add('-NonInteractive')
         $start.ArgumentList.Add('-Command')
-        $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:CIVILIZED_AGENT_OPENCODE $env:CIVILIZED_AGENT_RENDERER --render; exit $LASTEXITCODE')
+        $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:HERALD_OPENCODE $env:HERALD_RENDERER --render; exit $LASTEXITCODE')
         $start.Environment['BUN_BE_BUN'] = '1'
-        $start.Environment['CIVILIZED_AGENT_OPENCODE'] = $OpenCodeCommand
-        $start.Environment['CIVILIZED_AGENT_RENDERER'] = Join-Path $App 'register-opencode.mjs'
+        $start.Environment['HERALD_OPENCODE'] = $OpenCodeCommand
+        $start.Environment['HERALD_RENDERER'] = Join-Path $App 'register-opencode.mjs'
         $node = [Diagnostics.Process]::Start($start)
         try {
             $output = $node.StandardOutput.ReadToEndAsync()
@@ -416,7 +416,7 @@ function Register-ClaudeBundle {
 function Register-BundleHosts {
     param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand)
     $files = @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ }
-    $files += Join-Path $ProgramsDirectory 'Civilized Agent settings.lnk'
+    $files += Join-Path $ProgramsDirectory 'Herald settings.lnk'
     $snapshots = @($files | ForEach-Object {
         Assert-NoLinks $_
         @{ path = $_; bytes = if (Test-Path -LiteralPath $_) { [IO.File]::ReadAllBytes($_) } else { $null } }
@@ -459,7 +459,7 @@ function Register-BundleHosts {
 if ($MyInvocation.InvocationName -eq '.') { return }
 if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 on Windows is required' }
 Test-Bundle $Bundle | Out-Null
-if (-not $PSCmdlet.ShouldProcess($InstallDirectory, 'Install the verified Civilized Agent bundle and selected host registrations')) { return }
+if (-not $PSCmdlet.ShouldProcess($InstallDirectory, 'Install the verified Herald bundle and selected host registrations')) { return }
 Assert-NoLinks $InstallDirectory
 New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
 Assert-NoLinks (Join-Path $InstallDirectory '.install.lock')
@@ -467,7 +467,7 @@ $installationLock = [IO.File]::Open((Join-Path $InstallDirectory '.install.lock'
 try {
 $app = Install-Payload $Bundle $InstallDirectory -LockHeld
 $manifest = Test-Bundle $app
-$binary = Join-Path $app "native-announcer/bin/civilized-announcer-win32-$($manifest.arch).exe"
+$binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
 if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }

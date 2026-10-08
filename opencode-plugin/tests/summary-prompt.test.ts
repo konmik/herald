@@ -11,7 +11,7 @@ test("keeps the shared default prompt exact", () => {
 })
 
 test("reads valid custom prompts and rereads saved changes", () => {
-  const data = mkdtempSync(join(tmpdir(), "civilized-summary-prompt-"))
+  const data = mkdtempSync(join(tmpdir(), "herald-summary-prompt-"))
   try {
     writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: custom }))
     expect(readAnnouncementProfile(data).prompt).toBe(custom)
@@ -21,7 +21,7 @@ test("reads valid custom prompts and rereads saved changes", () => {
 })
 
 test("falls back for missing or invalid saved prompts", () => {
-  const data = mkdtempSync(join(tmpdir(), "civilized-summary-prompt-"))
+  const data = mkdtempSync(join(tmpdir(), "herald-summary-prompt-"))
   try {
     expect(readAnnouncementProfile(data)).toEqual({ prompt: DEFAULT_SUMMARY_PROMPT, characterID: undefined })
     for (const summaryPrompt of ["", "Bad\0prompt", "😀".repeat(SUMMARY_PROMPT_MAX_LENGTH + 1)] as const) {
@@ -32,7 +32,7 @@ test("falls back for missing or invalid saved prompts", () => {
 })
 
 test("uses the chosen character prompt and falls back for blank or invalid prompts", () => {
-  const data = mkdtempSync(join(tmpdir(), "civilized-character-prompts-"))
+  const data = mkdtempSync(join(tmpdir(), "herald-character-prompts-"))
   try {
     const settings = {
       summaryPrompt: "Default voice.",
@@ -66,7 +66,7 @@ test("counts Unicode characters and accepts plain prompts", () => {
 })
 
 test("chooses from all characters when none are checked and restricts choices when some are checked", () => {
-  const data = mkdtempSync(join(tmpdir(), "civilized-character-choice-"))
+  const data = mkdtempSync(join(tmpdir(), "herald-character-choice-"))
   try {
     const settings = {
       selectedCharacter: "editor-only",

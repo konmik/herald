@@ -8,8 +8,8 @@ import { Service } from "@opencode/client/service"
 const [host, scenario, model, scratch, evidence, root, claude, app = root, claudePlugin] = process.argv.slice(2)
 if (!host || !scenario || !scratch || !evidence || !root) throw new Error("Missing host verification arguments")
 const proof = join(evidence, "host-proof.jsonl")
-const marker = process.env.CIVILIZED_AGENT_HOST_MARKER!
-const summaryMarker = process.env.CIVILIZED_AGENT_HOST_SUMMARY_MARKER
+const marker = process.env.HERALD_HOST_MARKER!
+const summaryMarker = process.env.HERALD_HOST_SUMMARY_MARKER
 type ProofRow = {
   type: string
   at: number
@@ -72,7 +72,7 @@ try {
       client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
       const info = await client.server.info(request())
       await writeFile(join(scratch, "server.json"), JSON.stringify({ pid: info.pid, file }))
-      const session = await client.session.create({ location: { directory: scratch }, title: "Civilized host verification", model: { providerID, id } }, request())
+      const session = await client.session.create({ location: { directory: scratch }, title: "Herald host verification", model: { providerID, id } }, request())
       sessionID = session.id
       await writeFile(join(scratch, "session.json"), JSON.stringify({ sessionID }))
       await log({ action: "created", sessionID })

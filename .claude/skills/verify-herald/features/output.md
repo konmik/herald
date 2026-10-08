@@ -17,7 +17,7 @@ Open settings and use the output dropdown, `Refresh devices`, and Apply. Preview
 
 Preconditions: baseline; no real device changes required for system-default proof.
 
-- **Fallback, refresh, default.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Output -Evidence temp/verification/output-proof`. The seeded missing device appears as `Selected device unavailable (using system default)`. Refresh and Apply preserve its ID in `settings-unavailable-device.json`. Selecting `System default` and Apply saves a null output device. Reopening displays the default selection.
+- **Fallback, refresh, default.** Run `pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1 -Feature Output -Evidence temp/verification/output-proof`. The seeded missing device appears as `Selected device unavailable (using system default)`. Refresh and Apply preserve its ID in `settings-unavailable-device.json`. Selecting `System default` and Apply saves a null output device. Reopening displays the default selection.
 - **Physical output.** For routing changes, select an actual named device in an isolated settings window and play an example; capture loopback output or ask a human to confirm that device. Record the selected label and saved device ID. The fallback helper does not prove physical routing.
 
 ## Gotchas

@@ -12,7 +12,11 @@ pnpm install --frozen-lockfile
 pnpm run build:announcer -- --release
 ```
 
-The executable is `native-announcer/bin/civilized-announcer-linux-x64` on x86-64. Keep the checkout and its `native-announcer/resources` directory available.
+The executable is `native-announcer/bin/herald-linux-x64` on x86-64. Keep the checkout and its `native-announcer/resources` directory available.
+
+Linux builds automatically add **Herald Settings** to the application launcher. It opens the settings file in Omarchy's selected editor, or in `$EDITOR` through `xdg-terminal-exec` on other desktops. Existing settings are preserved. To install or refresh just the menu entry, run `pnpm run install:linux-menu`.
+
+Use `HERALD_DATA`, `HERALD_BINARY` and `HERALD_TTS` for explicit development overrides.
 
 If a cold build exceeds the helper's two-minute limit, run `cargo build --release --locked --manifest-path native-announcer/Cargo.toml` first. Then rerun the helper to copy the executable.
 
@@ -31,12 +35,12 @@ Add the checkout's absolute path to `plugins` in `~/.config/opencode/opencode.js
 
 Preserve existing configuration fields and other plugins. Start a new host session to load the plugin.
 
-For Claude, install a copy of `claude-plugin` with `native-announcer/bin` and `native-announcer/resources` inside that copy. Register the copy with `claude plugin marketplace add <copy-path> --scope user`, then install `civilized-agent@civilized-agent-local` with `claude plugin install --scope user`. A marketplace cache copy cannot use the checkout's sibling runtime directory.
+For Claude, install a copy of `claude-plugin` with `native-announcer/bin` and `native-announcer/resources` inside that copy. Register the copy with `claude plugin marketplace add <copy-path> --scope user`, then install `herald@herald-local` with `claude plugin install --scope user`. A marketplace cache copy cannot use the checkout's sibling runtime directory.
 
 On Omarchy, add this rule to `~/.config/hypr/hyprland.lua`:
 
 ```lua
-o.window({ title = "^Civilized Agent$" }, {
+o.window({ title = "^Herald$" }, {
   float = true,
   pin = true,
   no_initial_focus = true,
@@ -54,7 +58,7 @@ o.window({ title = "^Civilized Agent$" }, {
 
 Run `hyprctl reload`, then confirm `hyprctl configerrors` reports no errors.
 
-Linux uses eSpeak NG for speech. The settings window is Windows-only. Edit `~/.local/share/CivilizedAgent/settings.json` to configure quiet hours, volume, and characters. `XDG_DATA_HOME` or `CIVILIZED_AGENT_DATA` can override the data location.
+Linux uses eSpeak NG for speech. The settings window is Windows-only. Edit `~/.local/share/herald/settings.json` to configure quiet hours, volume, and characters. `XDG_DATA_HOME` or `HERALD_DATA` can override the data location.
 
 ## Windows bundle
 
@@ -76,7 +80,7 @@ Repackaging refreshes the installer and its helpers and generates a new manifest
 
 `pnpm run test:bundle` runs unit checks with placeholder native files and mocked Claude commands. It does not prove a working native installation. Before deployment, run `pnpm run test:bundle:installed -- -Archive <release.zip>`. This uses a disposable Claude profile and real host commands, verifies the installed cache and shortcut, removes the extraction folder, boots OpenCode from the installed compiled package, and starts the real native executable. It makes no model requests and leaves the disposable installation available for further runtime checks.
 
-Close any open herald settings windows (currently titled `Civilized Agent settings`). Extract the ZIP, then run its installer:
+Close any open herald settings windows (currently titled `Herald settings`). Extract the ZIP, then run its installer:
 
 ```powershell
 pwsh -NoProfile -File .\install.ps1 -WhatIf
@@ -87,14 +91,14 @@ Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Open
 
 The Start menu shortcut uses Windows' native Unicode shell-link interface, including when checking an existing shortcut's ownership. PowerShell 7 compiles this helper internally; no separate compiler installation is needed. Local speech uses Windows short filenames for non-ASCII paths. If the volume does not provide those names, install into an ASCII path.
 
-The complete payload is copied to `%LOCALAPPDATA%/Programs/CivilizedAgent/versions/<version>-<arch>-<payloadHash>`. Claude's local marketplace points there and its cache receives a separate physical runtime copy. Node is not bundled; host registration requires the installed Claude and OpenCode CLIs. OpenCode and the Start menu shortcut point to that installed version. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/CivilizedAgent`.
+The complete payload is copied to `%LOCALAPPDATA%/Programs/herald/versions/<version>-<arch>-<payloadHash>`. Claude's local marketplace points there and its cache receives a separate physical runtime copy. Node is not bundled; host registration requires the installed Claude and OpenCode CLIs. OpenCode and the Start menu shortcut point to that installed version. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/herald`.
 
 Existing owned Claude marketplace registrations migrate with `claude plugin marketplace add` from the installed source. This changes the source without removing installed plugins. Existing cache junctions are replaced without touching their targets. OpenCode migration recognizes local packages by their package name, exports and plugin ID, preserving unrelated entries, comments and options. Keep the old registered package available until migration completes; unknown registrations are not removed.
 
 For a copy-only test installation:
 
 ```powershell
-pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/opencode/civilized-test" -SkipHostRegistration -NoStart
+pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/opencode/herald-test" -SkipHostRegistration -NoStart
 ```
 
 `-ClaudeConfigDirectory`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.

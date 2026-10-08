@@ -19,9 +19,9 @@ Save every character image in the single `native-announcer/resources/portraits/`
 
 ## Deployment
 
-For playback, settings, audio, or plugin-completion changes, read `.claude/skills/verify-civilized-agent/SKILL.md` and verify each affected entry point. Run `npm run check` after code changes.
+For playback, settings, audio, or plugin-completion changes, read `.claude/skills/verify-herald/SKILL.md` and verify each affected entry point. Run `pnpm run check` after code changes.
 
-When asked to rebuild and deploy on Windows, run `pnpm run deploy:plugins` from the repository root. It checks both plugins, builds and verifies a release bundle, then installs it under `%LOCALAPPDATA%/Programs/CivilizedAgent/versions/<version>-<arch>-<payloadHash>`. Claude receives a physical plugin cache copy; OpenCode points to the installed package. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise `.claude`. The installer restarts the announcer with the installed bundle's videos, leaving the checkout executable unchanged. Restart Claude sessions to load new hooks. Reload OpenCode only when requested with `pnpm run deploy:plugins -ReloadOpenCode`; this reloads all loaded locations and cancels pending permissions and forms. Use `pnpm run deploy:plugins -WhatIf` for a dry run.
+When asked to rebuild and deploy on Windows, run `pnpm run deploy:plugins` from the repository root. It checks both plugins, builds and verifies a release bundle, then installs it under `%LOCALAPPDATA%/Programs/herald/versions/<version>-<arch>-<payloadHash>`. Claude receives a physical plugin cache copy; OpenCode points to the installed package. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise `.claude`. The installer restarts the announcer with the installed bundle's videos, leaving the checkout executable unchanged. Restart Claude sessions to load new hooks. Reload OpenCode only when requested with `pnpm run deploy:plugins -ReloadOpenCode`; this reloads all loaded locations and cancels pending permissions and forms. Use `pnpm run deploy:plugins -WhatIf` for a dry run.
 
 ## Generate herald video
 

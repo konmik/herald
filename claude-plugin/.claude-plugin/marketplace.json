@@ -1,9 +1,9 @@
 {
-  "name": "civilized-agent-local",
+  "name": "herald-local",
   "owner": { "name": "elkmo" },
   "plugins": [
     {
-      "name": "civilized-agent",
+      "name": "herald",
       "source": "./",
       "description": "Animated spoken task-completion summaries on Windows, macOS and Linux.",
       "version": "0.3.0"

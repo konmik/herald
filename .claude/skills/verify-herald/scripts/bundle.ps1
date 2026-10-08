@@ -14,7 +14,7 @@ $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 if (-not (Test-Path -LiteralPath $app -PathType Container)) { throw 'Specify the installed bundle directory' }
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
-$overrides = @('CIVILIZED_AGENT_BINARY', 'CIVILIZED_AGENT_TTS', 'CIVILIZED_AGENT_EXTERNAL_COMPANION')
+$overrides = @('HERALD_BINARY', 'HERALD_TTS', 'HERALD_EXTERNAL_COMPANION')
 $previous = @{}
 $results = [Collections.Generic.List[object]]::new()
 try {

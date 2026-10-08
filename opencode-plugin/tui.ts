@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { send } from "./bridge"
 
 export default {
-  id: "civilized-agent.tui",
+  id: "herald.tui",
   setup(ctx) {
     const clientID = randomUUID()
     let sequence = 0

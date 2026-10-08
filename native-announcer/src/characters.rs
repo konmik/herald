@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn bundled_relative_video_uses_the_runtime_asset_root() {
-        let directory = std::env::temp_dir().join(format!("civilized-bundled-character-{}", crate::state::timestamp()));
+        let directory = std::env::temp_dir().join(format!("herald-bundled-character-{}", crate::state::timestamp()));
         let video = directory.join("videos/hatted-herald-01.mp4");
         std::fs::create_dir_all(video.parent().unwrap()).unwrap();
         std::fs::write(&video, []).unwrap();
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn absolute_custom_video_path_remains_absolute() {
-        let directory = std::env::temp_dir().join(format!("civilized-custom-character-{}", crate::state::timestamp()));
+        let directory = std::env::temp_dir().join(format!("herald-custom-character-{}", crate::state::timestamp()));
         std::fs::create_dir_all(&directory).unwrap();
         let video = directory.join("custom.mp4");
         std::fs::write(&video, []).unwrap();

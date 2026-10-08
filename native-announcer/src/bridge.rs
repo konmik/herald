@@ -184,10 +184,10 @@ fn deliver(data: &Path, command: &state::Command) -> Result<(), String> {
 }
 
 fn boot(assets: &Path) -> Result<(), String> {
-    if std::env::var("CIVILIZED_AGENT_EXTERNAL_COMPANION").as_deref() == Ok("1") {
-        match std::env::var_os("CIVILIZED_AGENT_DATA") {
+    if std::env::var("HERALD_EXTERNAL_COMPANION").as_deref() == Ok("1") {
+        match std::env::var_os("HERALD_DATA") {
             Some(data) if !data.is_empty() => return Ok(()),
-            _ => return Err("An external companion requires CIVILIZED_AGENT_DATA".into()),
+            _ => return Err("An external companion requires HERALD_DATA".into()),
         }
     }
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn test_directory() -> PathBuf {
-        let path = std::env::temp_dir().join("opencode").join(format!("civilized-bridge-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join("opencode").join(format!("herald-bridge-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&path).unwrap();
         path
     }

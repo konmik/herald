@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "civilized-agent",
+      "name": "herald",
       "devDependencies": {
         "@anthropic-ai/claude-code": "2.1.292",
         "@types/bun": "1.4.2",

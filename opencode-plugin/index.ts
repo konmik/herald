@@ -9,16 +9,16 @@ import { canAnnounceFromLocalServer } from "./state-client"
 import { readAnnouncementProfile } from "../claude-plugin/scripts/summary-prompt.mjs"
 
 export default Plugin.define({
-  id: "civilized-agent",
+  id: "herald",
   async setup(ctx) {
-    if (process.env.CIVILIZED_AGENT_EXTERNAL_COMPANION === "1") {
-      if (!process.env.CIVILIZED_AGENT_DATA) throw new Error("An external companion requires CIVILIZED_AGENT_DATA")
+    if (process.env.HERALD_EXTERNAL_COMPANION === "1") {
+      if (!process.env.HERALD_DATA) throw new Error("An external companion requires HERALD_DATA")
     } else {
       const suffix = process.platform === "win32" ? ".exe" : ""
       const installed = existsSync(fileURLToPath(new URL("../bundle-manifest.json", import.meta.url)))
-      const localBinary = fileURLToPath(new URL(`../native-announcer/bin/civilized-announcer-${process.platform}-${process.arch}${suffix}`, import.meta.url))
-      const binary = installed ? localBinary : process.env.CIVILIZED_AGENT_BINARY ?? localBinary
-      if (!existsSync(binary)) throw new Error(`Civilized Agent native announcer is missing at ${binary}. Reinstall the application bundle.`)
+      const localBinary = fileURLToPath(new URL(`../native-announcer/bin/herald-${process.platform}-${process.arch}${suffix}`, import.meta.url))
+      const binary = installed ? localBinary : process.env.HERALD_BINARY ?? localBinary
+      if (!existsSync(binary)) throw new Error(`Herald native announcer is missing at ${binary}. Reinstall the application bundle.`)
       const child = spawn(binary, ["--assets", fileURLToPath(new URL("../native-announcer/resources", import.meta.url))], { detached: true, stdio: "ignore", windowsHide: true })
       child.on("error", console.error)
       child.unref()
@@ -38,7 +38,7 @@ export default Plugin.define({
       },
       canAnnounceFromLocalServer,
       typeof ctx.options.minimumSeconds === "number" ? ctx.options.minimumSeconds * 1000 : 60_000,
-      (sessionID, reason) => console.info(JSON.stringify({ plugin: "civilized-agent", sessionID, reason })),
+      (sessionID, reason) => console.info(JSON.stringify({ plugin: "herald", sessionID, reason })),
     )
     const controller = new AbortController()
     const owned = new Set<string>()

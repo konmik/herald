@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn selects_only_videos_from_the_shared_library() {
-        let directory = std::env::temp_dir().join(format!("civilized-video-selection-{}-{}", std::process::id(), crate::state::timestamp()));
+        let directory = std::env::temp_dir().join(format!("herald-video-selection-{}-{}", std::process::id(), crate::state::timestamp()));
         let library = directory.join("videos");
         std::fs::create_dir_all(&library).unwrap();
         std::fs::write(library.join("first.mp4"), []).unwrap();

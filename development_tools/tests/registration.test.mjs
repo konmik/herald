@@ -13,14 +13,14 @@ test('public registration preserves JSONC comments, unrelated plugins and object
     const old = join(root, 'checkout')
     const installed = join(root, 'installed').replaceAll('\\', '/')
     mkdirSync(join(old, 'opencode-plugin'), { recursive: true })
-    writeFileSync(join(old, 'package.json'), JSON.stringify({ name: 'civilized-agent', exports: { '.': './opencode-plugin/index.ts', './tui': './opencode-plugin/tui.ts' } }))
-    writeFileSync(join(old, 'opencode-plugin/index.ts'), 'id: "civilized-agent"')
+    writeFileSync(join(old, 'package.json'), JSON.stringify({ name: 'herald', exports: { '.': './opencode-plugin/index.ts', './tui': './opencode-plugin/tui.ts' } }))
+    writeFileSync(join(old, 'opencode-plugin/index.ts'), 'id: "herald"')
     const config = join(root, 'opencode.jsonc')
     const text = `{
   // keep this comment
   "model": "unrelated",
   "plugins": [
-    "./civilized-agent-unrelated",
+    "./herald-unrelated",
     { "package": ${JSON.stringify(old)}, "options": { "minimumSeconds": 90, }, },
     ${JSON.stringify(old)},
     "another-plugin",
@@ -34,7 +34,7 @@ test('public registration preserves JSONC comments, unrelated plugins and object
     assert.equal(readFileSync(config, 'utf8'), text)
     assert.ok(updated.includes('// keep this comment'))
     assert.ok(updated.includes('"options": { "minimumSeconds": 90, }'))
-    assert.deepEqual(parseJSONC(updated).value.plugins, ['./civilized-agent-unrelated', Object.assign(Object.create(null), { package: installed, options: Object.assign(Object.create(null), { minimumSeconds: 90 }) }), 'another-plugin'])
+    assert.deepEqual(parseJSONC(updated).value.plugins, ['./herald-unrelated', Object.assign(Object.create(null), { package: installed, options: Object.assign(Object.create(null), { minimumSeconds: 90 }) }), 'another-plugin'])
     assert.equal(updateRegistration(updated, root, installed), updated)
     assert.equal(parseJSONC(updated).value.model, 'unrelated')
     rmSync(old, { recursive: true })
@@ -57,8 +57,8 @@ test('upgrading a compiled package replaces its registration and preserves optio
     const old = join(root, 'old-version')
     const installed = join(root, 'new-version').replaceAll('\\', '/')
     mkdirSync(join(old, 'opencode-plugin'), { recursive: true })
-    writeFileSync(join(old, 'package.json'), JSON.stringify({ name: 'civilized-agent', exports: { '.': './opencode-plugin/index.js', './tui': './opencode-plugin/tui.js' } }))
-    writeFileSync(join(old, 'opencode-plugin/index.js'), 'export default {id:"civilized-agent",setup(){}}')
+    writeFileSync(join(old, 'package.json'), JSON.stringify({ name: 'herald', exports: { '.': './opencode-plugin/index.js', './tui': './opencode-plugin/tui.js' } }))
+    writeFileSync(join(old, 'opencode-plugin/index.js'), 'export default {id:"herald",setup(){}}')
     const text = JSON.stringify({ plugins: [{ package: old, options: { minimumSeconds: 90 } }, 'keep'] })
     const updated = updateRegistration(text, root, installed)
     assert.deepEqual(JSON.parse(updated).plugins, [{ package: installed, options: { minimumSeconds: 90 } }, 'keep'])

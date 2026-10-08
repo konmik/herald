@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
-$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-announcement-' + [guid]::NewGuid())
-$binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
+$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-announcement-' + [guid]::NewGuid())
+$binary = Join-Path $root 'native-announcer/target/debug/herald.exe'
 $assets = Join-Path $root 'native-announcer/resources'
 $toolNode = 'node'
 if ($AppDirectory) {
@@ -13,13 +13,13 @@ if ($AppDirectory) {
     if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
-    $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-win32-$architecture.exe"
     $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
 }
 $process = $null
 $server = $null
 $transcribing = $false
-$oldData = $env:CIVILIZED_AGENT_DATA
+$oldData = $env:HERALD_DATA
 . (Join-Path $PSScriptRoot 'process.ps1')
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
@@ -47,7 +47,7 @@ try {
     New-Item -ItemType Directory -Path $scratch | Out-Null
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
-    $env:CIVILIZED_AGENT_DATA = $scratch
+    $env:HERALD_DATA = $scratch
     $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false }
     if ($PSBoundParameters.ContainsKey('SilentSoundSeconds')) { $settings.silentSoundSeconds = $SilentSoundSeconds }
     if ($SpeechFixture) {
@@ -75,10 +75,10 @@ try {
     if ($Meeting) { @{ active = $true; updated = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000 } | ConvertTo-Json | Set-Content (Join-Path $scratch 'meeting.json') -Encoding utf8NoBOM }
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
-    $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
+    $info.Environment['HERALD_DATA'] = $scratch
     if ($SpeechFixture) { $info.Environment['ELEVENLABS_API_BASE_URL'] = Get-Content $addressFile -Raw }
-    if ($AppDirectory) { $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null }
-    else { $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
+    if ($AppDirectory) { $info.Environment.Remove('HERALD_TTS') | Out-Null }
+    else { $info.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
     Write-Output "Launch: $binary --isolated; data=$scratch; speech=$Speech; meeting=$Meeting; quiet=$Quiet"
     $process = [Diagnostics.Process]::Start($info)
@@ -124,7 +124,7 @@ try {
         if (Test-Path (Join-Path $scratch 'errors.log')) { Copy-Item (Join-Path $scratch 'errors.log') (Join-Path $evidencePath 'errors.log') }
         Remove-Item -LiteralPath $scratch -Recurse -Force
     }
-    $env:CIVILIZED_AGENT_DATA = $oldData
+    $env:HERALD_DATA = $oldData
     if (Test-Path $evidencePath) { @{ scratchRemoved = -not (Test-Path $scratch); processExited = (-not $process -or $process.HasExited); serverExited = (-not $server -or $server.HasExited) } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json') }
     if ($transcribing) { Stop-Transcript | Out-Null }
 }

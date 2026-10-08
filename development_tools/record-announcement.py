@@ -136,7 +136,7 @@ def main():
     from PIL import Image
 
     root = Path(__file__).resolve().parents[1]
-    runtime_data = Path(os.environ.get("CIVILIZED_AGENT_DATA", str(Path(os.environ["LOCALAPPDATA"]) / "CivilizedAgent")))
+    runtime_data = Path(os.environ.get("HERALD_DATA", str(Path(os.environ["LOCALAPPDATA"]) / "herald")))
     history = args.history or runtime_data / "history.jsonl"
     message = last_message(history, args.session) if args.last else {"text": args.text, "title": "Herald videos", "source": "opencode"}
     settings = json.loads((runtime_data / "settings.json").read_text()) if (runtime_data / "settings.json").exists() else {}
@@ -145,9 +145,9 @@ def main():
     if args.binary:
         binary = args.binary.resolve()
     else:
-        build = temporary_root / "civilized-announcer-build"
+        build = temporary_root / "herald-build"
         subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path", str(root / "native-announcer/Cargo.toml"), "--target-dir", str(build)], check=True, timeout=180)
-        binary = build / "release/civilized-announcer.exe"
+        binary = build / "release/herald.exe"
     user32 = ctypes.windll.user32
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -169,7 +169,7 @@ def main():
         speech_seconds = synthesize(message, temporary / "speech.wav", settings)
         playback = playback_seconds(message["text"], speech_seconds)
         frames_directory = temporary / "frames"
-        environment = dict(os.environ, CIVILIZED_AGENT_DATA=str(data))
+        environment = dict(os.environ, HERALD_DATA=str(data))
         app = subprocess.Popen([str(binary), "--isolated", "--assets", str(assets), "--capture-frames", str(frames_directory), "--capture-speech-seconds", str(speech_seconds), "--test-seconds", str(math.ceil(playback + 15)), "--report", str(temporary / "report.json")], env=environment)
         try:
             last_presence = 0

@@ -1,5 +1,5 @@
 [package]
-name = "civilized-announcer"
+name = "herald"
 version = "0.3.0"
 license = "MIT"
 edition = "2021"

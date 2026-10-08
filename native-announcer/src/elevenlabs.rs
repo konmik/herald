@@ -320,9 +320,9 @@ mod tests {
     use std::time::Instant;
 
     fn isolated_speech_test(body: impl FnOnce()) {
-        const CHILD: &str = "CIVILIZED_SPEECH_TEST_CHILD";
+        const CHILD: &str = "HERALD_SPEECH_TEST_CHILD";
         let name = std::thread::current().name().expect("speech test thread is unnamed").to_owned();
-        let done = format!("CIVILIZED_SPEECH_TEST_DONE {name}");
+        let done = format!("HERALD_SPEECH_TEST_DONE {name}");
         if let Some(marker) = std::env::var_os(CHILD) {
             assert_eq!(marker, std::ffi::OsStr::new(name.as_str()));
             body();

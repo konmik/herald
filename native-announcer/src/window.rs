@@ -341,7 +341,7 @@ mod native {
             unsafe {
                 SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
                 let module = GetModuleHandleW(std::ptr::null());
-                let name: Vec<u16> = "CivilizedNativeWindow\0".encode_utf16().collect();
+                let name: Vec<u16> = "HeraldNativeWindow\0".encode_utf16().collect();
                 let class = WNDCLASSW {
                     style: CS_HREDRAW | CS_VREDRAW,
                     lpfnWndProc: Some(procedure),

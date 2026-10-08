@@ -163,7 +163,7 @@ def portrait(character=None, size=512, steps=20, prompt_override=None, seed=None
         "7": node("FluxGuidance", conditioning=["4", 0], guidance=3.5),
         "8": node("KSampler", model=["1", 0], positive=["7", 0], negative=["5", 0], latent_image=["6", 0], seed=seed if seed is not None else 478324 + list(MEDIEVAL_IDENTITIES).index(character) if character in MEDIEVAL_IDENTITIES else 478323 if character == "monty" else 478322 if character == "claude" else 478321, steps=steps, cfg=1.0, sampler_name="euler", scheduler="simple", denoise=1.0),
         "9": node("VAEDecode", samples=["8", 0], vae=["3", 0]),
-        "10": node("SaveImage", images=["9", 0], filename_prefix=f"civilized/{character or 'original'}/portrait"),
+        "10": node("SaveImage", images=["9", 0], filename_prefix=f"herald/{character or 'original'}/portrait"),
     }
     source = run_graph(graph, f"{character}-portrait" if character else "portrait")[0]
     output = destination / f"{character or 'original'}.png"
@@ -186,8 +186,8 @@ def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=
     with wave.open(str(audio_path)) as audio:
         duration = audio.getnframes() / audio.getframerate()
     length = frames if frames is not None else max(77, 4 * math.ceil(duration * 16 / 4) + 1)
-    image_name = f"civilized-{character or 'original'}-portrait.png"
-    audio_name = f"civilized-{character or 'original'}-{emotion}.wav"
+    image_name = f"herald-{character or 'original'}-portrait.png"
+    audio_name = f"herald-{character or 'original'}-{emotion}.wav"
     reference = RUNTIME_ASSETS / "portraits" / f"{character or 'original'}-source.png"
     if not reference.exists():
         reference = RUNTIME_ASSETS / "portraits" / f"{character or 'original'}.png"
@@ -214,7 +214,7 @@ def video(emotion, character=None, size=384, frames=None, steps=20, fps=16, cfg=
         "13": node("VAEDecode", samples=["17", 0], vae=["3", 0]),
         "18": node("ImageFromBatch", image=["13", 0], batch_index=4, length=output_frames if output_frames is not None else length),
         "14": node("CreateVideo", images=["18", 0], fps=fps),
-        "15": node("SaveVideo", video=["14", 0], filename_prefix=f"civilized/{character + '/' if character else ''}{emotion}", **{"format": "mp4", "format.codec": "h264"}),
+        "15": node("SaveVideo", video=["14", 0], filename_prefix=f"herald/{character + '/' if character else ''}{emotion}", **{"format": "mp4", "format.codec": "h264"}),
     }
     source = run_graph(graph, f"{character}-{emotion}" if character else emotion)[0]
     shutil.copyfile(source, destination / f"{emotion}.mp4")

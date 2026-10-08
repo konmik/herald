@@ -2,11 +2,11 @@ import { appendFile } from "node:fs/promises"
 import { Plugin } from "@opencode/plugin"
 
 export default Plugin.define({
-  id: "civilized-host-verification",
+  id: "herald-host-verification",
   async setup(ctx) {
-    const proof = process.env.CIVILIZED_AGENT_HOST_PROOF
-    const marker = process.env.CIVILIZED_AGENT_HOST_MARKER
-    const summaryMarker = process.env.CIVILIZED_AGENT_HOST_SUMMARY_MARKER
+    const proof = process.env.HERALD_HOST_PROOF
+    const marker = process.env.HERALD_HOST_MARKER
+    const summaryMarker = process.env.HERALD_HOST_SUMMARY_MARKER
     if (!proof || !marker) throw new Error("Host verification requires an evidence path and context marker")
     const write = (value: object) => appendFile(proof, JSON.stringify({ at: Date.now(), ...value }) + "\n")
     await ctx.session.hook("generate", async (event) => {

@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
-$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-host-' + [guid]::NewGuid())
-$binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
+$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-host-' + [guid]::NewGuid())
+$binary = Join-Path $root 'native-announcer/target/debug/herald.exe'
 $app = $root
 $assets = Join-Path $root 'native-announcer/resources'
 if ($AppDirectory) {
@@ -19,13 +19,13 @@ if ($AppDirectory) {
     $runtimeDirectory = if ($HostName -eq 'Claude') { Join-Path $app 'claude-plugin' } else { $app }
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
-    $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-win32-$architecture.exe"
     $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
 }
 if ($HostName -eq 'Claude' -and $ClaudePluginDirectory) {
     $ClaudePluginDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory)
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    $binary = Join-Path $ClaudePluginDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+    $binary = Join-Path $ClaudePluginDirectory "native-announcer/bin/herald-win32-$architecture.exe"
     $assets = Join-Path $ClaudePluginDirectory 'native-announcer/resources'
 }
 if (-not (Test-Path -LiteralPath $binary)) { throw "Announcer executable is missing at $binary" }
@@ -34,22 +34,22 @@ if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory'
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
 $native = $null
 $driver = $null
-$oldData = $env:CIVILIZED_AGENT_DATA
+$oldData = $env:HERALD_DATA
 $transcribing = $false
 try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     New-Item -ItemType Directory -Path "$scratch/data", "$scratch/config/opencode", "$scratch/state", "$scratch/claude-profile" -Force | Out-Null
-    $env:CIVILIZED_AGENT_DATA = "$scratch/data"
+    $env:HERALD_DATA = "$scratch/data"
     $settings = @{ quietMode = $true; scheduleEnabled = $false }
-    $summaryMarker = if ($CustomSummary) { 'civilized-prompt-' + [guid]::NewGuid() } else { '' }
+    $summaryMarker = if ($CustomSummary) { 'herald-prompt-' + [guid]::NewGuid() } else { '' }
     if ($CustomSummary) {
         $settings.summaryPrompt = "Report the task outcome in one concise spoken sentence. Include the actual result and any failure. Do not run tools. Output only the sentence.`nVerification marker $summaryMarker."
     }
     $settings | ConvertTo-Json | Set-Content "$scratch/data/settings.json" -Encoding utf8NoBOM
     Copy-Item "$scratch/data/settings.json" (Join-Path $evidencePath 'settings.json')
     $proof = Join-Path $evidencePath 'host-proof.jsonl'
-    $marker = 'civilized-context-' + [guid]::NewGuid()
+    $marker = 'herald-context-' + [guid]::NewGuid()
     if ($HostName -eq 'OpenCode') {
         @{
             '$schema' = 'https://opencode.ai/config.json'
@@ -63,21 +63,21 @@ try {
     }
     $launch = [Diagnostics.ProcessStartInfo]::new($binary)
     $launch.UseShellExecute = $false
-    $launch.Environment['CIVILIZED_AGENT_DATA'] = "$scratch/data"
-    if ($AppDirectory -or $ClaudePluginDirectory) { $launch.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null }
-    else { $launch.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
+    $launch.Environment['HERALD_DATA'] = "$scratch/data"
+    if ($AppDirectory -or $ClaudePluginDirectory) { $launch.Environment.Remove('HERALD_TTS') | Out-Null }
+    else { $launch.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '360', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $launch.ArgumentList.Add($argument) }
     $native = [Diagnostics.Process]::Start($launch)
     @{ pid = $native.Id; started = $native.StartTime.ToUniversalTime().ToString('o'); binary = $binary; sha256 = (Get-FileHash $binary).Hash; data = "$scratch/data"; host = $HostName; scenario = $Scenario } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'instance.json')
     $run = [Diagnostics.ProcessStartInfo]::new((Get-Command bun).Source)
     $run.UseShellExecute = $false
     $run.WorkingDirectory = $root
-    $run.Environment['CIVILIZED_AGENT_DATA'] = "$scratch/data"
-    $run.Environment['CIVILIZED_AGENT_BINARY'] = $binary
-    $run.Environment['CIVILIZED_AGENT_EXTERNAL_COMPANION'] = '1'
-    $run.Environment['CIVILIZED_AGENT_HOST_PROOF'] = $proof
-    $run.Environment['CIVILIZED_AGENT_HOST_MARKER'] = $marker
-    $run.Environment['CIVILIZED_AGENT_HOST_SUMMARY_MARKER'] = $summaryMarker
+    $run.Environment['HERALD_DATA'] = "$scratch/data"
+    $run.Environment['HERALD_BINARY'] = $binary
+    $run.Environment['HERALD_EXTERNAL_COMPANION'] = '1'
+    $run.Environment['HERALD_HOST_PROOF'] = $proof
+    $run.Environment['HERALD_HOST_MARKER'] = $marker
+    $run.Environment['HERALD_HOST_SUMMARY_MARKER'] = $summaryMarker
     $run.Environment['XDG_STATE_HOME'] = "$scratch/state"
     $run.Environment['XDG_CONFIG_HOME'] = "$scratch/config"
     $run.Environment['CLAUDE_CONFIG_DIR'] = "$scratch/claude-profile"
@@ -133,7 +133,7 @@ try {
     }
     $serverExited = -not (Test-Path -LiteralPath $registration)
     if ($serverExited -and (Test-Path -LiteralPath $scratch)) { Remove-Item -LiteralPath $scratch -Recurse -Force }
-    $env:CIVILIZED_AGENT_DATA = $oldData
+    $env:HERALD_DATA = $oldData
     @{ scratchRemoved = -not (Test-Path -LiteralPath $scratch); processExited = (-not $native -or $native.HasExited) -and (-not $driver -or $driver.HasExited); serverExited = $serverExited } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'cleanup.json')
     if ($transcribing) { Stop-Transcript | Out-Null }
 }

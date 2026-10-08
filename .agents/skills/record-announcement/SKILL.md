@@ -1,13 +1,13 @@
 ---
 name: record-announcement
-description: Record a Civilized Agent announcement with its character voice and desktop background. Use when asked to record the last played message or a supplied message.
+description: Record a Herald announcement with its character voice and desktop background. Use when asked to record the last played message or a supplied message.
 ---
 
 # Record an announcement
 
 ## 1. Select the message
 
-Work from this repository on Windows. For the last message, read `history.jsonl` in `CIVILIZED_AGENT_DATA`, or `%LOCALAPPDATA%/CivilizedAgent` when that variable is unset. Match `sessionID` to `OPENCODE_SESSION_ID` when the user means the current OpenCode session. If that session has no saved announcement, ask before choosing another session. Preserve the saved text, title and video unless the user overrides them.
+Work from this repository on Windows. For the last message, read `history.jsonl` in `HERALD_DATA`, or `%LOCALAPPDATA%/herald` when that variable is unset. Match `sessionID` to `OPENCODE_SESSION_ID` when the user means the current OpenCode session. If that session has no saved announcement, ask before choosing another session. Preserve the saved text, title and video unless the user overrides them.
 
 An older message without a history entry cannot be recovered exactly. Explain that gap before replaying a reconstructed result. Any newly generated announcement must fork the existing conversation, as required by the repository's `AGENTS.md`.
 

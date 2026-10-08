@@ -201,10 +201,10 @@ def generate(name, description, comfy, audio=None, resume=False, seed=None):
             raise RuntimeError(f"{tool} is required")
     scratch = temp_root()
     scratch.mkdir(parents=True, exist_ok=True)
-    lock = scratch / "civilized-character-generation.lock"
+    lock = scratch / "herald-character-generation.lock"
     with lock.open("x"):
         pass
-    work = Path(tempfile.mkdtemp(prefix="civilized-character-", dir=scratch))
+    work = Path(tempfile.mkdtemp(prefix="herald-character-", dir=scratch))
     previous = generator.ASSETS, generator.COMFY, generator.RUNTIME_ASSETS
     generator.ASSETS, generator.COMFY, generator.RUNTIME_ASSETS = work, comfy, work
     label = work.name
@@ -247,10 +247,10 @@ def generate(name, description, comfy, audio=None, resume=False, seed=None):
             if clean or not list(work.glob("*-job.json")):
                 for path in outputs:
                     path.unlink(missing_ok=True)
-                output_directory = comfy / "output" / "civilized" / label
+                output_directory = comfy / "output" / "herald" / label
                 if output_directory.exists():
                     shutil.rmtree(output_directory)
-                for filename in (f"civilized-{label}-portrait.png", f"civilized-{label}-neutral.wav"):
+                for filename in (f"herald-{label}-portrait.png", f"herald-{label}-neutral.wav"):
                     (comfy / "input" / filename).unlink(missing_ok=True)
                 shutil.rmtree(work)
         finally:

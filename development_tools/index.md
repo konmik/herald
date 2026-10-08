@@ -9,6 +9,7 @@ Run tools from the repository root. Package-script entry points are in [package.
 | [setup-checks.ps1](setup-checks.ps1) | Install locked JavaScript dependencies and the Python test environment. |
 | [check.ps1](check.ps1) | Run lint, plugin tests, type checks, asset checks, tooling tests and Rust tests. |
 | [build-announcer.mjs](build-announcer.mjs) | Build the native executable and copy it into the checkout's `native-announcer/bin/`. |
+| [install-linux-menu.mjs](install-linux-menu.mjs) | Install the Herald Settings application entry; Linux native builds run this automatically. |
 | [build-bundle.ps1](build-bundle.ps1) | Build or repackage a Windows release ZIP without replacing the checkout executable. |
 | [deploy-plugins.ps1](deploy-plugins.ps1) | Check, build, verify and install a release bundle. Changes host registrations and restarts the announcer. |
 | [bundle/](bundle/) | Installer, OpenCode registration and Start menu shortcut helpers. |
@@ -41,7 +42,7 @@ Set `COMFYUI_DIRECTORY` or pass `--comfy-dir` to the generation and model-instal
 
 ## Verification and profiling
 
-Read [the verification skill](../.claude/skills/verify-civilized-agent/SKILL.md) before playback, settings, audio or host-completion checks. Its helpers preserve evidence and keep the live announcer separate.
+Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before playback, settings, audio or host-completion checks. Its helpers preserve evidence and keep the live announcer separate.
 
 | Tool | Purpose |
 | --- | --- |

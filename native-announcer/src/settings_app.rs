@@ -935,7 +935,7 @@ mod native {
 
         impl ThemeRegistryOverride {
             unsafe fn new(apps_use_light_theme: u32) -> Self {
-                let path = wide(&format!(r"Software\CivilizedAgentThemeTest-{}", std::process::id()));
+                let path = wide(&format!(r"Software\heraldThemeTest-{}", std::process::id()));
                 let mut registry = Self {
                     path,
                     root: std::ptr::null_mut(),
@@ -1075,7 +1075,7 @@ mod native {
             pixel
         }
 
-        const THEME_HANDLER_TEST_CHILD: &str = "CIVILIZED_AGENT_THEME_HANDLER_TEST_CHILD";
+        const THEME_HANDLER_TEST_CHILD: &str = "HERALD_THEME_HANDLER_TEST_CHILD";
         const THEME_HANDLER_TEST_PROVED: &str = "THEME_HANDLER_TEST_PROVED";
         const THEME_HANDLER_TEST_SKIPPED: &str = "THEME_HANDLER_TEST_SKIPPED_HIGH_CONTRAST";
 
@@ -1088,7 +1088,7 @@ mod native {
             let registry = ThemeRegistryOverride::new(0);
             assert_eq!(detect_theme(), Theme::Dark);
             let instance = GetModuleHandleW(std::ptr::null());
-            let class_name = wide("CivilizedAgentThemeNotificationTest");
+            let class_name = wide("heraldThemeNotificationTest");
             let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class_name.as_ptr(), ..WNDCLASSW::default() };
             assert_ne!(RegisterClassW(&class), 0);
             let mut form = test_form(Theme::Light);
@@ -1182,7 +1182,7 @@ mod native {
             unsafe {
                 let mut form = test_form(Theme::Light);
                 let instance = GetModuleHandleW(std::ptr::null());
-                let class_name = wide("CivilizedAgentThemePaintTest");
+                let class_name = wide("heraldThemePaintTest");
                 let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class_name.as_ptr(), ..WNDCLASSW::default() };
                 assert_ne!(RegisterClassW(&class), 0);
                 let window = CreateWindowExW(0, class_name.as_ptr(), wide("").as_ptr(), WS_POPUP | WS_VISIBLE, 0, 0, 120, 40, std::ptr::null_mut(), std::ptr::null_mut(), instance, (&mut *form as *mut Form).cast::<c_void>());
@@ -1936,7 +1936,7 @@ mod native {
                     APPLY => match save(window, &mut *form) {
                         Ok(()) => {}
                         Err(error) if error.contains("Announcement body") || error.contains("Announcement title") || error.contains("Summary prompt") => label(window, STATUS, &error),
-                        Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Civilized Agent settings").as_ptr(), MB_OK | MB_ICONERROR); }
+                        Err(error) => { MessageBoxW(window, wide(&error).as_ptr(), wide("Herald settings").as_ptr(), MB_OK | MB_ICONERROR); }
                     },
                     RESET_DEFAULT => {
                         let body = FontPreference::new("Century Gothic", 18);
@@ -2138,7 +2138,7 @@ mod native {
         unsafe {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
             std::fs::canonicalize(data).unwrap_or_else(|_| data.into()).to_string_lossy().to_lowercase().hash(&mut hash);
-            let class = wide(&format!("CivilizedAgentSettings-{:x}", hash.finish()));
+            let class = wide(&format!("heraldSettings-{:x}", hash.finish()));
             let foreground = GetForegroundWindow();
             let desktop = with_desktops(|desktops| desktops.GetWindowDesktopId(windows::Win32::Foundation::HWND(foreground))).ok();
             let existing = FindWindowW(class.as_ptr(), std::ptr::null());
@@ -2160,7 +2160,7 @@ mod native {
             let window_class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class.as_ptr(),
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), ..WNDCLASSW::default() };
             if RegisterClassW(&window_class) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
-            let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Civilized Agent settings").as_ptr(),
+            let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Herald settings").as_ptr(),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 960, 720,
                 std::ptr::null_mut(), std::ptr::null_mut(), instance, (&mut *form as *mut Form).cast::<c_void>());
             if window.is_null() { return Err(std::io::Error::last_os_error().to_string()); }

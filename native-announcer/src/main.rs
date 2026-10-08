@@ -207,8 +207,8 @@ fn run() -> Result<(), String> {
     }
     let data = platform::data_directory();
     if open_settings { return settings_app::run(&data, &assets); }
-    if isolated && std::env::var_os("CIVILIZED_AGENT_DATA").is_none() {
-        return Err("Isolated playback requires CIVILIZED_AGENT_DATA".into());
+    if isolated && std::env::var_os("HERALD_DATA").is_none() {
+        return Err("Isolated playback requires HERALD_DATA".into());
     }
     if capture_directory.is_some() && !isolated {
         return Err("Frame capture requires isolated playback".into());
@@ -230,7 +230,7 @@ fn run() -> Result<(), String> {
     let mut inbox = Inbox::new(data.clone());
     let demo_mode = demo.is_some();
     if let Some(character) = demo {
-        inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, character_id: None, emotion: "neutral".into() });
+        inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Herald verification".into(), character, character_id: None, emotion: "neutral".into() });
     }
     let before = platform::foreground();
     let event_loop = EventLoop::new();
@@ -243,7 +243,7 @@ fn run() -> Result<(), String> {
         event_loop
     };
     let builder = WindowBuilder::new()
-            .with_title("Civilized Agent")
+            .with_title("Herald")
             .with_visible(false)
             .with_focused(false)
             .with_focusable(false)

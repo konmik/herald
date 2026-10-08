@@ -18,9 +18,9 @@ Users mute speech and static while keeping announcements visible, either immedia
 
 Preconditions: baseline; fresh evidence paths; no concurrent focus check.
 
-- **Persist quiet controls.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Quiet -Evidence temp/verification/quiet-proof`. Reopened quiet and schedule checkboxes are checked; JSON stores `quietStart: 1350`, `quietEnd: 495`, and `quietMode: true`.
-- **Visual while muted.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/announce.ps1 -Speech -Quiet -Evidence temp/verification/quiet-playback`. Require one shown/finished notification, zero speech starts, one muted announcement, matching history and a rendered image.
-- **Meeting policy boundary.** Run `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/announce.ps1 -Speech -Meeting -Evidence temp/verification/meeting-policy`. The fixture uses the existing meeting-status boundary; the same silent/visible assertions apply. It does not prove automatic meeting detection. That entry needs a real meeting and host completion, with privacy-safe evidence.
+- **Persist quiet controls.** Run `pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1 -Feature Quiet -Evidence temp/verification/quiet-proof`. Reopened quiet and schedule checkboxes are checked; JSON stores `quietStart: 1350`, `quietEnd: 495`, and `quietMode: true`.
+- **Visual while muted.** Run `pwsh -NoProfile -File .claude/skills/verify-herald/scripts/announce.ps1 -Speech -Quiet -Evidence temp/verification/quiet-playback`. Require one shown/finished notification, zero speech starts, one muted announcement, matching history and a rendered image.
+- **Meeting policy boundary.** Run `pwsh -NoProfile -File .claude/skills/verify-herald/scripts/announce.ps1 -Speech -Meeting -Evidence temp/verification/meeting-policy`. The fixture uses the existing meeting-status boundary; the same silent/visible assertions apply. It does not prove automatic meeting detection. That entry needs a real meeting and host completion, with privacy-safe evidence.
 
 ## Gotchas
 

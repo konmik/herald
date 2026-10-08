@@ -12,10 +12,10 @@ if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShe
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'temp/bundles' }
 Assert-NoLinks $OutputDirectory
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-$stage = Join-Path $OutputDirectory ('.civilized-stage-' + [guid]::NewGuid())
+$stage = Join-Path $OutputDirectory ('.herald-stage-' + [guid]::NewGuid())
 $target = Join-Path $root 'native-announcer/target/bundle'
-$archive = Join-Path $OutputDirectory ('.civilized-archive-' + [guid]::NewGuid() + '.zip')
-$metafile = Join-Path $OutputDirectory ('.civilized-modules-' + [guid]::NewGuid() + '.json')
+$archive = Join-Path $OutputDirectory ('.herald-archive-' + [guid]::NewGuid() + '.zip')
+$metafile = Join-Path $OutputDirectory ('.herald-modules-' + [guid]::NewGuid() + '.json')
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     if ($PayloadDirectory) {
@@ -39,7 +39,7 @@ try {
         }
         $runtime = Join-Path $stage 'native-announcer'
         New-Item -ItemType Directory -Path "$runtime/bin", "$runtime/resources" -Force | Out-Null
-        Copy-Item -LiteralPath "$target/$rustTarget/release/civilized-announcer.exe" -Destination "$runtime/bin/civilized-announcer-win32-$arch.exe"
+        Copy-Item -LiteralPath "$target/$rustTarget/release/herald.exe" -Destination "$runtime/bin/herald-win32-$arch.exe"
         foreach ($name in @('characters.json', 'videos')) {
             $destination = Join-Path $runtime "resources/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
@@ -67,10 +67,10 @@ try {
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
     $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported architecture' } }
     $files = @(Get-PayloadFiles $stage | Sort-Object FullName | ForEach-Object { @{ path = [IO.Path]::GetRelativePath($stage, $_.FullName).Replace('\', '/'); sha256 = Get-PayloadHash $_.FullName; size = $_.Length } })
-    @{ schemaVersion = 1; name = 'civilized-agent'; version = $package.version; platform = 'win32'; arch = $arch; files = $files } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $stage 'bundle-manifest.json') -Encoding utf8NoBOM
+    @{ schemaVersion = 1; name = 'herald'; version = $package.version; platform = 'win32'; arch = $arch; files = $files } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $stage 'bundle-manifest.json') -Encoding utf8NoBOM
     Test-Bundle $stage | Out-Null
     $hash = (Get-FileHash (Join-Path $stage 'bundle-manifest.json')).Hash.ToLowerInvariant()
-    $zip = Join-Path $OutputDirectory "civilized-agent-$($package.version)-win32-$arch-$hash.zip"
+    $zip = Join-Path $OutputDirectory "herald-$($package.version)-win32-$arch-$hash.zip"
     if (Test-Path -LiteralPath $zip) { throw "Bundle output already exists: $zip" }
     [IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive)
     [IO.File]::Move($archive, $zip)

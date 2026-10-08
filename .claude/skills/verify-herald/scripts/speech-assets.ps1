@@ -11,7 +11,7 @@ $app = [IO.Path]::GetFullPath($AppDirectory)
 $native = Join-Path $(if ($Runtime -eq 'Claude') { Join-Path $app 'claude-plugin' } else { $app }) 'native-announcer'
 if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $native = Join-Path ([IO.Path]::GetFullPath($ClaudePluginDirectory)) 'native-announcer' }
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
-$scratchRoot = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-speech-proof-Ω-' + [guid]::NewGuid())
+$scratchRoot = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-speech-proof-Ω-' + [guid]::NewGuid())
 $scratch = Join-Path $scratchRoot ('versions/' + (Split-Path $app -Leaf) + '/native-announcer')
 $process = $null
 if (-not (Test-Path -LiteralPath $TestExecutable -PathType Leaf)) { throw 'Specify the Rust test executable produced by cargo test' }
@@ -31,7 +31,7 @@ try {
     $info.WorkingDirectory = $scratch
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null
+    $info.Environment.Remove('HERALD_TTS') | Out-Null
     $info.Environment['PATH'] = "$scratch/bin;$env:SystemRoot/system32"
     foreach ($argument in @('--exact', 'tts::tests::native_synthesis_streams_each_sentence_once_and_can_stop_early', '--ignored', '--nocapture')) { $info.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::Start($info)

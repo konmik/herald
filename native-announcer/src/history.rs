@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn appends_messages_with_display_time_and_actual_selected_character() {
         let data = std::env::temp_dir().join("opencode").join(format!(
-            "civilized-history-{}-{}",
+            "herald-history-{}-{}",
             std::process::id(),
             crate::state::timestamp()
         ));
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn custom_history_keeps_profile_identity_separate_from_integration_source() {
         let data = std::env::temp_dir().join("opencode").join(format!(
-            "civilized-history-custom-{}-{}",
+            "herald-history-custom-{}-{}",
             std::process::id(),
             crate::state::timestamp()
         ));

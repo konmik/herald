@@ -7,10 +7,10 @@ export const DEFAULT_SUMMARY_PROMPT = 'Report the outcome of the task you just f
 export const SUMMARY_PROMPT_MAX_LENGTH = 16384
 
 function dataDirectory() {
-  if (process.env.CIVILIZED_AGENT_DATA) return process.env.CIVILIZED_AGENT_DATA
-  if (process.platform === 'win32') return join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'CivilizedAgent')
-  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'CivilizedAgent')
-  return join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'CivilizedAgent')
+  if (process.env.HERALD_DATA) return process.env.HERALD_DATA
+  if (process.platform === 'win32') return join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'herald')
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'herald')
+  return join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'herald')
 }
 
 export function isValidSummaryPrompt(value) {

@@ -174,6 +174,6 @@ mod tests {
         let catalog = FontCatalog::new().unwrap();
         assert_eq!(catalog.get("Consolas").name(), Some("Consolas"));
         assert_eq!(catalog.get("Segoe UI").name(), Some("Segoe UI"));
-        assert_eq!(catalog.get("Missing Civilized Agent Font").name(), catalog.fallback.name());
+        assert_eq!(catalog.get("Missing Herald Font").name(), catalog.fallback.name());
     }
 }

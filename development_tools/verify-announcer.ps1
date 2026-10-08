@@ -1,7 +1,7 @@
-param([switch]$Speech, [switch]$Meeting, [switch]$QuietMode, [ValidateRange(0, 100)][int]$Volume = 100, [string]$OutputDevice, [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/bin/civilized-announcer-win32-x64.exe'), [string]$Assets = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/resources'), [string]$Character)
+param([switch]$Speech, [switch]$Meeting, [switch]$QuietMode, [ValidateRange(0, 100)][int]$Volume = 100, [string]$OutputDevice, [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/bin/herald-win32-x64.exe'), [string]$Assets = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/resources'), [string]$Character)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$temporary = Join-Path $env:LOCALAPPDATA "Temp/opencode/civilized-native-$([guid]::NewGuid())"
+$temporary = Join-Path $env:LOCALAPPDATA "Temp/opencode/herald-native-$([guid]::NewGuid())"
 $data = Join-Path $temporary 'data'
 $inbox = Join-Path $data 'inbox'
 New-Item -ItemType Directory -Path $inbox -Force | Out-Null
@@ -21,7 +21,7 @@ $messages = @(
 )
 $info = [System.Diagnostics.ProcessStartInfo]::new($binary)
 $info.UseShellExecute = $false
-$info.Environment['CIVILIZED_AGENT_DATA'] = $data
+$info.Environment['HERALD_DATA'] = $data
 $info.ArgumentList.Add('--isolated')
 $info.ArgumentList.Add('--assets')
 $info.ArgumentList.Add([IO.Path]::GetFullPath($Assets))

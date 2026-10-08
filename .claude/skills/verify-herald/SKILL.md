@@ -1,9 +1,9 @@
 ---
-name: verify-civilized-agent
-description: Verify Civilized Agent's Windows desktop announcements and settings after changes to playback, quiet mode, audio previews, persistence, or plugin delivery.
+name: verify-herald
+description: Verify Herald's Windows desktop announcements and settings after changes to playback, quiet mode, audio previews, persistence, or plugin delivery.
 ---
 
-# Verify Civilized Agent
+# Verify Herald
 
 Read [the feature map](features/README.md), then select the affected entry points. The primary surface is the native Windows desktop companion and settings window. Claude and OpenCode supply completion announcements; they are additional user surfaces, not HTTP services. Run commands from the repository root in PowerShell 7 on an interactive Windows desktop.
 
@@ -25,20 +25,20 @@ Use the debug executable rather than `npm run build:announcer`: that command bui
 Launch and drive a disposable settings instance:
 
 ```powershell
-pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof
+pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof
 ```
 
-The helper starts `native-announcer/target/debug/civilized-announcer.exe --settings`, waits up to ten seconds for its window, runs Doctor, drives the feature, closes and reopens it, then cleans up. Readiness is the owned `Civilized Agent settings` window with `Apply` and `Close` controls.
+The helper starts `native-announcer/target/debug/herald.exe --settings`, waits up to ten seconds for its window, runs Doctor, drives the feature, closes and reopens it, then cleans up. Readiness is the owned `Herald settings` window with `Apply` and `Close` controls.
 
 Announcement launch and drive:
 
 ```powershell
-pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/announce.ps1 -Evidence temp/verification/announcement-proof
+pwsh -NoProfile -File .claude/skills/verify-herald/scripts/announce.ps1 -Evidence temp/verification/announcement-proof
 ```
 
 This starts the same executable with `--isolated --assets native-announcer/resources --test-seconds 35`, an evidence report and render snapshot. Readiness is a live owned process and initialized inbox, followed by rendered history. The helper maintains presence through the production bridge. Playback exits automatically; the helper bounds the run at 45 seconds.
 
-Every helper creates a unique `CIVILIZED_AGENT_DATA` directory under `$env:LOCALAPPDATA/Temp/opencode` and sets `CIVILIZED_AGENT_TTS` to the repo's prepared model. Settings windows are single-instance **per data directory**. Isolated playback binds an ephemeral localhost port; normal playback uses shared port 47863. Keep disposable instances separate from the default data directory. Independent scratch state permits side-by-side runs, but desktop focus and audible output are shared: run focus/audio checks one at a time.
+Every helper creates a unique `HERALD_DATA` directory under `$env:LOCALAPPDATA/Temp/opencode` and sets `HERALD_TTS` to the repo's prepared model. Settings windows are single-instance **per data directory**. Isolated playback binds an ephemeral localhost port; normal playback uses shared port 47863. Keep disposable instances separate from the default data directory. Independent scratch state permits side-by-side runs, but desktop focus and audible output are shared: run focus/audio checks one at a time.
 
 ## Doctor
 
@@ -80,6 +80,6 @@ After every attempt, require `cleanup.json` to report `scratchRemoved: true` and
 
 - `scripts/verify.ps1`: launch, Doctor, drive native settings, capture control/file evidence, reopen, cleanup. Invoke with `pwsh -NoProfile -File` as above.
 - `scripts/announce.ps1`: isolated native playback through the real Claude bridge, presence heartbeat, render/report/history evidence, cleanup. Invoke with `pwsh -NoProfile -File` as above.
-- `scripts/hosts.ps1`: real Claude/OpenCode generation, background work, subagents, cancellation/restart and one final main announcement. Recipes and coverage limits are in the announcement map. It sets `CIVILIZED_AGENT_EXTERNAL_COMPANION=1` with unique data so the plugins use the helper-owned companion rather than starting another process. Host tests are explicit and use real model requests; they are not part of `npm run check`.
+- `scripts/hosts.ps1`: real Claude/OpenCode generation, background work, subagents, cancellation/restart and one final main announcement. Recipes and coverage limits are in the announcement map. It sets `HERALD_EXTERNAL_COMPANION=1` with unique data so the plugins use the helper-owned companion rather than starting another process. Host tests are explicit and use real model requests; they are not part of `npm run check`.
 
 PowerShell scripts are executable through `pwsh`; no file association or Unix executable bit is needed. Existing `development_tools/verify-settings.ps1` covers additional speech-model selection, local voice preview and single-instance checks, but deletes its scratch proof. Existing `verify-announcer.ps1` targets the checkout binary and lacks failure cleanup. Neither replaces the evidence-preserving helpers here.

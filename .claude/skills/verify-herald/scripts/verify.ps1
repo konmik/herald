@@ -10,17 +10,17 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
-$binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
+$binary = Join-Path $root 'native-announcer/target/debug/herald.exe'
 if ($AppDirectory) {
     $AppDirectory = [IO.Path]::GetFullPath($AppDirectory)
     $runtimeDirectory = if ($Runtime -eq 'Claude') { Join-Path $AppDirectory 'claude-plugin' } else { $AppDirectory }
     if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
-    $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-win32-$architecture.exe"
 }
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
-$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-verify-' + [guid]::NewGuid())
+$scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-verify-' + [guid]::NewGuid())
 $process = $null
 $server = $null
 $transcribing = $false
@@ -28,7 +28,7 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class CivilizedVerify {
+public static class HeraldVerify {
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] public static extern IntPtr SetText(IntPtr window, uint message, IntPtr wparam, string text);
@@ -42,24 +42,24 @@ public static class CivilizedVerify {
 }
 '@
 function Control([int]$Id) {
-    $handle = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, $Id)
+    $handle = [HeraldVerify]::GetDlgItem($process.MainWindowHandle, $Id)
     if ($handle -eq [IntPtr]::Zero) { throw "Missing control $Id" }
     return $handle
 }
 function Send-Control([int]$Id, [uint32]$Message, [long]$Wparam = 0, [long]$Lparam = 0) {
-    return [CivilizedVerify]::SendMessageW((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam).ToInt64()
+    return [HeraldVerify]::SendMessageW((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam).ToInt64()
 }
 function Post-Control([int]$Id, [uint32]$Message, [long]$Wparam = 0, [long]$Lparam = 0) {
-    if (-not [CivilizedVerify]::PostMessage((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam)) { throw "Could not post message $Message to control $Id" }
+    if (-not [HeraldVerify]::PostMessage((Control $Id), $Message, [IntPtr]$Wparam, [IntPtr]$Lparam)) { throw "Could not post message $Message to control $Id" }
 }
 function Read-Control([int]$Id) {
     $control = Control $Id
-    $length = [CivilizedVerify]::SendMessageW($control, 0xE, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+    $length = [HeraldVerify]::SendMessageW($control, 0xE, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
     if ($length -lt 0) { throw "Could not read control $Id text length" }
     $capacity = [Math]::Max(256, [int]$length + 1)
     while ($true) {
         $buffer = [Text.StringBuilder]::new($capacity)
-        $copied = [CivilizedVerify]::ReadText($control, 0xD, [IntPtr]$capacity, $buffer).ToInt64()
+        $copied = [HeraldVerify]::ReadText($control, 0xD, [IntPtr]$capacity, $buffer).ToInt64()
         if ($copied -lt ($capacity - 1)) {
             $value = $buffer.ToString()
             if ($Id -eq 134) { $value = $value.Replace("`r`n", "`n") }
@@ -71,7 +71,7 @@ function Read-Control([int]$Id) {
 }
 function Control-Class([int]$Id) {
     $buffer = [Text.StringBuilder]::new(256)
-    [CivilizedVerify]::GetClassName((Control $Id), $buffer, $buffer.Capacity) | Out-Null
+    [HeraldVerify]::GetClassName((Control $Id), $buffer, $buffer.Capacity) | Out-Null
     return $buffer.ToString()
 }
 function Read-Combo-Item([int]$Id, [int]$Index) {
@@ -79,7 +79,7 @@ function Read-Combo-Item([int]$Id, [int]$Index) {
     if ($length -lt 0) { throw "Combo control $Id has no item at index $Index" }
     $capacity = [Math]::Max(1, [int]$length + 1)
     $buffer = [Text.StringBuilder]::new($capacity)
-    $copied = [CivilizedVerify]::ReadText((Control $Id), 0x148, [IntPtr]$Index, $buffer).ToInt64()
+    $copied = [HeraldVerify]::ReadText((Control $Id), 0x148, [IntPtr]$Index, $buffer).ToInt64()
     if ($copied -lt 0) { throw "Could not read combo control $Id item $Index" }
     return $buffer.ToString()
 }
@@ -90,11 +90,11 @@ function Read-Combo-Control([int]$Id) {
 }
 function Notify-Control([int]$Id, [uint32]$Code) {
     $control = Control $Id
-    [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](([long]$Id) -bor (([long]$Code) -shl 16)), $control) | Out-Null
+    [HeraldVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](([long]$Id) -bor (([long]$Code) -shl 16)), $control) | Out-Null
 }
 function Set-Control-Text([int]$Id, [string]$Value) {
     $nativeValue = if ($Id -eq 134) { $Value.Replace("`r`n", "`n").Replace("`n", "`r`n") } else { $Value }
-    if ([CivilizedVerify]::SetText((Control $Id), 0xC, [IntPtr]::Zero, $nativeValue) -eq [IntPtr]::Zero) { throw "Could not set control $Id" }
+    if ([HeraldVerify]::SetText((Control $Id), 0xC, [IntPtr]::Zero, $nativeValue) -eq [IntPtr]::Zero) { throw "Could not set control $Id" }
     if ((Read-Control $Id) -cne $Value) { throw "Control $Id did not accept its draft text" }
     Notify-Control $Id 0x300
 }
@@ -157,10 +157,10 @@ function Get-Installed-Fonts {
 function Assert-Announcements-Page {
     foreach ($id in @(130, 131, 132, 133, 134, 135)) {
         $handle = Control $id
-        if (-not [CivilizedVerify]::IsWindowVisible($handle)) { throw "Announcements control $id is hidden" }
+        if (-not [HeraldVerify]::IsWindowVisible($handle)) { throw "Announcements control $id is hidden" }
     }
     if ((Control-Class 130) -notmatch 'COMBOBOX' -or (Control-Class 132) -notmatch 'COMBOBOX') { throw 'Announcement font controls are not non-editable combo boxes' }
-    foreach ($id in @(130, 132)) { if (([CivilizedVerify]::GetWindowLongPtr((Control $id), -16).ToInt64() -band 3) -ne 3) { throw "Announcement font control $id is editable" } }
+    foreach ($id in @(130, 132)) { if (([HeraldVerify]::GetWindowLongPtr((Control $id), -16).ToInt64() -band 3) -ne 3) { throw "Announcement font control $id is editable" } }
     if ((Read-Announcement-Size 131) -le 0 -or (Read-Announcement-Size 133) -le 0) { throw 'Announcement font sizes are not positive' }
     if ([string]::IsNullOrWhiteSpace((Read-Control 134))) { throw 'The announcement summary prompt is empty' }
 }
@@ -183,10 +183,10 @@ function Assert-Preserved-Preferences($Before, $After) {
     }
 }
 function Get-Owned-Settings-Dialog {
-    $dialog = [CivilizedVerify]::FindWindow('#32770', 'Civilized Agent settings')
-    if ($dialog -eq [IntPtr]::Zero -or -not [CivilizedVerify]::IsWindowVisible($dialog)) { return [IntPtr]::Zero }
+    $dialog = [HeraldVerify]::FindWindow('#32770', 'Herald settings')
+    if ($dialog -eq [IntPtr]::Zero -or -not [HeraldVerify]::IsWindowVisible($dialog)) { return [IntPtr]::Zero }
     [uint32]$owner = 0
-    [CivilizedVerify]::GetWindowThreadProcessId($dialog, [ref]$owner) | Out-Null
+    [HeraldVerify]::GetWindowThreadProcessId($dialog, [ref]$owner) | Out-Null
     if ($owner -eq $process.Id) { return $dialog }
     return [IntPtr]::Zero
 }
@@ -228,16 +228,16 @@ function Set-Silent-Sound([int]$Seconds) {
 }
 function Snapshot([string]$Name) {
     $state = [ordered]@{ title = $process.MainWindowTitle; page = (Send-Control 200 0x188); quiet = (Send-Control 101 0xF0); schedule = (Send-Control 102 0xF0); start = (Read-Control 103); end = (Read-Control 104); volume = (Send-Control 105 0x400); outputIndex = (Send-Control 106 0x147); output = (Read-Control 106); apply = (Read-Control 107); close = (Read-Control 108); status = (Read-Control 109); preview = (Read-Control 112); voicePreview = (Read-Control 210); voiceId = (Read-Control 216); model = (Send-Control 113 0x147) }
-    $bodyFont = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, 130)
-    $silentSoundControl = [CivilizedVerify]::GetDlgItem($process.MainWindowHandle, 126)
+    $bodyFont = [HeraldVerify]::GetDlgItem($process.MainWindowHandle, 130)
+    $silentSoundControl = [HeraldVerify]::GetDlgItem($process.MainWindowHandle, 126)
     if ($silentSoundControl -ne [IntPtr]::Zero) {
-        $state.silentSound = [ordered]@{ position = (Send-Control 126 0x400); minimum = (Send-Control 126 0x401); maximum = (Send-Control 126 0x402); visible = [bool][CivilizedVerify]::IsWindowVisible($silentSoundControl); label = (Read-Control 127) }
+        $state.silentSound = [ordered]@{ position = (Send-Control 126 0x400); minimum = (Send-Control 126 0x401); maximum = (Send-Control 126 0x402); visible = [bool][HeraldVerify]::IsWindowVisible($silentSoundControl); label = (Read-Control 127) }
     }
     if ($bodyFont -ne [IntPtr]::Zero) {
         $state.announcementBodyFont = [ordered]@{ family = (Read-Combo-Control 130); size = (Read-Announcement-Size 131) }
         $state.announcementTitleFont = [ordered]@{ family = (Read-Combo-Control 132); size = (Read-Announcement-Size 133) }
         $state.summaryPrompt = (Read-Control 134)
-        $state.announcementControls = [ordered]@{ bodyFamilyVisible = [bool][CivilizedVerify]::IsWindowVisible($bodyFont); bodySizeVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 131)); titleFamilyVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 132)); titleSizeVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 133)); promptVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 134)); resetVisible = [bool][CivilizedVerify]::IsWindowVisible((Control 135)) }
+        $state.announcementControls = [ordered]@{ bodyFamilyVisible = [bool][HeraldVerify]::IsWindowVisible($bodyFont); bodySizeVisible = [bool][HeraldVerify]::IsWindowVisible((Control 131)); titleFamilyVisible = [bool][HeraldVerify]::IsWindowVisible((Control 132)); titleSizeVisible = [bool][HeraldVerify]::IsWindowVisible((Control 133)); promptVisible = [bool][HeraldVerify]::IsWindowVisible((Control 134)); resetVisible = [bool][HeraldVerify]::IsWindowVisible((Control 135)) }
     }
     $state | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $evidencePath "$Name.json") -Encoding utf8NoBOM
     return $state
@@ -256,7 +256,7 @@ function Launch {
 }
 function Doctor {
     $process.Refresh()
-    if ($process.HasExited -or $process.Path -ne $binary -or $process.MainWindowTitle -ne 'Civilized Agent settings') { throw 'Wrong or missing settings instance' }
+    if ($process.HasExited -or $process.Path -ne $binary -or $process.MainWindowTitle -ne 'Herald settings') { throw 'Wrong or missing settings instance' }
     if ((Read-Control 107) -ne 'Apply' -or (Read-Control 108) -ne 'Close') { throw 'Settings controls are not ready' }
     if ((Get-FileHash $binary).Hash -ne $binaryHash) { throw 'Binary changed during verification' }
     if (Test-Path (Join-Path $scratch 'errors.log')) { throw (Get-Content (Join-Path $scratch 'errors.log') -Raw) }
@@ -278,13 +278,13 @@ try {
     $beforeSettings = Get-Content $settingsPath -Raw | ConvertFrom-Json
     $info = [Diagnostics.ProcessStartInfo]::new($binary)
     $info.UseShellExecute = $false
-    $info.Environment['CIVILIZED_AGENT_DATA'] = $scratch
+    $info.Environment['HERALD_DATA'] = $scratch
     if ($AppDirectory) {
-        $info.Environment.Remove('CIVILIZED_AGENT_TTS') | Out-Null
+        $info.Environment.Remove('HERALD_TTS') | Out-Null
         $info.ArgumentList.Add('--assets')
         $info.ArgumentList.Add((Join-Path $runtimeDirectory 'native-announcer/resources'))
     } else {
-        $info.Environment['CIVILIZED_AGENT_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
+        $info.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
     }
     $info.ArgumentList.Add('--settings')
     if ($Feature -eq 'VoicePreview' -and $Audible) {
@@ -361,7 +361,7 @@ try {
         Send-Control 101 0xF5 | Out-Null
         Select-Page 0
         Send-Control 201 0x186 0 | Out-Null
-        [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Control 201)) | Out-Null
+        [HeraldVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Control 201)) | Out-Null
         Write-Output 'Enable draft quiet mode without Apply; play the character voice example.'
         Send-Control 210 0xF5 | Out-Null
         Snapshot 'controls-voice-quiet' | Out-Null
@@ -371,8 +371,8 @@ try {
         if ((Read-Control 109) -ne 'Preview is silent during quiet hours.' -or (Read-Control 112) -ne 'Play example') { throw 'Audio preview ignored draft quiet mode.' }
         Select-Page 2
         Send-Control 101 0xF5 | Out-Null
-        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
-        [CivilizedVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '24:00') | Out-Null
+        [HeraldVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
+        [HeraldVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '24:00') | Out-Null
         foreach ($button in @(210, 112)) {
             Select-Page $(if ($button -eq 210) { 0 } else { 1 })
             Write-Output "Play example control $button with a draft all-day quiet schedule."
@@ -390,14 +390,14 @@ try {
             if ((Read-Control 109) -ne $expected) { throw 'Disabling the draft schedule did not restore volume-based previews.' }
         }
         Select-Page 2
-        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, 'invalid') | Out-Null
+        [HeraldVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, 'invalid') | Out-Null
         foreach ($button in @(210, 112)) {
             Select-Page $(if ($button -eq 210) { 0 } else { 1 })
             Send-Control $button 0xF5 | Out-Null
             if ((Read-Control 109) -ne 'Use HH:MM for times.') { throw 'Preview did not reject the invalid draft quiet time.' }
         }
         Select-Page 2
-        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
+        [HeraldVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '00:00') | Out-Null
         if ($Audible) {
             Select-Page 1
             Send-Control 106 0x14E 0 | Out-Null
@@ -419,15 +419,15 @@ try {
                 }
             }
             Select-Page 3
-            [CivilizedVerify]::SetText((Control 114), 0xC, [IntPtr]::Zero, 'character-ui-test-key') | Out-Null
+            [HeraldVerify]::SetText((Control 114), 0xC, [IntPtr]::Zero, 'character-ui-test-key') | Out-Null
             Send-Control 113 0x14E 1 | Out-Null
-            [CivilizedVerify]::SetText((Control 121), 0xC, [IntPtr]::Zero, 'draft-default-voice') | Out-Null
+            [HeraldVerify]::SetText((Control 121), 0xC, [IntPtr]::Zero, 'draft-default-voice') | Out-Null
             Select-Page 0
-            [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
+            [HeraldVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
             foreach ($voice in @('draft-character-voice', 'draft-default-voice')) {
                 if ($voice -eq 'draft-default-voice') {
                     Select-Page 0
-                    [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, '') | Out-Null
+                    [HeraldVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, '') | Out-Null
                 }
                 foreach ($button in @(210, 112)) {
                     Select-Page $(if ($button -eq 210) { 0 } else { 1 })
@@ -451,7 +451,7 @@ try {
         if ((Get-Content $settingsPath -Raw) -ne $saved) { throw 'Voice preview saved unapplied settings.' }
         if ($Audible) {
             Select-Page 0
-            [CivilizedVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
+            [HeraldVerify]::SetText((Control 216), 0xC, [IntPtr]::Zero, 'draft-character-voice') | Out-Null
             Send-Control 107 0xF5 | Out-Null
             $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
             if ($settings.silentSoundSeconds -ne $SilentSoundSeconds) { throw 'Apply did not persist the previewed silent sound seconds.' }
@@ -514,7 +514,7 @@ try {
         Write-Output 'Insert a 16384-character prompt with emoji through the edit control and Apply.'
         $unicodePrompt = [char]::ConvertFromUtf32(0x1f600) * 16384
         Set-Control-Text 134 ''
-        [CivilizedVerify]::SetText((Control 134), 0xC2, [IntPtr]1, $unicodePrompt) | Out-Null
+        [HeraldVerify]::SetText((Control 134), 0xC2, [IntPtr]1, $unicodePrompt) | Out-Null
         if ((Read-Control 134) -cne $unicodePrompt) { throw 'The editor truncated a valid Unicode prompt at the character limit' }
         Send-Control 107 0xF5 | Out-Null
         if ((Get-Content $settingsPath -Raw | ConvertFrom-Json).summaryPrompt -cne $unicodePrompt) { throw 'The maximum-length Unicode prompt was not saved' }
@@ -547,13 +547,13 @@ try {
         Send-Control 101 0xF5 | Out-Null
         Send-Control 102 0xF5 | Out-Null
         Send-Control 102 0xF5 | Out-Null
-        [CivilizedVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '22:30') | Out-Null
-        [CivilizedVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '08:15') | Out-Null
+        [HeraldVerify]::SetText((Control 103), 0xC, [IntPtr]::Zero, '22:30') | Out-Null
+        [HeraldVerify]::SetText((Control 104), 0xC, [IntPtr]::Zero, '08:15') | Out-Null
         Select-Page 1
         Send-Control 105 0x405 1 35 | Out-Null
         Select-Page 3
         Send-Control 113 0x14E 1 | Out-Null
-        [CivilizedVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](113 + 65536), (Control 113)) | Out-Null
+        [HeraldVerify]::SendMessageW($process.MainWindowHandle, 0x111, [IntPtr](113 + 65536), (Control 113)) | Out-Null
         Snapshot 'controls-draft' | Out-Null
         Send-Control 107 0xF5 | Out-Null
         $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json

@@ -45,38 +45,38 @@ async function nativeRuntime($: EngineInterface): Promise<NativeRuntime> {
     ? $.plugin.root + '/../native-announcer'
     : $.plugin.root + '/native-announcer'
   if (development) {
-    const override = await $.env.get('CIVILIZED_AGENT_BINARY')
+    const override = await $.env.get('HERALD_BINARY')
     if (override) {
-      if (!(await $.fs.exists(override))) throw new Error('Civilized Agent native announcer override is missing at ' + override)
+      if (!(await $.fs.exists(override))) throw new Error('Herald native announcer override is missing at ' + override)
       return { binary: override, assets: runtimeRoot + '/resources' }
     }
   }
   const entries = await $.fs.list(runtimeRoot + '/bin')
-  const candidates = entries.filter((entry) => entry.kind === 'file' && !entry.isLink && /^civilized-announcer-(?:win32|darwin|linux)-(?:x64|arm64)(?:\.exe)?$/.test(entry.name))
+  const candidates = entries.filter((entry) => entry.kind === 'file' && !entry.isLink && /^herald-(?:win32|darwin|linux)-(?:x64|arm64)(?:\.exe)?$/.test(entry.name))
   if (candidates.length !== 1) {
     const message = development
-      ? 'Civilized Agent native announcer is missing or ambiguous. Set CIVILIZED_AGENT_BINARY or build a platform binary.'
-      : 'Civilized Agent runtime is missing or ambiguous. Reinstall the application bundle.'
+      ? 'Herald native announcer is missing or ambiguous. Set HERALD_BINARY or build a platform binary.'
+      : 'Herald runtime is missing or ambiguous. Reinstall the application bundle.'
     throw new Error(message)
   }
   const candidate = candidates[0]
-  if (!candidate) throw new Error('Civilized Agent native announcer is missing or ambiguous.')
+  if (!candidate) throw new Error('Herald native announcer is missing or ambiguous.')
   const binary = runtimeRoot + '/bin/' + candidate.name
-  if (!(await $.fs.exists(binary))) throw new Error('Civilized Agent native announcer is missing at ' + binary)
+  if (!(await $.fs.exists(binary))) throw new Error('Herald native announcer is missing at ' + binary)
   return { binary, assets: runtimeRoot + '/resources' }
 }
 
 async function bridge($: EngineInterface, command: object) {
   const runtime = await nativeRuntime($)
   const result = await $.process.run([runtime.binary, '--bridge', '--assets', runtime.assets], { stdin: JSON.stringify(command), timeoutMs: 10000 })
-  if (result.exitCode !== 0) throw new Error('Civilized Agent bridge failed: ' + result.stderr)
+  if (result.exitCode !== 0) throw new Error('Herald bridge failed: ' + result.stderr)
   return result
 }
 
 async function announcementProfile($: EngineInterface) {
   const result = await bridge($, { type: 'read-announcement-profile' })
   const profile = JSON.parse(result.stdout) as { prompt: string; characterID?: string }
-  if (typeof profile.prompt !== 'string') throw new Error('Civilized Agent bridge returned an invalid summary prompt')
+  if (typeof profile.prompt !== 'string') throw new Error('Herald bridge returned an invalid summary prompt')
   return profile
 }
 
@@ -133,7 +133,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bridge($, { type: 'boot' })
     await startPresence($)
-    await $.command.register({ name: 'civilized-status', description: 'Check the voice adviser installation', immediate: true })
+    await $.command.register({ name: 'herald-status', description: 'Check the voice adviser installation', immediate: true })
     await $.command.register({ name: 'voice-dismiss', description: 'Dismiss queued voice messages for this session or a subagent', argumentHint: '[agent-id]', immediate: true })
     return next(e)
   })
@@ -235,7 +235,7 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  on('command.run', { command: 'civilized-status' }, async () => ({ text: 'Civilized Agent is loaded; announcements start after one minute and pause during meetings.' }))
+  on('command.run', { command: 'herald-status' }, async () => ({ text: 'Herald is loaded; announcements start after one minute and pause during meetings.' }))
   on('command.run', { command: 'voice-dismiss' }, async ($, e) => {
     await discard($, e.args.trim() || undefined)
     return { text: 'Queued voice announcement dismissed.' }
