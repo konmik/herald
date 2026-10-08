@@ -4,9 +4,11 @@ A desktop herald that announces completed AI tasks with animated characters and 
 
 ## Demo
 
-<a href=".github/assets/mad-hatter-resource-announcement-v1.mp4"><img src=".github/assets/mad-hatter-resource-announcement-v1.png" alt="Watch Mad Hatter announce a task result" width="320"></a>
+<img src=".github/assets/mad-hatter-resource-announcement-v1.png" alt="Mad Hatter announcing a task result" width="320">
 
-Click the preview to watch a recorded replay with Mad Hatter and his configured voice.
+https://github.com/user-attachments/assets/e20a64b4-677e-4c94-b022-3cb32f88c377
+
+Recorded replay with Mad Hatter and his configured voice.
 
 ## How it works
 
