@@ -34,6 +34,7 @@ try {
     Register-ClaudeBundle $app $profile
     $cache = @(Get-ClaudeInstallations $profile)[0].installPath
     Get-PayloadFiles $cache | Out-Null
+    if (Get-ChildItem -LiteralPath $cache -Recurse -File | Where-Object Name -in @('node.exe', 'bridge.mjs', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE')) { throw 'Installed Claude cache contains a removed Node runtime payload' }
     $manifest = Get-Content -LiteralPath (Join-Path $app 'bundle-manifest.json') -Raw | ConvertFrom-Json
     foreach ($file in $manifest.files | Where-Object { $_.path.StartsWith('claude-plugin/') }) {
         $path = Join-Path $cache $file.path.Substring('claude-plugin/'.Length)

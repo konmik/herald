@@ -37,10 +37,38 @@ async function startPresence($: EngineInterface) {
   owner.timer = $.clock.every(2000, async () => { await reportPresence($, [sessionID], owner) })
 }
 
-async function bridge($: EngineInterface, command: object) {
+type NativeRuntime = { binary: string; assets: string }
+
+async function nativeRuntime($: EngineInterface): Promise<NativeRuntime> {
   const development = await $.fs.exists($.plugin.root + '/.claude-plugin/development.json')
-  const executable = development ? 'node' : $.plugin.root + '/native-announcer/bin/node.exe'
-  const result = await $.process.run([executable, $.plugin.root + '/scripts/bridge.mjs'], { stdin: JSON.stringify(command), timeoutMs: 10000 })
+  const runtimeRoot = development && !(await $.fs.exists($.plugin.root + '/native-announcer'))
+    ? $.plugin.root + '/../native-announcer'
+    : $.plugin.root + '/native-announcer'
+  if (development) {
+    const override = await $.env.get('CIVILIZED_AGENT_BINARY')
+    if (override) {
+      if (!(await $.fs.exists(override))) throw new Error('Civilized Agent native announcer override is missing at ' + override)
+      return { binary: override, assets: runtimeRoot + '/resources' }
+    }
+  }
+  const entries = await $.fs.list(runtimeRoot + '/bin')
+  const candidates = entries.filter((entry) => entry.kind === 'file' && !entry.isLink && /^civilized-announcer-(?:win32|darwin|linux)-(?:x64|arm64)(?:\.exe)?$/.test(entry.name))
+  if (candidates.length !== 1) {
+    const message = development
+      ? 'Civilized Agent native announcer is missing or ambiguous. Set CIVILIZED_AGENT_BINARY or build a platform binary.'
+      : 'Civilized Agent runtime is missing or ambiguous. Reinstall the application bundle.'
+    throw new Error(message)
+  }
+  const candidate = candidates[0]
+  if (!candidate) throw new Error('Civilized Agent native announcer is missing or ambiguous.')
+  const binary = runtimeRoot + '/bin/' + candidate.name
+  if (!(await $.fs.exists(binary))) throw new Error('Civilized Agent native announcer is missing at ' + binary)
+  return { binary, assets: runtimeRoot + '/resources' }
+}
+
+async function bridge($: EngineInterface, command: object) {
+  const runtime = await nativeRuntime($)
+  const result = await $.process.run([runtime.binary, '--bridge', '--assets', runtime.assets], { stdin: JSON.stringify(command), timeoutMs: 10000 })
   if (result.exitCode !== 0) throw new Error('Civilized Agent bridge failed: ' + result.stderr)
   return result
 }

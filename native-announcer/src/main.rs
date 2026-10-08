@@ -3,6 +3,7 @@
 mod capture;
 #[cfg(any(target_os = "windows", test))]
 mod audio;
+mod bridge;
 mod characters;
 mod elevenlabs;
 mod fonts;
@@ -122,12 +123,35 @@ impl Active {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let bridge_mode = std::env::args().skip(1).any(|argument| argument == "--bridge");
+    let result = if bridge_mode { run_bridge() } else { run() };
+    if let Err(error) = result {
+        if bridge_mode {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
         let data = platform::data_directory();
         let _ = std::fs::create_dir_all(&data);
         state::log(&data, error);
         std::process::exit(1);
     }
+}
+
+fn run_bridge() -> Result<(), String> {
+    let mut assets = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("Could not locate the native announcer directory")?
+        .join("../resources");
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--bridge" => {}
+            "--assets" => assets = arguments.next().ok_or("Missing assets path")?.into(),
+            _ => return Err(format!("Unknown bridge option: {argument}")),
+        }
+    }
+    bridge::run(std::io::stdin().lock(), std::io::stdout().lock(), &assets)
 }
 
 fn run() -> Result<(), String> {

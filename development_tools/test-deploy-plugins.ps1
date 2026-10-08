@@ -13,15 +13,14 @@ try {
     $cache = Join-Path $profile 'plugins/cache/civilized-agent-local/civilized-agent/0.3.0'
     $source = Join-Path $temporary 'source'
     $shared = Join-Path $temporary 'native-announcer'
-    foreach ($directory in @("$cache/.claude-plugin", "$cache/bin", "$source/.claude-plugin", "$source/hooks", "$source/scripts", "$shared/resources")) {
+    foreach ($directory in @("$cache/.claude-plugin", "$cache/bin", "$source/.claude-plugin", "$source/hooks", "$shared/resources")) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$cache/.claude-plugin/plugin.json"
     '{"name":"civilized-agent","version":"0.3.0"}' | Set-Content "$source/.claude-plugin/plugin.json"
     'old binary' | Set-Content "$cache/bin/obsolete.exe"
     'new hooks' | Set-Content "$source/hooks/register.ts"
-    'new runtime' | Set-Content "$source/scripts/runtime.mjs"
-    'new summary prompt' | Set-Content "$source/scripts/summary-prompt.mjs"
+    'new hooks config' | Set-Content "$source/hooks/hooks.json"
     'shared asset' | Set-Content "$shared/resources/keep.txt"
     $registry = @{ version = 2; plugins = @{ $PluginId = @(@{ scope = 'user'; installPath = $cache }, @{ scope = 'local'; installPath = 'not-user' }) } }
     $registry | ConvertTo-Json -Depth 6 | Set-Content "$profile/plugins/installed_plugins.json"
@@ -33,6 +32,7 @@ try {
     Assert-True (-not (Test-Path "$cache/bin/obsolete.exe")) 'Obsolete output survived deployment'
     Assert-True (-not (Get-Item "$cache/native-announcer").LinkType) 'Runtime must be a physical copy'
     Assert-True ((Get-Content "$cache/native-announcer/resources/keep.txt") -eq 'shared asset') 'Shared resources are not accessible'
+    Assert-True (-not (Test-Path "$cache/scripts")) 'Removed Claude runtime scripts were deployed'
     Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Staging or backup output survived deployment'
 
     $rejected = $false

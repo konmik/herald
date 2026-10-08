@@ -6,8 +6,7 @@ $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-announcement-' + [guid]::NewGuid())
 $binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
 $assets = Join-Path $root 'native-announcer/resources'
-$bridge = Join-Path $root 'claude-plugin/scripts/bridge.mjs'
-$node = 'node'
+$toolNode = 'node'
 if ($AppDirectory) {
     $AppDirectory = [IO.Path]::GetFullPath($AppDirectory)
     $runtimeDirectory = if ($Runtime -eq 'Claude') { Join-Path $AppDirectory 'claude-plugin' } else { $AppDirectory }
@@ -16,12 +15,6 @@ if ($AppDirectory) {
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
     $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
     $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
-    $bridge = Join-Path $AppDirectory 'claude-plugin/scripts/bridge.mjs'
-    $node = Join-Path $AppDirectory 'claude-plugin/native-announcer/bin/node.exe'
-    if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) {
-        $bridge = Join-Path $runtimeDirectory 'scripts/bridge.mjs'
-        $node = Join-Path $runtimeDirectory 'native-announcer/bin/node.exe'
-    }
 }
 $process = $null
 $server = $null
@@ -31,8 +24,24 @@ $oldData = $env:CIVILIZED_AGENT_DATA
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
 function Send-Bridge($Message) {
-    $Message | ConvertTo-Json -Compress | & $node $bridge
-    if ($LASTEXITCODE -ne 0) { throw "Bridge exited $LASTEXITCODE" }
+    $start = [Diagnostics.ProcessStartInfo]::new($binary)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    foreach ($argument in @('--bridge', '--assets', $assets)) { $start.ArgumentList.Add($argument) }
+    $bridgeProcess = [Diagnostics.Process]::Start($start)
+    try {
+        $output = $bridgeProcess.StandardOutput.ReadToEndAsync()
+        $errors = $bridgeProcess.StandardError.ReadToEndAsync()
+        $bridgeProcess.StandardInput.Write(($Message | ConvertTo-Json -Compress))
+        $bridgeProcess.StandardInput.Close()
+        if (-not $bridgeProcess.WaitForExit(10000)) { $bridgeProcess.Kill($true); $bridgeProcess.WaitForExit(); throw 'Bridge exceeded its deadline' }
+        $output.GetAwaiter().GetResult() | Out-Null
+        if ($bridgeProcess.ExitCode -ne 0) { throw "Bridge exited $($bridgeProcess.ExitCode): $($errors.GetAwaiter().GetResult())" }
+    } finally { $bridgeProcess.Dispose() }
 }
 try {
     New-Item -ItemType Directory -Path $scratch | Out-Null
@@ -44,7 +53,7 @@ try {
     if ($SpeechFixture) {
         $addressFile = Join-Path $scratch 'speech-api-address.txt'
         $requestsFile = Join-Path $evidencePath 'speech-api-requests.jsonl'
-        $serverInfo = [Diagnostics.ProcessStartInfo]::new($node)
+        $serverInfo = [Diagnostics.ProcessStartInfo]::new($toolNode)
         $serverInfo.UseShellExecute = $false
         foreach ($argument in @((Join-Path $root 'development_tools/voice-api-fixture.mjs'), $addressFile, $requestsFile)) { $serverInfo.ArgumentList.Add($argument) }
         $server = [Diagnostics.Process]::Start($serverInfo)

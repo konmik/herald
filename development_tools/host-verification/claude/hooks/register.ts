@@ -29,7 +29,7 @@ export const register: Register = (on) => {
   })
   on('process.run', async ($, e, next) => {
     const result = await next(e)
-    if (e.argv.some((argument) => argument.endsWith('/scripts/bridge.mjs')) && e.init?.stdin) {
+    if (e.argv.includes('--bridge') && e.init?.stdin) {
       await record($, { type: 'bridge', command: JSON.parse(e.init.stdin), exitCode: result.value?.exitCode, denied: result.deny })
     }
     return result

@@ -14,8 +14,6 @@ $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/civilized-host-' + [guid]
 $binary = Join-Path $root 'native-announcer/target/debug/civilized-announcer.exe'
 $app = $root
 $assets = Join-Path $root 'native-announcer/resources'
-$bridge = Join-Path $root 'claude-plugin/scripts/bridge.mjs'
-$node = 'node'
 if ($AppDirectory) {
     $app = [IO.Path]::GetFullPath($AppDirectory)
     $runtimeDirectory = if ($HostName -eq 'Claude') { Join-Path $app 'claude-plugin' } else { $app }
@@ -23,16 +21,12 @@ if ($AppDirectory) {
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
     $binary = Join-Path $runtimeDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
     $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
-    $bridge = Join-Path $app 'claude-plugin/scripts/bridge.mjs'
-    $node = Join-Path $app 'claude-plugin/native-announcer/bin/node.exe'
 }
 if ($HostName -eq 'Claude' -and $ClaudePluginDirectory) {
     $ClaudePluginDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory)
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     $binary = Join-Path $ClaudePluginDirectory "native-announcer/bin/civilized-announcer-win32-$architecture.exe"
     $assets = Join-Path $ClaudePluginDirectory 'native-announcer/resources'
-    $bridge = Join-Path $ClaudePluginDirectory 'scripts/bridge.mjs'
-    $node = Join-Path $ClaudePluginDirectory 'native-announcer/bin/node.exe'
 }
 if (-not (Test-Path -LiteralPath $binary)) { throw "Announcer executable is missing at $binary" }
 if ($HostName -eq 'OpenCode' -and (-not $Model -or -not $Model.Contains('/'))) { throw 'Specify -Model provider/model for OpenCode; this test makes real model requests' }
@@ -97,8 +91,24 @@ try {
         if ($HostName -eq 'OpenCode' -and (Test-Path $actions)) {
             $created = Get-Content $actions | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object action -EQ 'created' | Select-Object -First 1
             if ($created) {
-                @{ type = 'presence'; clientID = 'host-verification'; sessionIDs = @($created.sessionID); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } | ConvertTo-Json -Compress | & $node $bridge
-                if ($LASTEXITCODE -ne 0) { throw 'Host verification presence bridge failed' }
+                $bridgeStart = [Diagnostics.ProcessStartInfo]::new($binary)
+                $bridgeStart.UseShellExecute = $false
+                $bridgeStart.RedirectStandardInput = $true
+                $bridgeStart.RedirectStandardOutput = $true
+                $bridgeStart.RedirectStandardError = $true
+                $bridgeStart.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+                $bridgeStart.StandardOutputEncoding = [Text.Encoding]::UTF8
+                foreach ($argument in @('--bridge', '--assets', $assets)) { $bridgeStart.ArgumentList.Add($argument) }
+                $bridgeProcess = [Diagnostics.Process]::Start($bridgeStart)
+                try {
+                    $bridgeOutput = $bridgeProcess.StandardOutput.ReadToEndAsync()
+                    $bridgeErrors = $bridgeProcess.StandardError.ReadToEndAsync()
+                    $bridgeProcess.StandardInput.Write((@{ type = 'presence'; clientID = 'host-verification'; sessionIDs = @($created.sessionID); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } | ConvertTo-Json -Compress))
+                    $bridgeProcess.StandardInput.Close()
+                    if (-not $bridgeProcess.WaitForExit(10000)) { $bridgeProcess.Kill($true); $bridgeProcess.WaitForExit(); throw 'Host verification presence bridge exceeded its deadline' }
+                    $bridgeOutput.GetAwaiter().GetResult() | Out-Null
+                    if ($bridgeProcess.ExitCode -ne 0) { throw "Host verification presence bridge failed: $($bridgeErrors.GetAwaiter().GetResult())" }
+                } finally { $bridgeProcess.Dispose() }
             }
         }
         if (([DateTime]::UtcNow - $started).TotalSeconds -gt 300) { throw 'Host verification exceeded five minutes' }

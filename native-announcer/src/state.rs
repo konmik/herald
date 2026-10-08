@@ -140,9 +140,9 @@ pub fn log(data: &Path, message: impl std::fmt::Display) {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-enum Command {
+pub(crate) enum Command {
     Notify(Notification),
     Discard {
         #[serde(rename = "sessionID")]
@@ -152,7 +152,7 @@ enum Command {
     Presence {
         #[serde(rename = "clientID")]
         client_id: String,
-        #[serde(rename = "sessionID")]
+        #[serde(rename = "sessionID", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(default, rename = "sessionIDs")]
         session_ids: Vec<String>,

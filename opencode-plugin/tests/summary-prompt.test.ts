@@ -2,7 +2,6 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { DEFAULT_SUMMARY_PROMPT, SUMMARY_PROMPT_MAX_LENGTH, isValidSummaryPrompt, readAnnouncementProfile } from "../../claude-plugin/scripts/summary-prompt.mjs"
 
 const custom = "Línea Ω 😀\nReport the task outcome clearly and briefly."
@@ -54,12 +53,6 @@ test("uses the chosen character prompt and falls back for blank or invalid promp
       for (const [id, profile] of Object.entries(settings.characters)) profile.selected = id === character
       writeFileSync(join(data, "settings.json"), JSON.stringify(settings))
       expect(readAnnouncementProfile(data)).toEqual({ characterID: character, prompt: expected })
-      const bridge = Bun.spawnSync(["node", fileURLToPath(new URL("../../claude-plugin/scripts/bridge.mjs", import.meta.url))], {
-        env: { ...process.env, CIVILIZED_AGENT_DATA: data },
-        stdin: new TextEncoder().encode(JSON.stringify({ type: "read-announcement-profile" })),
-      })
-      expect(bridge.exitCode).toBe(0)
-      expect(JSON.parse(bridge.stdout.toString())).toEqual({ characterID: character, prompt: expected })
     }
     writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: settings.summaryPrompt, characters: {} }))
     expect(readAnnouncementProfile(data)).toEqual({ characterID: undefined, prompt: "Default voice." })

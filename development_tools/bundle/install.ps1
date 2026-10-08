@@ -71,8 +71,11 @@ function Test-Bundle {
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/native-announcer/bin/node.exe', "native-announcer/bin/civilized-announcer-win32-$architecture.exe", "claude-plugin/native-announcer/bin/civilized-announcer-win32-$architecture.exe")) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/civilized-announcer-win32-$architecture.exe", "claude-plugin/native-announcer/bin/civilized-announcer-win32-$architecture.exe")) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
+    }
+    foreach ($obsolete in @('claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
+        if ($paths.Contains($obsolete) -or (Test-Path -LiteralPath (Join-Path $Directory $obsolete))) { throw "Obsolete Node runtime file is present: $obsolete" }
     }
     if (-not $paths.Contains('shortcut.ps1')) { throw 'Required runtime file missing: shortcut.ps1' }
     foreach ($entry in @('index.ts', 'tui.ts')) { if (-not $paths.Contains($entry)) { throw "Required OpenCode entry missing: $entry" } }
@@ -88,9 +91,7 @@ function Test-Bundle {
         }
     }
     if (-not $paths.Contains('claude-plugin/.claude-plugin/packaged.json')) { throw 'Claude packaged runtime marker is missing' }
-    foreach ($name in @('claude-plugin/hooks/hooks.json', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs', 'claude-plugin/scripts/summary-prompt.mjs')) {
-        if (-not $paths.Contains($name)) { throw "Required Claude runtime missing: $name" }
-    }
+    if (-not $paths.Contains('claude-plugin/hooks/hooks.json')) { throw 'Required Claude runtime missing: claude-plugin/hooks/hooks.json' }
     if ($paths.Contains('claude-plugin/.claude-plugin/development.json')) { throw 'Development fallback markers cannot be installed' }
     $package = Get-Content -LiteralPath (Join-Path $Directory 'package.json') -Raw | ConvertFrom-Json -AsHashtable
     $plugin = Get-Content -LiteralPath (Join-Path $Directory 'claude-plugin/.claude-plugin/plugin.json') -Raw | ConvertFrom-Json
@@ -165,6 +166,32 @@ function Invoke-Checked {
     param([string]$Command, [string[]]$Arguments)
     & $Command @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Command failed with exit code $LASTEXITCODE" }
+}
+
+function Test-OpenCodeRuntime {
+    param([string]$OpenCodeCommand, [int]$TimeoutMilliseconds = 10000)
+    $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $start.ArgumentList.Add('-NoProfile')
+    $start.ArgumentList.Add('-NonInteractive')
+    $start.ArgumentList.Add('-Command')
+    $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:CIVILIZED_AGENT_OPENCODE --version; exit $LASTEXITCODE')
+    $start.Environment['BUN_BE_BUN'] = '1'
+    $start.Environment['CIVILIZED_AGENT_OPENCODE'] = $OpenCodeCommand
+    $probe = [Diagnostics.Process]::Start($start)
+    try {
+        $output = $probe.StandardOutput.ReadToEndAsync()
+        $errors = $probe.StandardError.ReadToEndAsync()
+        $probe.StandardInput.Close()
+        if (-not $probe.WaitForExit($TimeoutMilliseconds)) { $probe.Kill($true); $probe.WaitForExit(); throw 'OpenCode runtime probe exceeded its deadline' }
+        if ($probe.ExitCode -ne 0) { throw "OpenCode does not support BUN_BE_BUN=1: $($errors.GetAwaiter().GetResult())" }
+        $output.GetAwaiter().GetResult() | Out-Null
+    } finally { $probe.Dispose() }
 }
 
 function Get-ClaudeInstallations {
@@ -250,7 +277,7 @@ function Deploy-ClaudeFiles {
     $runtime = if ($Announcer) { $Announcer } else { Join-Path $Source 'native-announcer' }
     Get-PayloadFiles $Source | Out-Null
     Get-PayloadFiles $runtime | Out-Null
-    foreach ($required in @('.claude-plugin/plugin.json', 'hooks/register.ts', 'scripts/runtime.mjs', 'scripts/summary-prompt.mjs')) {
+    foreach ($required in @('.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Source $required))) { throw "Missing Claude runtime: $required" }
     }
     $parent = Split-Path $destination -Parent
@@ -258,7 +285,7 @@ function Deploy-ClaudeFiles {
     $backup = Join-Path $parent ('.civilized-backup-' + [guid]::NewGuid())
     try {
         New-Item -ItemType Directory -Path $stage | Out-Null
-        foreach ($name in @('.claude-plugin', 'hooks', 'scripts')) { Copy-Item -LiteralPath (Join-Path $Source $name) -Destination (Join-Path $stage $name) -Recurse -Force }
+        foreach ($name in @('.claude-plugin', 'hooks')) { Copy-Item -LiteralPath (Join-Path $Source $name) -Destination (Join-Path $stage $name) -Recurse -Force }
         Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage 'native-announcer') -Recurse -Force
         Move-Item -LiteralPath $destination -Destination $backup
         try { Move-Item -LiteralPath $stage -Destination $destination } catch { Move-Item -LiteralPath $backup -Destination $destination; throw }
@@ -286,7 +313,10 @@ function Install-SettingsShortcut {
 }
 
 function Register-OpenCodeBundle {
-    param([string]$App, [string[]]$Configs, [scriptblock]$BeforeWrite, [scriptblock]$AfterWrite)
+    param([string]$App, [string[]]$Configs, [scriptblock]$BeforeWrite, [scriptblock]$AfterWrite, [string]$OpenCodeCommand)
+    $commandName = if ($OpenCodeCommand) { $OpenCodeCommand } else { 'opencode' }
+    $OpenCodeCommand = @(Get-Command $commandName -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $OpenCodeCommand) { throw 'OpenCode is required to register the plugin' }
     $locked = [Collections.Generic.List[object]]::new()
     $completed = $false
     try {
@@ -310,22 +340,27 @@ function Register-OpenCodeBundle {
             $entry.preamble = if ($preamble.Length -and $entry.bytes.Length -ge $preamble.Length -and [Convert]::ToHexString($entry.bytes[0..($preamble.Length - 1)]) -eq [Convert]::ToHexString($preamble)) { $preamble } else { [byte[]]@() }
         }
         $request = @{ installed = $App; documents = @($locked | ForEach-Object { @{ config = $_.config; text = $_.text } }) } | ConvertTo-Json -Depth 100 -Compress
-        $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $App 'claude-plugin/native-announcer/bin/node.exe'))
+        $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
         $start.UseShellExecute = $false
         $start.RedirectStandardInput = $true
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
         $start.StandardOutputEncoding = [Text.Encoding]::UTF8
-        $start.ArgumentList.Add((Join-Path $App 'register-opencode.mjs'))
-        $start.ArgumentList.Add('--render')
+        $start.ArgumentList.Add('-NoProfile')
+        $start.ArgumentList.Add('-NonInteractive')
+        $start.ArgumentList.Add('-Command')
+        $start.ArgumentList.Add('$ErrorActionPreference = "Stop"; & $env:CIVILIZED_AGENT_OPENCODE $env:CIVILIZED_AGENT_RENDERER --render; exit $LASTEXITCODE')
+        $start.Environment['BUN_BE_BUN'] = '1'
+        $start.Environment['CIVILIZED_AGENT_OPENCODE'] = $OpenCodeCommand
+        $start.Environment['CIVILIZED_AGENT_RENDERER'] = Join-Path $App 'register-opencode.mjs'
         $node = [Diagnostics.Process]::Start($start)
         try {
             $output = $node.StandardOutput.ReadToEndAsync()
             $errors = $node.StandardError.ReadToEndAsync()
             $node.StandardInput.Write($request)
             $node.StandardInput.Close()
-            if (-not $node.WaitForExit(30000)) { $node.Kill(); $node.WaitForExit(); throw 'OpenCode registration renderer exceeded its deadline' }
+            if (-not $node.WaitForExit(30000)) { $node.Kill($true); $node.WaitForExit(); throw 'OpenCode registration renderer exceeded its deadline' }
             if ($node.ExitCode -ne 0) { throw "OpenCode registration rejected: $($errors.GetAwaiter().GetResult())" }
             $updates = @($output.GetAwaiter().GetResult() | ConvertFrom-Json)
         } finally { $node.Dispose() }
@@ -379,7 +414,7 @@ function Register-ClaudeBundle {
 }
 
 function Register-BundleHosts {
-    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration)
+    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand)
     $files = @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ }
     $files += Join-Path $ProgramsDirectory 'Civilized Agent settings.lnk'
     $snapshots = @($files | ForEach-Object {
@@ -395,7 +430,7 @@ function Register-BundleHosts {
         } {
             Install-SettingsShortcut $Binary $ProgramsDirectory
             if ($AfterRegistration) { & $AfterRegistration }
-        }
+        } -OpenCodeCommand $OpenCodeCommand
     } catch {
         $failure = $_
         $newCaches = @(Get-ClaudeInstallations $ClaudeConfigDirectory | Where-Object { [IO.Path]::GetFullPath($_.installPath) -notin $previousCaches })
@@ -437,7 +472,9 @@ if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } elseif (Test-Path (Join-Path $HOME '.claude-whg')) { Join-Path $HOME '.claude-whg' } else { Join-Path $HOME '.claude' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }
     Get-Command claude -ErrorAction Stop | Out-Null
-    if ($ReloadOpenCode) { Get-Command opencode -ErrorAction Stop | Out-Null }
+    $openCodeCommand = @(Get-Command opencode -CommandType Application,ExternalScript -ErrorAction Stop | Select-Object -First 1).Source
+    if (-not $openCodeCommand) { throw 'OpenCode is required to register the plugin' }
+    Test-OpenCodeRuntime $openCodeCommand
     Assert-NoLinks $OpenCodeConfigDirectory
     New-Item -ItemType Directory -Path $OpenCodeConfigDirectory -Force | Out-Null
     $configs = @(@('opencode.json', 'opencode.jsonc') | ForEach-Object { Join-Path $OpenCodeConfigDirectory $_ } | Where-Object { Test-Path -LiteralPath $_ })
@@ -452,7 +489,7 @@ if (-not $SkipHostRegistration) {
         } {
             if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
             else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude sessions to load the installed hooks.' }
-        }
+        } -OpenCodeCommand $openCodeCommand
     } catch {
         foreach ($previous in $stopped) {
             if (Test-Path -LiteralPath $previous.binary) {

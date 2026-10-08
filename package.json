@@ -26,7 +26,7 @@
     "test:windows": "pwsh -NoProfile -File development_tools/verify-announcer.ps1",
     "test:settings": "pwsh -NoProfile -File development_tools/verify-settings.ps1",
     "test:characters": "pwsh -NoProfile -File development_tools/verify-characters.ps1",
-    "test:assets": "node --test development_tools/tests/assets.test.mjs development_tools/tests/runtime.test.mjs",
+    "test:assets": "node --test development_tools/tests/assets.test.mjs",
     "profile:plugin": "bun development_tools/profile-plugin.ts"
   },
   "devDependencies": {

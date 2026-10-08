@@ -2,6 +2,8 @@ import { expect, mock, test as engineTest, type TestBody } from 'claude-code/tes
 
 const test = (name: string, body: TestBody) => engineTest(name, async ($, on) => {
   on('fs.exists', () => ({ value: true }))
+  on('fs.list', () => ({ value: [{ name: 'civilized-announcer-win32-x64.exe', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }))
+  on('env.get', () => ({ value: undefined }))
   await body($, on)
 })
 
@@ -18,20 +20,54 @@ const runResult = (stdin?: string, prompt = defaultPrompt, characterID = 'herald
 }
 
 for (const development of [true, false]) {
-  engineTest(`bridge uses ${development ? 'PATH Node in development' : 'bundled Node when installed'}`, async ($, on) => {
+  engineTest(`bridge uses ${development ? 'the portable development binary' : 'the packaged native binary'}`, async ($, on) => {
     const clock = mock.clock(on)
-    let executable = ''
-    let bridgePath = ''
+    let argv: readonly string[] = []
     on('session.id', () => ({ value: 'main' }))
-    on('fs.exists', () => ({ value: development }))
+    on('fs.exists', (_, e) => ({ value: development || (!e.path.endsWith('/.claude-plugin/development.json') && !e.path.endsWith('\\.claude-plugin\\development.json')) }))
+    on('fs.list', () => ({ value: [{ name: 'civilized-announcer-win32-x64.exe', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }))
+    on('env.get', () => ({ value: undefined }))
     on('turn.complete', () => ({ text: '' }))
     on('model.fork', () => ({ value: { isAnswered: true, text: 'Done.', usage } }))
-    on('process.run', (_, e) => { executable = e.argv[0] ?? ''; bridgePath = e.argv[1] ?? ''; return { value: runResult(e.init?.stdin) } })
+    on('process.run', (_, e) => { argv = e.argv; return { value: runResult(e.init?.stdin) } })
     await $.turn.complete({ turnId: 'launcher', answer: 'Done.', durationMs: 60000, isAborted: false, reason: 'answer', usage })
     await clock.settle()
-    expect(executable).toBe(development ? 'node' : bridgePath.replace('/scripts/bridge.mjs', '/native-announcer/bin/node.exe'))
+    expect(argv[0]).toContain('/native-announcer/bin/civilized-announcer-win32-x64.exe')
+    expect(argv.slice(1, 3)).toEqual(['--bridge', '--assets'])
+    expect(argv[3]).toContain('/native-announcer/resources')
   })
 }
+
+engineTest('development discovery uses the explicit binary while keeping repository assets', async ($, on) => {
+  const clock = mock.clock(on)
+  let argv: readonly string[] = []
+  on('session.id', () => ({ value: 'override' }))
+  on('fs.exists', () => ({ value: true }))
+  on('env.get', (_, e) => ({ value: e.name === 'CIVILIZED_AGENT_BINARY' ? 'C:/native/target/debug/civilized-announcer.exe' : undefined }))
+  on('turn.complete', () => ({ text: '' }))
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'Done.', usage } }))
+  on('process.run', (_, e) => { argv = e.argv; return { value: runResult(e.init?.stdin) } })
+  await $.turn.complete({ turnId: 'override', answer: 'Done.', durationMs: 60000, isAborted: false, reason: 'answer', usage })
+  await clock.settle()
+  expect(argv[0]).toBe('C:/native/target/debug/civilized-announcer.exe')
+  expect(argv.slice(1, 3)).toEqual(['--bridge', '--assets'])
+  expect(argv[3]).toContain('/native-announcer/resources')
+})
+
+engineTest('installed discovery does not read the development executable override', async ($, on) => {
+  const clock = mock.clock(on)
+  let argv: readonly string[] = []
+  on('session.id', () => ({ value: 'installed' }))
+  on('fs.exists', (_, e) => ({ value: !e.path.endsWith('/.claude-plugin/development.json') && !e.path.endsWith('\\.claude-plugin\\development.json') }))
+  on('fs.list', () => ({ value: [{ name: 'civilized-announcer-win32-arm64.exe', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }))
+  on('env.get', () => { throw new Error('Installed discovery read a development override') })
+  on('turn.complete', () => ({ text: '' }))
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'Done.', usage } }))
+  on('process.run', (_, e) => { argv = e.argv; return { value: runResult(e.init?.stdin) } })
+  await $.turn.complete({ turnId: 'installed', answer: 'Done.', durationMs: 60000, isAborted: false, reason: 'answer', usage })
+  await clock.settle()
+  expect(argv[0]).toContain('/native-announcer/bin/civilized-announcer-win32-arm64.exe')
+})
 
 test('long main tasks fork the current conversation once', async ($, on) => {
   const clock = mock.clock(on)

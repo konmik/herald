@@ -24,17 +24,15 @@ try {
             Copy-Item -LiteralPath (Join-Path $PayloadDirectory $directory) -Destination (Join-Path $stage $directory) -Recurse
         }
     } else {
-        $arch = & node -p 'process.arch'
-        if ($LASTEXITCODE -ne 0 -or $arch -notin @('x64', 'arm64')) { throw 'Unsupported Node architecture' }
         $osArch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
-        if ($arch -ne $osArch) { throw 'Build with Node matching the Windows architecture' }
+        $arch = $osArch
         $rustTarget = @{ x64 = 'x86_64-pc-windows-msvc'; arm64 = 'aarch64-pc-windows-msvc' }[$arch]
         $oldTarget = $env:CARGO_TARGET_DIR
         try {
             $env:CARGO_TARGET_DIR = $target
             Invoke-Checked 'cargo' @('build', '--release', '--locked', '--target', $rustTarget, '-j', '6', '--manifest-path', (Join-Path $root 'native-announcer/Cargo.toml'))
         } finally { $env:CARGO_TARGET_DIR = $oldTarget }
-        foreach ($name in @('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts', 'scripts/bridge.mjs', 'scripts/runtime.mjs', 'scripts/session-title.mjs', 'scripts/summary-prompt.mjs')) {
+        foreach ($name in @('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts')) {
             $destination = Join-Path $stage "claude-plugin/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination $destination -Recurse -Force
@@ -48,13 +46,6 @@ try {
             Copy-Item -LiteralPath (Join-Path $root "native-announcer/resources/$name") -Destination $destination -Recurse -Force
         }
         Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage 'claude-plugin/native-announcer') -Recurse -Force
-        $node = & node -p 'process.execPath'
-        if ($LASTEXITCODE -ne 0) { throw 'Could not locate Node runtime' }
-        Copy-Item -LiteralPath $node -Destination (Join-Path $stage 'claude-plugin/native-announcer/bin/node.exe')
-        $nodeVersion = & node -p 'process.version'
-        if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v\d+\.\d+\.\d+$') { throw 'Could not identify the bundled Node version for its license' }
-        New-Item -ItemType Directory -Path (Join-Path $stage 'claude-plugin/native-announcer/licenses') -Force | Out-Null
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE" -OutFile (Join-Path $stage 'claude-plugin/native-announcer/licenses/node-LICENSE') -TimeoutSec 60
     }
     $package = Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     $exports = @{}
@@ -68,9 +59,6 @@ try {
     Copy-BundledLicenses $metafile $root $licenseDirectory
     foreach ($entry in @(@{ name = 'index'; export = '.' }, @{ name = 'tui'; export = './tui' })) {
         ('export { default } from "' + $exports[$entry.export] + '"') | Set-Content (Join-Path $stage "$($entry.name).ts") -Encoding utf8NoBOM
-    }
-    foreach ($name in @('hooks/register.ts', 'scripts/runtime.mjs')) {
-        Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination (Join-Path $stage "claude-plugin/$name") -Force
     }
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
     foreach ($name in @('install.ps1', 'shortcut.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
