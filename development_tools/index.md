@@ -63,7 +63,13 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 
 `pnpm run test:settings` drives GPUI controls through Windows UI Automation. Sliders and dropdowns use normal pointer actions on the owned controls when GPUI Kit's accessibility actions are unsupported. It checks navigation, single-instance activation, draft persistence, Close/reopen, silent previews, unavailable output devices and System default. It does not play audible speech or install a voice model.
 
+Idle settings and zero-volume previews must not load the offline speech runtime. Audible previews load the model on demand and release it when playback finishes or is cancelled; each local preview pays the model-loading cost. The background announcer keeps its separate speech cache for timely announcements. Font enumeration reads format signatures, not complete font files.
+
 Compare two preserved release executables with `pnpm run benchmark:settings -Baseline <old.exe> -Treatment <new.exe> -Evidence temp/verification/settings-memory`. The defaults are five alternating runs per executable, five seconds of warmup and ten seconds of sampling. The results include per-run working-set and private-byte medians, ranges, raw samples, executable hashes and cleanup evidence. Working set is resident RAM; private bytes are committed private memory. GPU memory is excluded. `complete` means all measurements finished, not that a difference is statistically significant.
+
+Use `-TtsDirectory <model-directory>` to run both variants with the same alternate local model. Omitting it uses the prepared model under `native-announcer/resources/tts/`. Runtime errors make the measurement inconclusive; a missing model is not a valid substitute for installed-model measurements.
+
+The raw benchmark also records committed address space by private, mapped and image regions, plus thread counts and thread-start modules. These are diagnostic snapshots after sampling, not resident-memory measurements. Image and mapped regions can be shared, so their committed sizes must not be added to the private-byte counter or presented as RAM use.
 
 ## Tooling tests
 

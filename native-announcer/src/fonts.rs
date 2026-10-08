@@ -20,13 +20,14 @@ impl FontCatalog {
 }
 
 pub fn available_families() -> Result<Vec<String>, String> {
+    #[cfg(not(target_os = "windows"))]
     FontCatalog::new()?;
     Ok(family_names().into_iter().filter(|family| supports_family(family)).collect())
 }
 
 #[cfg(target_os = "windows")]
 fn supports_family(family: &str) -> bool {
-    font_data(family).is_some_and(|bytes| bytes.starts_with(&[0, 1, 0, 0]) || bytes.starts_with(b"OTTO"))
+    font_bytes(family, Some(4)).is_some_and(|bytes| bytes.starts_with(&[0, 1, 0, 0]) || bytes.starts_with(b"OTTO"))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -119,6 +120,11 @@ unsafe extern "system" fn collect_family(
 
 #[cfg(target_os = "windows")]
 fn font_data(family: &str) -> Option<Vec<u8>> {
+    font_bytes(family, None)
+}
+
+#[cfg(target_os = "windows")]
+fn font_bytes(family: &str, limit: Option<u32>) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::*;
 
     unsafe {
@@ -146,6 +152,7 @@ fn font_data(family: &str) -> Option<Vec<u8>> {
             if size == u32::MAX {
                 None
             } else {
+                let size = limit.map_or(size, |limit| size.min(limit));
                 let mut bytes = vec![0_u8; size as usize];
                 let written = GetFontData(hdc, 0, 0, bytes.as_mut_ptr().cast(), size);
                 if written == u32::MAX {
@@ -175,5 +182,16 @@ mod tests {
         assert_eq!(catalog.get("Consolas").name(), Some("Consolas"));
         assert_eq!(catalog.get("Segoe UI").name(), Some("Segoe UI"));
         assert_eq!(catalog.get("Missing Herald Font").name(), catalog.fallback.name());
+    }
+
+    #[test]
+    fn enumeration_reads_only_the_font_signature() {
+        for family in ["Consolas", "Segoe UI"] {
+            let header = font_bytes(family, Some(4)).unwrap();
+            assert_eq!(header.len(), 4);
+            assert_eq!(header, font_data(family).unwrap()[..4]);
+            assert!(supports_family(family));
+        }
+        assert!(!supports_family("Missing Herald Font"));
     }
 }

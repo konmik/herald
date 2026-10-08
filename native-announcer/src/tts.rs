@@ -3,7 +3,7 @@ use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKitt
 use crate::platform::SpeechPlayback;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 #[cfg(test)]
 use std::time::Instant;
 
@@ -15,6 +15,7 @@ const MODEL_DIRECTORY: &str = "kitten-nano-en-v0_8-int8";
 const MODEL_FILES: [&str; 5] = ["model.int8.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/en_dict", "LICENSE"];
 const LIBRARIES: [&str; 2] = ["onnxruntime.dll", "sherpa-onnx-c-api.dll"];
 static ENGINE: Mutex<Option<OfflineTts>> = Mutex::new(None);
+static RUNTIME: OnceLock<()> = OnceLock::new();
 
 pub(crate) fn model_directory() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("HERALD_TTS") { return Ok(path.into()); }
@@ -108,6 +109,7 @@ fn load_runtime() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::LibraryLoader::*;
 
+    if RUNTIME.get().is_some() { return Ok(()); }
     let directory = if std::env::var_os("HERALD_TTS").is_some() {
         std::env::current_exe().map_err(|error| error.to_string())?.parent().ok_or("Missing executable directory")?.to_path_buf()
     } else {
@@ -119,6 +121,7 @@ fn load_runtime() -> Result<(), String> {
             return Err(format!("Offline voice engine unavailable: {}. Install it from Settings > Offline voice.", std::io::Error::last_os_error()));
         }
     }
+    let _ = RUNTIME.set(());
     Ok(())
 }
 
@@ -191,6 +194,10 @@ fn with_engine<T>(action: impl FnOnce(&OfflineTts) -> Result<T, String>) -> Resu
 pub fn prepare() -> Result<(), String> {
     if !installed() && std::env::var_os("HERALD_TTS").is_none() { return Ok(()); }
     with_engine(|_| Ok(()))
+}
+
+pub(crate) fn release_engine() {
+    if let Ok(mut engine) = ENGINE.lock() { *engine = None; }
 }
 
 fn speaker(character: &str, preferred: Option<&str>) -> i32 {
@@ -392,6 +399,22 @@ mod tests {
             false
         })).unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[ignore = "Requires installed Kitten model assets"]
+    fn released_preview_engine_can_be_loaded_again() {
+        for _ in 0..3 {
+            with_engine(|engine| {
+                let audio = engine.generate_with_config("This is an announcement.", &GenerationConfig::default(), None::<fn(&[f32], f32) -> bool>).ok_or("Synthesis failed")?;
+                assert!(!audio.samples().is_empty());
+                assert!(audio.samples().iter().any(|sample| sample.abs() > 0.01));
+                Ok(())
+            }).unwrap();
+            assert!(ENGINE.lock().unwrap().is_some());
+            release_engine();
+            assert!(ENGINE.lock().unwrap().is_none());
+        }
     }
 
     #[test]

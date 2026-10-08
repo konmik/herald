@@ -12,7 +12,8 @@ param(
     [ValidateRange(0, 3600)]
     [int]$WarmupSeconds = 5,
     [ValidateRange(1, 3600)]
-    [int]$SampleSeconds = 10
+    [int]$SampleSeconds = 10,
+    [string]$TtsDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,11 +24,70 @@ if ($null -eq ('HeraldSettingsMemoryNative' -as [type])) {
     $null = Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public static class HeraldSettingsMemoryNative
 {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryRegion
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public ushort PartitionId;
+        public UIntPtr RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern UIntPtr VirtualQueryEx(IntPtr process, IntPtr address, out MemoryRegion region, UIntPtr length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationThread(IntPtr thread, int informationClass, out IntPtr address, uint length, IntPtr returnLength);
+
+    public static long ReadThreadStartAddress(int threadId)
+    {
+        var thread = OpenThread(0x40, false, (uint)threadId);
+        if (thread == IntPtr.Zero) return 0;
+        try
+        {
+            IntPtr address;
+            return NtQueryInformationThread(thread, 9, out address, (uint)IntPtr.Size, IntPtr.Zero) == 0 ? address.ToInt64() : 0;
+        }
+        finally { CloseHandle(thread); }
+    }
+
+    public static Dictionary<string, ulong> ReadCommittedAddressSpace(IntPtr process)
+    {
+        var totals = new Dictionary<string, ulong> { { "private", 0 }, { "mapped", 0 }, { "image", 0 } };
+        ulong address = 0;
+        MemoryRegion region;
+        var length = new UIntPtr((uint)Marshal.SizeOf(typeof(MemoryRegion)));
+        while (VirtualQueryEx(process, new IntPtr((long)address), out region, length) != UIntPtr.Zero)
+        {
+            ulong size = region.RegionSize.ToUInt64();
+            if (region.State == 0x1000)
+            {
+                string kind = region.Type == 0x20000 ? "private" : region.Type == 0x40000 ? "mapped" : region.Type == 0x1000000 ? "image" : null;
+                if (kind != null) totals[kind] += size;
+            }
+            ulong next = (ulong)region.BaseAddress.ToInt64() + size;
+            if (next <= address || next > long.MaxValue) break;
+            address = next;
+        }
+        return totals;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct MemoryStatus
     {
@@ -322,7 +382,7 @@ function Invoke-SettingsMemoryRun {
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.Environment['HERALD_DATA'] = $DataDirectory
-        $startInfo.Environment['HERALD_TTS'] = Join-Path $Assets 'tts/kitten-nano-en-v0_8-int8'
+        $startInfo.Environment['HERALD_TTS'] = if ($TtsDirectory) { $TtsDirectory } else { Join-Path $Assets 'tts/kitten-nano-en-v0_8-int8' }
         $startInfo.ArgumentList.Add('--settings')
         $startInfo.ArgumentList.Add('--assets')
         $startInfo.ArgumentList.Add($Assets)
@@ -381,6 +441,14 @@ function Invoke-SettingsMemoryRun {
         if (-not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was not visible at the end of sampling.' }
         Assert-NoErrorLog -DataDirectory $DataDirectory
         $record['childProcessCountAtEnd'] = Get-ChildProcessCount -ParentId $process.Id
+        $record['committedAddressSpaceAtEnd'] = [HeraldSettingsMemoryNative]::ReadCommittedAddressSpace($process.Handle)
+        $record['threadCountAtEnd'] = $process.Threads.Count
+        $modules = @($process.Modules)
+        $record['threadStartModulesAtEnd'] = @($process.Threads | ForEach-Object {
+            $address = [HeraldSettingsMemoryNative]::ReadThreadStartAddress($_.Id)
+            $module = $modules | Where-Object { $address -ge $_.BaseAddress.ToInt64() -and $address -lt $_.BaseAddress.ToInt64() + $_.ModuleMemorySize } | Select-Object -First 1
+            if ($module) { $module.ModuleName } else { 'unknown' }
+        } | Group-Object | ForEach-Object { [pscustomobject]@{ module = $_.Name; threads = $_.Count } })
         $record['sampledWallSeconds'] = [math]::Round($sampledWallSeconds, 6)
         $sampledProcessorSeconds = ($cpuEnd - $cpuStart).TotalSeconds
         $record['cpu'] = [pscustomobject][ordered]@{
@@ -648,6 +716,7 @@ try {
         startedAt = $benchmarkStartedAt.ToString('o')
         finishedAt = [DateTimeOffset]::UtcNow.ToString('o')
         parameters = [pscustomobject][ordered]@{
+            ttsDirectory = if ($TtsDirectory) { $TtsDirectory } else { Join-Path $assets 'tts/kitten-nano-en-v0_8-int8' }
             baseline = $baselineInfo.path
             treatment = if ($hasTreatment) { $treatmentInfo.path } else { $null }
             evidence = $evidenceDirectory

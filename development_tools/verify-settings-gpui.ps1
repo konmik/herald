@@ -727,6 +727,7 @@ function Run-SilentPreview {
     $match = Wait-TextMatch @('Preview is silent at 0% volume.', 'Preview is silent at 0% volume') 'The zero-volume preview did not report a silent preview.' 10
     $after = Read-Bytes $script:settingsPath
     if (-not (Bytes-Equal $before $after)) { throw 'The zero-volume preview saved unsaved settings bytes.' }
+    Assert-SpeechUnloaded
     Write-JsonFile (Join-Path $script:evidencePath 'preview-silent.json') ([ordered]@{ status = $match; savedBytesUnchanged = $true; volume = 0; audiblePreview = $false })
     Save-UiaSnapshot 'uia-after-silent-preview' | Out-Null
 }
@@ -745,6 +746,13 @@ function Try-CharacterDraft {
     $script:characterDraftName = $name
     Save-UiaSnapshot 'uia-character-draft' | Out-Null
     $true
+}
+
+function Assert-SpeechUnloaded {
+    Assert-ActiveProcess
+    $modules = @($script:activeRecord.Process.Modules | ForEach-Object ModuleName)
+    if ($modules -contains 'sherpa-onnx-c-api.dll' -or $modules -contains 'onnxruntime.dll') { throw 'Idle settings loaded the offline speech engine without an audible preview.' }
+    Write-Action 'speech-engine-unloaded' @{ verified = $true }
 }
 
 function Set-AnnouncementDraft {
@@ -912,6 +920,7 @@ try {
     Select-Page 'Speech service'
     Assert-EnvironmentKeyIgnored
     Select-Page 'Audio'
+    Assert-SpeechUnloaded
     $outputDropdown = if ($Feature -in @('All', 'Settings', 'Output')) { Inspect-OutputDropdown } else { $null }
     Save-UiaSnapshot 'uia-before-actions' | Out-Null
 

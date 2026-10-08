@@ -286,12 +286,6 @@ impl SettingsView {
                 }).is_err() { break; }
             }
         }).detach();
-        let speech_data = data;
-        std::thread::spawn(move || {
-            if let Err(error) = crate::tts::prepare() {
-                crate::state::log(&speech_data, error);
-            }
-        });
         view
     }
 
@@ -802,7 +796,7 @@ impl SettingsView {
         let weak = cx.weak_entity();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = sender.send(crate::tts::install().and_then(|_| crate::tts::prepare()));
+            let _ = sender.send(crate::tts::install());
         });
         cx.spawn(async move |_, cx| {
             loop {

@@ -227,6 +227,15 @@ pub struct Speech {
 
 impl Speech {
     pub fn new(preload: bool) -> Self {
+        Self::worker(preload, true)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn preview() -> Self {
+        Self::worker(false, false)
+    }
+
+    fn worker(preload: bool, retain_engine: bool) -> Self {
         let (sender, commands) = mpsc::channel::<SpeechCommand>();
         let (events, receiver) = mpsc::channel::<SpeechEvent>();
         std::thread::spawn(move || {
@@ -256,6 +265,10 @@ impl Speech {
                 };
                 let playback = SpeechPlayback { gate: &gate, ready: &ready };
                 let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback));
+                #[cfg(target_os = "windows")]
+                if !retain_engine { crate::tts::release_engine(); }
+                #[cfg(not(target_os = "windows"))]
+                let _ = retain_engine;
                 let _ = events.send(SpeechEvent::Finished { id, result });
             }
         });
@@ -520,7 +533,7 @@ impl Preview {
         let stop = cancelled.clone();
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
-            let mut speech = Speech::new(false);
+            let mut speech = Speech::preview();
             let character = crate::characters::resolve(&settings, &assets, "opencode", settings.selected_character.as_deref());
             speech.start("This is an announcement", "settings-preview", &character, &settings);
             let started = std::time::Instant::now();
@@ -567,7 +580,7 @@ impl Drop for Preview {
 #[cfg(target_os = "windows")]
 fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
     if stop.load(Ordering::Relaxed) { return Ok(()); }
-    let mut speech = Speech::new(false);
+    let mut speech = Speech::preview();
     let character = crate::characters::resolve(settings, assets, "opencode", settings.selected_character.as_deref());
     speech.start(text, "settings-preview", &character, settings);
     let started = std::time::Instant::now();
