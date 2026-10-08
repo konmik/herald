@@ -11,17 +11,22 @@ mod native {
     use crate::settings::{format_time, parse_time, FontPreference, Settings, MAX_FONT_SIZE, MIN_FONT_SIZE, DEFAULT_SUMMARY_PROMPT};
     use chrono::Timelike;
     use std::collections::BTreeMap;
+    use std::ffi::c_void;
     use std::hash::{Hash, Hasher};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, Receiver};
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Graphics::Gdi::*;
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+    use windows_sys::Win32::System::{LibraryLoader::GetModuleHandleW, Registry::*};
     use windows_sys::Win32::UI::{Controls::*, WindowsAndMessaging::*};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, VK_CONTROL, VK_MENU};
+    use windows_sys::Win32::UI::Accessibility::*;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, VK_CONTROL, VK_MENU};
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 
     const TBM_GETPOS: u32 = WM_USER;
+    const TBM_GETTHUMBRECT: u32 = WM_USER + 25;
+    const TBM_GETCHANNELRECT: u32 = WM_USER + 26;
 
     const QUIET: i32 = 101;
     const SCHEDULE: i32 = 102;
@@ -85,6 +90,21 @@ mod native {
     const CHARACTER_PROMPT_LABEL: i32 = 336;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
     const VOICE_EXAMPLE: &str = "I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.";
+
+    const PUSH_BUTTONS: &[i32] = &[
+        REFRESH,
+        PREVIEW,
+        USAGE_REFRESH,
+        MY_VOICES,
+        OFFLINE_INSTALL,
+        NEW_CHARACTER,
+        VIDEO_PATH,
+        PLAY_VOICE,
+        REMOVE_CHARACTER,
+        RESET_DEFAULT,
+        APPLY,
+        CLOSE,
+    ];
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Page {
@@ -235,23 +255,104 @@ mod native {
         Failed(String),
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Theme {
+        Light,
+        Dark,
+        HighContrast,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Palette {
+        main: u32,
+        sidebar: u32,
+        input: u32,
+        button: u32,
+        text: u32,
+        muted_text: u32,
+        disabled_text: u32,
+        border: u32,
+        selected: u32,
+        selected_text: u32,
+        accent: u32,
+    }
+
+    impl Palette {
+        unsafe fn for_theme(theme: Theme) -> Self {
+            match theme {
+                Theme::Light => Self {
+                    main: color(255, 255, 255),
+                    sidebar: color(246, 248, 251),
+                    input: color(255, 255, 255),
+                    button: color(240, 240, 240),
+                    text: color(32, 37, 43),
+                    muted_text: color(92, 101, 112),
+                    disabled_text: color(145, 150, 158),
+                    border: color(205, 210, 216),
+                    selected: color(229, 239, 252),
+                    selected_text: color(25, 80, 160),
+                    accent: color(25, 80, 160),
+                },
+                Theme::Dark => Self {
+                    main: color(30, 30, 30),
+                    sidebar: color(37, 37, 38),
+                    input: color(43, 43, 43),
+                    button: color(51, 51, 51),
+                    text: color(241, 241, 241),
+                    muted_text: color(181, 181, 181),
+                    disabled_text: color(118, 118, 118),
+                    border: color(88, 88, 88),
+                    selected: color(55, 88, 125),
+                    selected_text: color(255, 255, 255),
+                    accent: color(76, 194, 255),
+                },
+                Theme::HighContrast => Self {
+                    main: GetSysColor(COLOR_WINDOW),
+                    sidebar: GetSysColor(COLOR_WINDOW),
+                    input: GetSysColor(COLOR_WINDOW),
+                    button: GetSysColor(COLOR_WINDOW),
+                    text: GetSysColor(COLOR_WINDOWTEXT),
+                    muted_text: GetSysColor(COLOR_WINDOWTEXT),
+                    disabled_text: GetSysColor(COLOR_WINDOWTEXT),
+                    border: GetSysColor(COLOR_WINDOWTEXT),
+                    selected: GetSysColor(COLOR_HIGHLIGHT),
+                    selected_text: GetSysColor(COLOR_HIGHLIGHTTEXT),
+                    accent: GetSysColor(COLOR_HIGHLIGHT),
+                },
+            }
+        }
+    }
+
     struct UiResources {
+        theme: Theme,
+        palette: Palette,
         body: HFONT,
         heading: HFONT,
         muted: HFONT,
         main_brush: HBRUSH,
         sidebar_brush: HBRUSH,
+        input_brush: HBRUSH,
+        button_brush: HBRUSH,
     }
 
     impl UiResources {
         unsafe fn new() -> Result<Self, String> {
+            Self::with_theme(detect_theme())
+        }
+
+        unsafe fn with_theme(theme: Theme) -> Result<Self, String> {
             let face = wide("Segoe UI");
+            let palette = Palette::for_theme(theme);
             let mut ui = Self {
+                theme,
+                palette,
                 body: std::ptr::null_mut(),
                 heading: std::ptr::null_mut(),
                 muted: std::ptr::null_mut(),
                 main_brush: std::ptr::null_mut(),
                 sidebar_brush: std::ptr::null_mut(),
+                input_brush: std::ptr::null_mut(),
+                button_brush: std::ptr::null_mut(),
             };
             let font = |height, weight| {
                 let handle = CreateFontW(height, 0, 0, 0, weight, 0, 0, 0, 0, 0, 0, 0, 0, face.as_ptr());
@@ -260,11 +361,44 @@ mod native {
             ui.body = font(-16, 400)?;
             ui.heading = font(-26, 600)?;
             ui.muted = font(-15, 400)?;
-            ui.main_brush = CreateSolidBrush(color(255, 255, 255));
-            if ui.main_brush.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
-            ui.sidebar_brush = CreateSolidBrush(color(246, 248, 251));
-            if ui.sidebar_brush.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
+            let Some([main_brush, sidebar_brush, input_brush, button_brush]) = Self::create_brushes(palette) else {
+                return Err(std::io::Error::last_os_error().to_string());
+            };
+            ui.main_brush = main_brush;
+            ui.sidebar_brush = sidebar_brush;
+            ui.input_brush = input_brush;
+            ui.button_brush = button_brush;
             Ok(ui)
+        }
+
+        unsafe fn create_brushes(palette: Palette) -> Option<[HBRUSH; 4]> {
+            let mut brushes = [std::ptr::null_mut(); 4];
+            for (brush, value) in brushes.iter_mut().zip([palette.main, palette.sidebar, palette.input, palette.button]) {
+                *brush = CreateSolidBrush(value);
+                if brush.is_null() {
+                    for created in brushes {
+                        if !created.is_null() { DeleteObject(created as HGDIOBJ); }
+                    }
+                    return None;
+                }
+            }
+            Some(brushes)
+        }
+
+        unsafe fn replace_palette(&mut self, theme: Theme) -> bool {
+            let palette = Palette::for_theme(theme);
+            let Some([main_brush, sidebar_brush, input_brush, button_brush]) = Self::create_brushes(palette) else { return false; };
+            let old = [self.main_brush, self.sidebar_brush, self.input_brush, self.button_brush];
+            self.theme = theme;
+            self.palette = palette;
+            self.main_brush = main_brush;
+            self.sidebar_brush = sidebar_brush;
+            self.input_brush = input_brush;
+            self.button_brush = button_brush;
+            for brush in old {
+                if !brush.is_null() { DeleteObject(brush as HGDIOBJ); }
+            }
+            true
         }
     }
 
@@ -276,6 +410,8 @@ mod native {
                 if !self.muted.is_null() { DeleteObject(self.muted as HGDIOBJ); }
                 if !self.main_brush.is_null() { DeleteObject(self.main_brush as HGDIOBJ); }
                 if !self.sidebar_brush.is_null() { DeleteObject(self.sidebar_brush as HGDIOBJ); }
+                if !self.input_brush.is_null() { DeleteObject(self.input_brush as HGDIOBJ); }
+                if !self.button_brush.is_null() { DeleteObject(self.button_brush as HGDIOBJ); }
             }
         }
     }
@@ -296,6 +432,8 @@ mod native {
         voice_usage: VoiceUsageState,
         offline_install: Option<Receiver<Result<(), String>>>,
         updating: bool,
+        theme_refreshing: bool,
+        theme_applied: bool,
         active_page: Page,
         ui: UiResources,
         font_families: Vec<String>,
@@ -305,6 +443,51 @@ mod native {
 
     fn color(red: u8, green: u8, blue: u8) -> u32 {
         red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
+    }
+
+    fn theme_from_preferences(apps_use_light_theme: Option<u32>, high_contrast: bool) -> Theme {
+        if high_contrast {
+            Theme::HighContrast
+        } else if apps_use_light_theme == Some(0) {
+            Theme::Dark
+        } else {
+            Theme::Light
+        }
+    }
+
+    unsafe fn read_apps_use_light_theme() -> Option<u32> {
+        let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let value = wide("AppsUseLightTheme");
+        let mut data = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let status = RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast::<c_void>(),
+            &mut size,
+        );
+        if status == ERROR_SUCCESS && size == std::mem::size_of::<u32>() as u32 { Some(data) } else { None }
+    }
+
+    unsafe fn high_contrast_enabled() -> bool {
+        let mut settings = HIGHCONTRASTW {
+            cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
+            dwFlags: 0,
+            lpszDefaultScheme: std::ptr::null_mut(),
+        };
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            settings.cbSize,
+            (&mut settings as *mut HIGHCONTRASTW).cast::<c_void>(),
+            0,
+        ) != 0 && settings.dwFlags & HCF_HIGHCONTRASTON != 0
+    }
+
+    unsafe fn detect_theme() -> Theme {
+        theme_from_preferences(read_apps_use_light_theme(), high_contrast_enabled())
     }
 
     fn volume_label(volume: u16) -> String {
@@ -346,6 +529,68 @@ mod native {
         DefSubclassProc(window, message, wparam, lparam)
     }
 
+    unsafe fn subclass_form(window: HWND, data: usize) -> *mut Form {
+        let parent = if data == 0 { GetParent(window) } else { data as HWND };
+        GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut Form
+    }
+
+    unsafe extern "system" fn button_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, id: usize, data: usize) -> LRESULT {
+        let form = subclass_form(window, data);
+        let dark = !form.is_null() && (*form).ui.theme == Theme::Dark;
+        if dark && message == WM_PAINT {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(window, &mut paint);
+            if !dc.is_null() { draw_button(window, dc, &(*form).ui); }
+            EndPaint(window, &paint);
+            return 0;
+        }
+        if dark && message == WM_PRINTCLIENT {
+            draw_button(window, wparam as HDC, &(*form).ui);
+            return 1;
+        }
+        if dark && message == WM_ERASEBKGND { return 1; }
+        if message == WM_NCDESTROY { RemoveWindowSubclass(window, Some(button_proc), id); }
+        DefSubclassProc(window, message, wparam, lparam)
+    }
+
+    unsafe extern "system" fn combo_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, id: usize, data: usize) -> LRESULT {
+        let form = subclass_form(window, data);
+        let dark = !form.is_null() && (*form).ui.theme == Theme::Dark;
+        if dark && message == WM_PAINT {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(window, &mut paint);
+            if !dc.is_null() { draw_combo(window, dc, &(*form).ui); }
+            EndPaint(window, &paint);
+            return 0;
+        }
+        if dark && message == WM_PRINTCLIENT {
+            draw_combo(window, wparam as HDC, &(*form).ui);
+            return 1;
+        }
+        if dark && message == WM_ERASEBKGND { return 1; }
+        if message == WM_NCDESTROY { RemoveWindowSubclass(window, Some(combo_proc), id); }
+        DefSubclassProc(window, message, wparam, lparam)
+    }
+
+    unsafe extern "system" fn trackbar_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, id: usize, data: usize) -> LRESULT {
+        let form = subclass_form(window, data);
+        let dark = !form.is_null() && (*form).ui.theme == Theme::Dark;
+        if dark && message == WM_PAINT {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(window, &mut paint);
+            if !dc.is_null() { draw_slider(window, dc, &(*form).ui); }
+            EndPaint(window, &paint);
+            return 0;
+        }
+        if dark && message == WM_PRINTCLIENT {
+            draw_slider(window, wparam as HDC, &(*form).ui);
+            return 1;
+        }
+        if dark && message == WM_ERASEBKGND { return 1; }
+        if message == WM_NCDESTROY { RemoveWindowSubclass(window, Some(trackbar_proc), id); }
+        DefSubclassProc(window, message, wparam, lparam)
+    }
+
     unsafe fn checked(window: HWND, id: i32) -> bool {
         SendMessageW(GetDlgItem(window, id), BM_GETCHECK, 0, 0) == BST_CHECKED as isize
     }
@@ -360,6 +605,15 @@ mod native {
             x, y, width, height, window, id as usize as HMENU, GetModuleHandleW(std::ptr::null()), std::ptr::null());
         if control.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
         if class == "EDIT" && SetWindowSubclass(control, Some(edit_proc), id as usize, 0) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if class == "BUTTON" && is_push_button(id) && SetWindowSubclass(control, Some(button_proc), id as usize, window as usize) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if class == "COMBOBOX" && SetWindowSubclass(control, Some(combo_proc), id as usize, window as usize) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if class == "msctls_trackbar32" && SetWindowSubclass(control, Some(trackbar_proc), id as usize, window as usize) == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
         SendMessageW(control, WM_SETFONT, GetStockObject(DEFAULT_GUI_FONT) as usize, 1);
@@ -381,6 +635,187 @@ mod native {
         set_font(window, PAGE_HINT, form.ui.muted);
         for id in [QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, STATUS] {
             set_font(window, id, form.ui.muted);
+        }
+    }
+
+    fn is_push_button(id: i32) -> bool {
+        PUSH_BUTTONS.contains(&id)
+    }
+
+    fn is_muted_control(id: i32) -> bool {
+        [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, SUMMARY_PROMPT_HINT, STATUS].contains(&id)
+    }
+
+    unsafe fn apply_control_theme(window: HWND, theme: Theme) {
+        let empty = wide("");
+        let apply = |id: i32| {
+            let control = GetDlgItem(window, id);
+            if control.is_null() { return; }
+            if theme == Theme::Dark {
+                SetWindowTheme(control, empty.as_ptr(), empty.as_ptr());
+            } else {
+                SetWindowTheme(control, std::ptr::null(), std::ptr::null());
+            }
+        };
+        apply(SIDEBAR);
+        apply(PAGE_TITLE);
+        apply(PAGE_HINT);
+        for spec in &PAGE_SPECS {
+            for id in spec.controls { apply(*id); }
+        }
+        for id in [APPLY, CLOSE, STATUS] { apply(id); }
+    }
+
+    unsafe fn apply_titlebar_theme(window: HWND, theme: Theme) {
+        let dark = if theme == Theme::Dark { 1i32 } else { 0i32 };
+        let _ = DwmSetWindowAttribute(
+            window,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&dark as *const i32).cast::<c_void>(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+
+    unsafe fn refresh_theme(window: HWND, form: *mut Form) {
+        if form.is_null() || (*form).theme_refreshing { return; }
+        let theme = detect_theme();
+        let palette = Palette::for_theme(theme);
+        if (*form).theme_applied && (*form).ui.theme == theme && (*form).ui.palette == palette { return; }
+        (*form).theme_refreshing = true;
+        let palette_ready = if (*form).ui.palette == palette {
+            (*form).ui.theme = theme;
+            true
+        } else {
+            (*form).ui.replace_palette(theme)
+        };
+        if palette_ready {
+            apply_control_theme(window, theme);
+            apply_titlebar_theme(window, theme);
+            RedrawWindow(window, std::ptr::null(), std::ptr::null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+            (*form).theme_applied = true;
+        }
+        (*form).theme_refreshing = false;
+    }
+
+    unsafe fn draw_button(window: HWND, dc: HDC, ui: &UiResources) {
+        let mut bounds = RECT::default();
+        GetClientRect(window, &mut bounds);
+        let state = SendMessageW(window, BM_GETSTATE, 0, 0) as u32;
+        let pushed = state & BST_PUSHED != 0;
+        let focused = GetFocus() == window;
+        let disabled = IsWindowEnabled(window) == 0;
+        let style = GetWindowLongPtrW(window, GWL_STYLE) as i32;
+        let default_button = style & 0x0f == BS_DEFPUSHBUTTON;
+        SetDCBrushColor(dc, if pushed { ui.palette.selected } else { ui.palette.button });
+        FillRect(dc, &bounds, GetStockObject(DC_BRUSH) as HBRUSH);
+        SetDCBrushColor(dc, if default_button || focused { ui.palette.accent } else { ui.palette.border });
+        FrameRect(dc, &bounds, GetStockObject(DC_BRUSH) as HBRUSH);
+
+        let mut text_bounds = bounds;
+        text_bounds.left += 8;
+        text_bounds.right -= 8;
+        SetBkMode(dc, 1);
+        SetTextColor(dc, if disabled { ui.palette.disabled_text } else { ui.palette.text });
+        let previous = SelectObject(dc, ui.body as HGDIOBJ);
+        let length = GetWindowTextLengthW(window);
+        let mut title = vec![0u16; length.max(0) as usize + 1];
+        let length = GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32);
+        let alignment = if style & BS_LEFT != 0 { DT_LEFT } else { DT_CENTER };
+        DrawTextW(dc, title.as_ptr(), length, &mut text_bounds, alignment | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, previous);
+        if focused {
+            let mut focus = bounds;
+            focus.left += 4;
+            focus.top += 4;
+            focus.right -= 4;
+            focus.bottom -= 4;
+            DrawFocusRect(dc, &focus);
+        }
+    }
+
+    unsafe fn combo_display_text(window: HWND) -> String {
+        let index = SendMessageW(window, CB_GETCURSEL, 0, 0);
+        if index >= 0 {
+            let length = SendMessageW(window, CB_GETLBTEXTLEN, index as usize, 0);
+            if length >= 0 {
+                let mut buffer = vec![0u16; length as usize + 1];
+                let length = SendMessageW(window, CB_GETLBTEXT, index as usize, buffer.as_mut_ptr() as isize);
+                if length >= 0 { return String::from_utf16_lossy(&buffer[..length as usize]); }
+            }
+        }
+        let length = GetWindowTextLengthW(window);
+        let mut buffer = vec![0u16; length.max(0) as usize + 1];
+        let length = GetWindowTextW(window, buffer.as_mut_ptr(), buffer.len() as i32);
+        String::from_utf16_lossy(&buffer[..length.max(0) as usize])
+    }
+
+    unsafe fn draw_combo(window: HWND, dc: HDC, ui: &UiResources) {
+        let mut bounds = RECT::default();
+        GetClientRect(window, &mut bounds);
+        let disabled = IsWindowEnabled(window) == 0;
+        let focused = GetFocus() == window;
+        SetDCBrushColor(dc, ui.palette.input);
+        FillRect(dc, &bounds, GetStockObject(DC_BRUSH) as HBRUSH);
+        SetDCBrushColor(dc, if focused { ui.palette.accent } else { ui.palette.border });
+        FrameRect(dc, &bounds, GetStockObject(DC_BRUSH) as HBRUSH);
+
+        let arrow_width = 20;
+        let mut text_bounds = bounds;
+        text_bounds.left += 7;
+        text_bounds.right -= arrow_width + 4;
+        SetBkMode(dc, 1);
+        SetTextColor(dc, if disabled { ui.palette.disabled_text } else { ui.palette.text });
+        let previous = SelectObject(dc, ui.body as HGDIOBJ);
+        let value = combo_display_text(window);
+        let title = wide(&value);
+        DrawTextW(dc, title.as_ptr(), title.len() as i32 - 1, &mut text_bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, previous);
+
+        let center_x = bounds.right - arrow_width / 2 - 1;
+        let center_y = (bounds.top + bounds.bottom) / 2;
+        let points = [
+            POINT { x: center_x - 5, y: center_y - 2 },
+            POINT { x: center_x + 5, y: center_y - 2 },
+            POINT { x: center_x, y: center_y + 3 },
+        ];
+        SetDCBrushColor(dc, if disabled { ui.palette.disabled_text } else { ui.palette.text });
+        Polygon(dc, points.as_ptr(), points.len() as i32);
+        if focused {
+            let mut focus = bounds;
+            focus.left += 2;
+            focus.top += 2;
+            focus.right -= 2;
+            focus.bottom -= 2;
+            DrawFocusRect(dc, &focus);
+        }
+    }
+
+    unsafe fn draw_slider(window: HWND, dc: HDC, ui: &UiResources) {
+        let mut bounds = RECT::default();
+        GetClientRect(window, &mut bounds);
+        FillRect(dc, &bounds, ui.main_brush);
+        let mut channel = RECT::default();
+        let mut thumb = RECT::default();
+        SendMessageW(window, TBM_GETCHANNELRECT, 0, (&mut channel as *mut RECT).cast::<core::ffi::c_void>() as isize);
+        SendMessageW(window, TBM_GETTHUMBRECT, 0, (&mut thumb as *mut RECT).cast::<core::ffi::c_void>() as isize);
+        if channel.right <= channel.left || thumb.right <= thumb.left { return; }
+        let enabled = IsWindowEnabled(window) != 0;
+        let track_color = if enabled { ui.palette.border } else { ui.palette.disabled_text };
+        SetDCBrushColor(dc, track_color);
+        FillRect(dc, &channel, GetStockObject(DC_BRUSH) as HBRUSH);
+        let thumb_center = ((thumb.left + thumb.right) / 2).clamp(channel.left, channel.right);
+        let mut filled = channel;
+        filled.right = thumb_center;
+        SetDCBrushColor(dc, if enabled { ui.palette.accent } else { ui.palette.disabled_text });
+        if filled.right > filled.left { FillRect(dc, &filled, GetStockObject(DC_BRUSH) as HBRUSH); }
+        FillRect(dc, &thumb, GetStockObject(DC_BRUSH) as HBRUSH);
+        if GetFocus() == window {
+            let mut focus = bounds;
+            focus.left += 2;
+            focus.top += 2;
+            focus.right -= 2;
+            focus.bottom -= 2;
+            DrawFocusRect(dc, &focus);
         }
     }
 
@@ -418,6 +853,7 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::process::Command;
 
         #[test]
         fn video_picker_starts_at_the_current_video_or_library() {
@@ -461,6 +897,307 @@ mod native {
             assert_eq!(draft.voice, CharacterVoice::Local { speaker: Some("Luna".into()) });
             capture_draft_voice(&mut draft, "own-voice");
             assert_eq!(draft.voice, CharacterVoice::ElevenLabs { voice_id: "own-voice".into() });
+        }
+
+        #[test]
+        fn theme_detection_uses_the_light_preference_and_defaults_safely() {
+            assert_eq!(theme_from_preferences(Some(1), false), Theme::Light);
+            assert_eq!(theme_from_preferences(Some(0), false), Theme::Dark);
+            assert_eq!(theme_from_preferences(None, false), Theme::Light);
+            assert_eq!(theme_from_preferences(Some(2), false), Theme::Light);
+            assert_eq!(theme_from_preferences(Some(u32::MAX), false), Theme::Light);
+        }
+
+        #[test]
+        fn high_contrast_takes_precedence_over_the_app_theme_preference() {
+            assert_eq!(theme_from_preferences(Some(0), true), Theme::HighContrast);
+            assert_eq!(theme_from_preferences(Some(1), true), Theme::HighContrast);
+            assert_eq!(theme_from_preferences(None, true), Theme::HighContrast);
+        }
+
+        struct ThemeRegistryOverride {
+            path: Vec<u16>,
+            root: HKEY,
+            personalize: HKEY,
+            owned_root: bool,
+            overridden: bool,
+        }
+
+        impl ThemeRegistryOverride {
+            unsafe fn new(apps_use_light_theme: u32) -> Self {
+                let path = wide(&format!(r"Software\CivilizedAgentThemeTest-{}", std::process::id()));
+                let mut registry = Self {
+                    path,
+                    root: std::ptr::null_mut(),
+                    personalize: std::ptr::null_mut(),
+                    owned_root: false,
+                    overridden: false,
+                };
+                let mut disposition = 0;
+                let status = RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    registry.path.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    std::ptr::null(),
+                    &mut registry.root,
+                    &mut disposition,
+                );
+                assert_eq!(status, ERROR_SUCCESS);
+                registry.owned_root = disposition == REG_CREATED_NEW_KEY;
+                assert!(registry.owned_root);
+
+                let personalize_path = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                let mut personalize_disposition = 0;
+                let status = RegCreateKeyExW(
+                    registry.root,
+                    personalize_path.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    std::ptr::null(),
+                    &mut registry.personalize,
+                    &mut personalize_disposition,
+                );
+                assert_eq!(status, ERROR_SUCCESS);
+                registry.set_preference(apps_use_light_theme);
+                assert_eq!(RegOverridePredefKey(HKEY_CURRENT_USER, registry.root), ERROR_SUCCESS);
+                registry.overridden = true;
+                registry
+            }
+
+            unsafe fn set_preference(&self, apps_use_light_theme: u32) {
+                let value = wide("AppsUseLightTheme");
+                let data = apps_use_light_theme;
+                assert_eq!(
+                    RegSetValueExW(
+                        self.personalize,
+                        value.as_ptr(),
+                        0,
+                        REG_DWORD,
+                        (&data as *const u32).cast::<u8>(),
+                        std::mem::size_of::<u32>() as u32,
+                    ),
+                    ERROR_SUCCESS,
+                );
+            }
+        }
+
+        impl Drop for ThemeRegistryOverride {
+            fn drop(&mut self) {
+                unsafe {
+                    if self.overridden {
+                        let _ = RegOverridePredefKey(HKEY_CURRENT_USER, std::ptr::null_mut());
+                        self.overridden = false;
+                    }
+                    if !self.personalize.is_null() {
+                        let _ = RegCloseKey(self.personalize);
+                        self.personalize = std::ptr::null_mut();
+                    }
+                    if !self.root.is_null() {
+                        let _ = RegCloseKey(self.root);
+                        self.root = std::ptr::null_mut();
+                    }
+                    if self.owned_root {
+                        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, self.path.as_ptr());
+                        self.owned_root = false;
+                    }
+                }
+            }
+        }
+
+        unsafe fn test_form(theme: Theme) -> Box<Form> {
+            Box::new(Form {
+                data: PathBuf::new(),
+                assets: PathBuf::new(),
+                settings: Settings::default(),
+                devices: Vec::new(),
+                missing: None,
+                preview: None,
+                voice_preview: None,
+                drafts: BTreeMap::new(),
+                active_draft: None,
+                selected_character: None,
+                character_ids: Vec::new(),
+                removed_characters: std::collections::BTreeSet::new(),
+                voice_usage: VoiceUsageState::NoKey,
+                offline_install: None,
+                updating: false,
+                theme_refreshing: false,
+                theme_applied: false,
+                active_page: Page::Audio,
+                ui: UiResources::with_theme(theme).unwrap(),
+                font_families: Vec::new(),
+            })
+        }
+
+        unsafe fn render_edit_input(window: HWND, edit: HWND, form: &Form) -> u32 {
+            let screen = GetDC(std::ptr::null_mut());
+            assert!(!screen.is_null());
+            let dc = CreateCompatibleDC(screen);
+            assert!(!dc.is_null());
+            let mut info = BITMAPINFO::default();
+            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            info.bmiHeader.biWidth = 100;
+            info.bmiHeader.biHeight = -30;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            let mut bits = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            assert!(!bitmap.is_null());
+            assert!(!bits.is_null());
+            std::ptr::write_bytes(bits.cast::<u8>(), 0xa5, 100 * 30 * 4);
+            let previous = SelectObject(dc, bitmap as HGDIOBJ);
+            let color_brush = SendMessageW(window, WM_CTLCOLOREDIT, dc as usize, edit as isize);
+            assert_eq!(color_brush, form.ui.input_brush as isize);
+            let painted = SendMessageW(edit, WM_PRINTCLIENT, dc as usize, (PRF_CLIENT | PRF_ERASEBKGND) as isize);
+            assert_ne!(painted, 0);
+            let pixels = std::slice::from_raw_parts(bits.cast::<u32>(), 100 * 30);
+            let pixel = pixels[15 * 100 + 50];
+            SelectObject(dc, previous);
+            DeleteObject(bitmap as HGDIOBJ);
+            DeleteDC(dc);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            pixel
+        }
+
+        const THEME_HANDLER_TEST_CHILD: &str = "CIVILIZED_AGENT_THEME_HANDLER_TEST_CHILD";
+        const THEME_HANDLER_TEST_PROVED: &str = "THEME_HANDLER_TEST_PROVED";
+        const THEME_HANDLER_TEST_SKIPPED: &str = "THEME_HANDLER_TEST_SKIPPED_HIGH_CONTRAST";
+
+        unsafe fn run_theme_notification_child() {
+            if high_contrast_enabled() {
+                println!("{THEME_HANDLER_TEST_SKIPPED}");
+                return;
+            }
+
+            let registry = ThemeRegistryOverride::new(0);
+            assert_eq!(detect_theme(), Theme::Dark);
+            let instance = GetModuleHandleW(std::ptr::null());
+            let class_name = wide("CivilizedAgentThemeNotificationTest");
+            let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class_name.as_ptr(), ..WNDCLASSW::default() };
+            assert_ne!(RegisterClassW(&class), 0);
+            let mut form = test_form(Theme::Light);
+            let window = CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                class_name.as_ptr(),
+                wide("").as_ptr(),
+                WS_POPUP,
+                -32000,
+                -32000,
+                120,
+                40,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                instance,
+                (&mut *form as *mut Form).cast::<c_void>(),
+            );
+            assert!(!window.is_null());
+            let edit = CreateWindowExW(
+                0,
+                wide("EDIT").as_ptr(),
+                wide("").as_ptr(),
+                WS_CHILD | WS_BORDER,
+                0,
+                0,
+                100,
+                30,
+                window,
+                API_KEY as usize as HMENU,
+                instance,
+                std::ptr::null_mut(),
+            );
+            assert!(!edit.is_null());
+            ShowWindow(window, SW_SHOWNOACTIVATE);
+            ShowWindow(edit, SW_SHOWNOACTIVATE);
+            let draft = "draft survives theme notifications";
+            assert_ne!(SetWindowTextW(edit, wide(draft).as_ptr()), 0);
+            assert_eq!(text(window, API_KEY), draft);
+
+            SendMessageW(window, WM_SETTINGCHANGE, 0, 0);
+            assert_eq!(form.ui.theme, Theme::Dark);
+            assert_eq!(render_edit_input(window, edit, &form), color(43, 43, 43));
+            assert_eq!(text(window, API_KEY), draft);
+
+            registry.set_preference(1);
+            assert_eq!(detect_theme(), Theme::Light);
+            SendMessageW(window, WM_THEMECHANGED, 0, 0);
+            assert_eq!(form.ui.theme, Theme::Light);
+            assert_eq!(render_edit_input(window, edit, &form), color(255, 255, 255));
+            assert_eq!(text(window, API_KEY), draft);
+
+            registry.set_preference(0);
+            assert_eq!(detect_theme(), Theme::Dark);
+            SendMessageW(window, WM_SYSCOLORCHANGE, 0, 0);
+            assert_eq!(form.ui.theme, Theme::Dark);
+            assert_eq!(render_edit_input(window, edit, &form), color(43, 43, 43));
+            assert_eq!(text(window, API_KEY), draft);
+
+            assert_ne!(DestroyWindow(window), 0);
+            assert_ne!(UnregisterClassW(class_name.as_ptr(), instance), 0);
+            drop(registry);
+            println!("{THEME_HANDLER_TEST_PROVED}");
+        }
+
+        #[test]
+        fn theme_notifications_use_the_real_registry_preference_and_handler() {
+            let name = std::thread::current().name().expect("theme test thread is unnamed").to_owned();
+            if let Some(marker) = std::env::var_os(THEME_HANDLER_TEST_CHILD) {
+                assert_eq!(marker, std::ffi::OsStr::new(name.as_str()));
+                unsafe { run_theme_notification_child(); }
+                return;
+            }
+
+            let output = Command::new(std::env::current_exe().expect("theme test executable is unavailable"))
+                .args(["--exact", name.as_str(), "--nocapture", "--test-threads=1"])
+                .env(THEME_HANDLER_TEST_CHILD, &name)
+                .output()
+                .expect("theme test child failed to start");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = format!("{name}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+            assert_eq!(output.status.code(), Some(0), "{detail}");
+            let proved = stdout.contains(THEME_HANDLER_TEST_PROVED);
+            let skipped = stdout.contains(THEME_HANDLER_TEST_SKIPPED);
+            assert!(proved ^ skipped, "{detail}");
+            if skipped { println!("{THEME_HANDLER_TEST_SKIPPED}"); }
+        }
+
+        #[test]
+        fn edit_control_renders_literal_input_colors_across_a_private_theme_transition() {
+            unsafe {
+                let mut form = test_form(Theme::Light);
+                let instance = GetModuleHandleW(std::ptr::null());
+                let class_name = wide("CivilizedAgentThemePaintTest");
+                let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class_name.as_ptr(), ..WNDCLASSW::default() };
+                assert_ne!(RegisterClassW(&class), 0);
+                let window = CreateWindowExW(0, class_name.as_ptr(), wide("").as_ptr(), WS_POPUP | WS_VISIBLE, 0, 0, 120, 40, std::ptr::null_mut(), std::ptr::null_mut(), instance, (&mut *form as *mut Form).cast::<c_void>());
+                assert!(!window.is_null());
+                let edit = CreateWindowExW(0, wide("EDIT").as_ptr(), wide("").as_ptr(), WS_CHILD | WS_VISIBLE | WS_BORDER, 0, 0, 100, 30, window, 900usize as HMENU, instance, std::ptr::null());
+                assert!(!edit.is_null());
+                let mut render_input = |theme: Theme| -> u32 {
+                    let empty = wide("");
+                    if theme == Theme::Dark {
+                        SetWindowTheme(edit, empty.as_ptr(), empty.as_ptr());
+                    } else {
+                        SetWindowTheme(edit, std::ptr::null(), std::ptr::null());
+                    }
+                    if form.ui.palette != Palette::for_theme(theme) {
+                        assert!(form.ui.replace_palette(theme));
+                    } else {
+                        form.ui.theme = theme;
+                    }
+                    render_edit_input(window, edit, &form)
+                };
+                assert_eq!(render_input(Theme::Light), color(255, 255, 255));
+                assert_eq!(render_input(Theme::Dark), color(43, 43, 43));
+                DestroyWindow(window);
+                UnregisterClassW(class_name.as_ptr(), instance);
+            }
         }
 
         #[test]
@@ -1071,6 +1808,11 @@ mod native {
     unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let form = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Form;
         match message {
+            WM_NCCREATE => {
+                let creation = &*(lparam as *const CREATESTRUCTW);
+                SetWindowLongPtrW(window, GWLP_USERDATA, creation.lpCreateParams as isize);
+                DefWindowProcW(window, message, wparam, lparam)
+            }
             WM_COPYDATA if lparam != 0 => {
                 let request = &*(lparam as *const DesktopRequest);
                 if request.kind == SHOW_ON_DESKTOP && request.size as usize == std::mem::size_of::<windows::core::GUID>() && !request.desktop.is_null() {
@@ -1092,38 +1834,71 @@ mod native {
                 info.ptMinTrackSize.y = bounds.bottom - bounds.top;
                 0
             }
+            WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !form.is_null() => {
+                refresh_theme(window, form);
+                0
+            }
+            WM_ERASEBKGND if !form.is_null() => {
+                let dc = wparam as HDC;
+                let mut bounds = RECT::default();
+                GetClientRect(window, &mut bounds);
+                FillRect(dc, &bounds, (*form).ui.main_brush);
+                1
+            }
             WM_CTLCOLORSTATIC if !form.is_null() => {
                 let dc = wparam as HDC;
                 let control = lparam as HWND;
                 SetBkMode(dc, 1);
-                if [PAGE_HINT, QUIET_HINT, TIME_HINT, PREVIEW_HINT, API_KEY_HINT, DEFAULT_VOICE_ID_HINT, VOICE_USAGE, CHARACTER_EMPTY, SUMMARY_PROMPT_HINT, STATUS].contains(&GetDlgCtrlID(control)) {
-                    SetTextColor(dc, color(92, 101, 112));
-                } else {
-                    SetTextColor(dc, color(32, 37, 43));
-                }
+                let id = GetDlgCtrlID(control);
+                let text_color = if IsWindowEnabled(control) == 0 { (*form).ui.palette.disabled_text } else if is_muted_control(id) { (*form).ui.palette.muted_text } else { (*form).ui.palette.text };
+                SetTextColor(dc, text_color);
                 (*form).ui.main_brush as isize
+            }
+            WM_CTLCOLOREDIT if !form.is_null() => {
+                let dc = wparam as HDC;
+                let control = lparam as HWND;
+                let id = GetDlgCtrlID(control);
+                SetBkMode(dc, 2);
+                SetBkColor(dc, (*form).ui.palette.input);
+                SetTextColor(dc, if IsWindowEnabled(control) == 0 { (*form).ui.palette.disabled_text } else if id == STATUS { (*form).ui.palette.muted_text } else { (*form).ui.palette.text });
+                (*form).ui.input_brush as isize
             }
             WM_CTLCOLORLISTBOX if !form.is_null() => {
                 let dc = wparam as HDC;
                 let control = lparam as HWND;
-                SetBkMode(dc, 1);
+                SetBkMode(dc, 2);
+                SetTextColor(dc, if IsWindowEnabled(control) == 0 { (*form).ui.palette.disabled_text } else { (*form).ui.palette.text });
                 if GetDlgCtrlID(control) == SIDEBAR {
-                    SetBkColor(dc, color(246, 248, 251));
+                    SetBkColor(dc, (*form).ui.palette.sidebar);
                     (*form).ui.sidebar_brush as isize
                 } else {
-                    SetBkColor(dc, color(255, 255, 255));
-                    (*form).ui.main_brush as isize
+                    SetBkColor(dc, (*form).ui.palette.input);
+                    (*form).ui.input_brush as isize
                 }
+            }
+            WM_CTLCOLORBTN if !form.is_null() => {
+                let dc = wparam as HDC;
+                let control = lparam as HWND;
+                let id = GetDlgCtrlID(control);
+                SetBkMode(dc, 1);
+                let background = if is_push_button(id) { (*form).ui.palette.button } else { (*form).ui.palette.main };
+                SetBkColor(dc, background);
+                SetTextColor(dc, if IsWindowEnabled(control) == 0 { (*form).ui.palette.disabled_text } else { (*form).ui.palette.text });
+                if is_push_button(id) { (*form).ui.button_brush as isize } else { (*form).ui.main_brush as isize }
+            }
+            WM_CTLCOLORSCROLLBAR if !form.is_null() => {
+                SetBkColor(wparam as HDC, (*form).ui.palette.input);
+                (*form).ui.input_brush as isize
             }
             WM_DRAWITEM if !form.is_null() && wparam == SIDEBAR as usize && lparam != 0 => {
                 let item = &*(lparam as *const DRAWITEMSTRUCT);
                 let selected = item.itemState & ODS_SELECTED != 0;
-                let background = if selected { color(229, 239, 252) } else { color(246, 248, 251) };
+                let background = if selected { (*form).ui.palette.selected } else { (*form).ui.palette.sidebar };
                 SetDCBrushColor(item.hDC, background);
                 FillRect(item.hDC, &item.rcItem, GetStockObject(DC_BRUSH) as HBRUSH);
                 if let Some(spec) = PAGE_SPECS.get(item.itemID as usize) {
                     SetBkMode(item.hDC, 1);
-                    SetTextColor(item.hDC, if selected { color(25, 80, 160) } else { color(32, 37, 43) });
+                    SetTextColor(item.hDC, if selected { (*form).ui.palette.selected_text } else { (*form).ui.palette.text });
                     let previous = SelectObject(item.hDC, (*form).ui.body as HGDIOBJ);
                     let mut bounds = item.rcItem;
                     bounds.left += 10;
@@ -1338,6 +2113,8 @@ mod native {
             offline_install: None,
             removed_characters: std::collections::BTreeSet::new(),
             updating: false,
+            theme_refreshing: false,
+            theme_applied: false,
             active_page: Page::Audio,
             ui: unsafe { UiResources::new()? },
             font_families,
@@ -1365,13 +2142,12 @@ mod native {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES });
             let instance = GetModuleHandleW(std::ptr::null());
             let window_class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance, lpszClassName: class.as_ptr(),
-                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: (COLOR_WINDOW + 1) as usize as HBRUSH, ..WNDCLASSW::default() };
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), hbrBackground: std::ptr::null_mut(), ..WNDCLASSW::default() };
             if RegisterClassW(&window_class) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
             let window = CreateWindowExW(WS_EX_CONTROLPARENT, class.as_ptr(), wide("Civilized Agent settings").as_ptr(),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 960, 720,
-                std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null());
+                std::ptr::null_mut(), std::ptr::null_mut(), instance, (&mut *form as *mut Form).cast::<c_void>());
             if window.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
-            SetWindowLongPtrW(window, GWLP_USERDATA, &mut *form as *mut Form as isize);
             let creation = (|| -> Result<(), String> {
                 control(window, "LISTBOX", "Settings", SIDEBAR, WS_TABSTOP | LBS_NOTIFY as u32 | LBS_HASSTRINGS as u32 | LBS_OWNERDRAWFIXED as u32 | LBS_NOINTEGRALHEIGHT as u32, (24, 30, 196, 152))?;
                 control(window, "STATIC", "", PAGE_TITLE, 0, (252, 22, 676, 42))?;
@@ -1456,6 +2232,7 @@ mod native {
                 DestroyWindow(window);
                 return Err(error);
             }
+            refresh_theme(window, &mut *form as *mut Form);
             apply_fonts(window, &form);
             populate_pages(window, &form);
             populate_announcement_controls(window, &form, &form.settings.announcement_body_font, &form.settings.announcement_title_font, &form.settings.summary_prompt);
