@@ -12,8 +12,14 @@ try {
         @('run', 'test:verification'),
         @('run', 'test:companion')
     )) {
-        & bun @arguments
-        if ($LASTEXITCODE -ne 0) { throw "bun $($arguments -join ' ') failed with exit code $LASTEXITCODE" }
+        if (-not $IsWindows -and $arguments[1] -eq 'test:bundle') {
+            Write-Output 'Windows bundle tests require Windows. Running portable registration tests on this platform.'
+            & pnpm exec bun test development_tools/tests/registration.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw "Registration tests failed with exit code $LASTEXITCODE" }
+            continue
+        }
+        & pnpm @arguments
+        if ($LASTEXITCODE -ne 0) { throw "pnpm $($arguments -join ' ') failed with exit code $LASTEXITCODE" }
     }
 } finally {
     Pop-Location

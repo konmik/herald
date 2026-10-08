@@ -2,12 +2,66 @@
 
 A desktop herald that announces completed AI tasks with animated characters and spoken summaries.
 
+## Omarchy and Arch Linux
+
+Install the native build and runtime dependencies:
+
+```sh
+omarchy pkg add base-devel rust gtk3 at-spi2-core ffmpeg espeak-ng libpulse ttf-liberation
+pnpm install --frozen-lockfile
+pnpm run build:announcer -- --release
+```
+
+The executable is `native-announcer/bin/civilized-announcer-linux-x64` on x86-64. Keep the checkout and its `native-announcer/resources` directory available.
+
+If a cold build exceeds the helper's two-minute limit, run `cargo build --release --locked --manifest-path native-announcer/Cargo.toml` first. Then rerun the helper to copy the executable.
+
+Add the checkout's absolute path to `plugins` in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "plugins": [
+    {
+      "package": "/absolute/path/to/herald",
+      "options": { "minimumSeconds": 60 }
+    }
+  ]
+}
+```
+
+Preserve existing configuration fields and other plugins. Start a new host session to load the plugin.
+
+For Claude, install a copy of `claude-plugin` with `native-announcer/bin` and `native-announcer/resources` inside that copy. Register the copy with `claude plugin marketplace add <copy-path> --scope user`, then install `civilized-agent@civilized-agent-local` with `claude plugin install --scope user`. A marketplace cache copy cannot use the checkout's sibling runtime directory.
+
+On Omarchy, add this rule to `~/.config/hypr/hyprland.lua`:
+
+```lua
+o.window({ title = "^Civilized Agent$" }, {
+  float = true,
+  pin = true,
+  no_initial_focus = true,
+  no_focus = true,
+  no_follow_mouse = true,
+  decorate = false,
+  no_shadow = true,
+  no_blur = true,
+  no_anim = true,
+  border_size = 0,
+  opacity = "1 override 1 override",
+  move = { "monitor_w-window_w-20", "monitor_h-window_h-20" },
+})
+```
+
+Run `hyprctl reload`, then confirm `hyprctl configerrors` reports no errors.
+
+Linux uses eSpeak NG for speech. The settings window is Windows-only. Edit `~/.local/share/CivilizedAgent/settings.json` to configure quiet hours, volume, and characters. `XDG_DATA_HOME` or `CIVILIZED_AGENT_DATA` can override the data location.
+
 ## Windows bundle
 
 PowerShell 7 is required. Build on Windows with Bun, Node and Cargo matching the machine architecture:
 
 ```powershell
-npm run build:bundle
+pnpm run build:bundle
 ```
 
 The release ZIP is written to `temp/bundles`. Building reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The voice engine and model are not bundled. The separate build cache keeps release builds away from the running checkout executable.
@@ -20,7 +74,7 @@ pwsh -NoProfile -File development_tools/build-bundle.ps1 -PayloadDirectory .\ext
 
 Repackaging refreshes the installer and its helpers and generates a new manifest in a staging copy. The source bundle is unchanged.
 
-`npm run test:bundle` runs unit checks with placeholder native files and mocked Claude commands. It does not prove a working native installation. Before deployment, run `npm run test:bundle:installed -- -Archive <release.zip>`. This uses a disposable Claude profile and real host commands, verifies the installed cache and shortcut, removes the extraction folder, boots OpenCode from the installed compiled package, and starts the real native executable. It makes no model requests and leaves the disposable installation available for further runtime checks.
+`pnpm run test:bundle` runs unit checks with placeholder native files and mocked Claude commands. It does not prove a working native installation. Before deployment, run `pnpm run test:bundle:installed -- -Archive <release.zip>`. This uses a disposable Claude profile and real host commands, verifies the installed cache and shortcut, removes the extraction folder, boots OpenCode from the installed compiled package, and starts the real native executable. It makes no model requests and leaves the disposable installation available for further runtime checks.
 
 Close any open herald settings windows (currently titled `Civilized Agent settings`). Extract the ZIP, then run its installer:
 
@@ -49,4 +103,4 @@ Host registration keeps the previous Claude cache until OpenCode registration an
 
 Restart Claude sessions after installation. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
 
-`npm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.
+`pnpm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.

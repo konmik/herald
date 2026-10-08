@@ -152,7 +152,7 @@ impl Renderer {
             image::imageops::resize(frame, 128, 128, image::imageops::FilterType::Triangle)
         });
         let image = resized.as_ref().or(image);
-        buffer.fill(if cfg!(target_os = "windows") {
+        buffer.fill(if cfg!(any(target_os = "windows", target_os = "linux")) {
             0xff00ff
         } else {
             0x1c1b16
@@ -625,24 +625,38 @@ mod tests {
         assert_eq!(buffer[62 * 320 + 40], 0x2a2e36);
         assert_eq!(
             buffer[0],
-            if cfg!(target_os = "windows") {
+            if cfg!(any(target_os = "windows", target_os = "linux")) {
                 0xff00ff
             } else {
                 0x1c1b16
             }
         );
-        assert!((26..43)
-            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
-            .any(|index| buffer[index] == 0xc3c6ca));
-        assert!((26..43)
-            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
-            .any(|index| buffer[index] == 0xecf0f5));
-        assert!((72..94)
-            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
-            .any(|index| buffer[index] == 0x808b9a));
-        assert!((72..94)
-            .flat_map(|y| (26..120).map(move |x| y * 320 + x))
-            .any(|index| buffer[index] == 0x99a6b9));
+        for (font, text, y, size, color, cutoff) in [
+            (&renderer.body_font, renderer.text.as_str(), 26.0, renderer.body_preference.size, 0xeef2f7, 62.0),
+            (&renderer.title_font, renderer.title.as_str(), 72.0, renderer.title_preference.size, 0x9daabd, 72.0 + f32::from(renderer.title_preference.size) + 8.0),
+        ] {
+            let mut unshaded = vec![0; 320 * 260];
+            draw_bubble(&mut unshaded, 320, 260, 1.0, 108.0, 0x191f2a);
+            let background = unshaded.clone();
+            renderer.text(&mut unshaded, 320, 260, 1.0, font, TextBlock {
+                text, y, size: f32::from(size), color, max_height: cutoff,
+            });
+            let mut glyph_pixels = [0; 2];
+            for index in 0..unshaded.len() {
+                if unshaded[index] == background[index] { continue; }
+                let row = index / 320;
+                glyph_pixels[row % 2] += 1;
+                let expected = if row % 2 == 0 {
+                    let pixel = unshaded[index];
+                    let red = (((pixel >> 16) & 255) as f32 * 0.82) as u32;
+                    let green = (((pixel >> 8) & 255) as f32 * 0.82) as u32;
+                    let blue = ((pixel & 255) as f32 * 0.82) as u32;
+                    (red << 16) | (green << 8) | blue
+                } else { unshaded[index] };
+                assert_eq!(buffer[index], expected, "Glyph pixel at {}, {row}", index % 320);
+            }
+            assert!(glyph_pixels[0] > 0 && glyph_pixels[1] > 0, "Missing glyph pixels on either scanline parity for {text}");
+        }
     }
 
     #[test]

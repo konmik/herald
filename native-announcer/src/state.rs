@@ -50,27 +50,31 @@ pub fn is_night(hour: u32, start: u32, end: u32) -> bool {
 }
 
 pub struct MeetingStatus {
-    checked: Mutex<(Option<bool>, Instant)>,
+    checked: Mutex<Option<(Option<bool>, Instant)>>,
 }
 
 impl MeetingStatus {
     pub fn new() -> Self {
         Self {
-            checked: Mutex::new((None, Instant::now())),
+            checked: Mutex::new(None),
         }
     }
 
     pub fn update(&self, active: Option<bool>, now: Instant) {
         if let Ok(mut checked) = self.checked.lock() {
-            *checked = (active, now);
+            *checked = Some((active, now));
         }
     }
 
     pub fn muted(&self, now: Instant) -> bool {
         self.checked.lock().map_or(true, |checked| {
-            checked.0 != Some(false)
-                || now.saturating_duration_since(checked.1) >= Duration::from_secs(15)
+            checked.is_none_or(|(active, at)| active != Some(false)
+                || now.saturating_duration_since(at) >= Duration::from_secs(15))
         })
+    }
+
+    pub fn ready(&self) -> bool {
+        self.checked.lock().is_ok_and(|checked| checked.is_some())
     }
 }
 
@@ -379,11 +383,14 @@ mod tests {
     fn meeting_audio_requires_a_recent_successful_check() {
         let meeting = MeetingStatus::new();
         let now = std::time::Instant::now();
+        assert!(!meeting.ready());
         assert!(meeting.muted(now));
         meeting.update(Some(false), now);
+        assert!(meeting.ready());
         assert!(!meeting.muted(now));
         assert!(meeting.muted(now + Duration::from_secs(15)));
         meeting.update(None, now);
+        assert!(meeting.ready());
         assert!(meeting.muted(now));
         meeting.update(Some(true), now);
         assert!(meeting.muted(now));

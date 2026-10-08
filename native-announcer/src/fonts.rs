@@ -52,7 +52,9 @@ fn fallback_paths() -> Vec<(String, PathBuf)> {
         vec![
             ("Century Gothic".into(), "/usr/share/fonts/truetype/msttcorefonts/Century_Gothic.ttf".into()),
             ("DejaVu Sans".into(), "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into()),
+            ("DejaVu Sans".into(), "/usr/share/fonts/TTF/DejaVuSans.ttf".into()),
             ("Liberation Sans".into(), "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf".into()),
+            ("Liberation Sans".into(), "/usr/share/fonts/liberation/LiberationSans-Regular.ttf".into()),
         ]
     }
 }
@@ -64,8 +66,8 @@ fn family_names() -> BTreeSet<String> {
 
 #[cfg(not(target_os = "windows"))]
 fn load_font(family: &str) -> Option<Font> {
-    fallback_paths().into_iter().find(|(name, _)| name == family)
-        .and_then(|(_, path)| std::fs::read(path).ok()).and_then(parse_font)
+    fallback_paths().into_iter().filter(|(name, _)| name == family)
+        .find_map(|(_, path)| std::fs::read(path).ok().and_then(parse_font))
 }
 
 #[cfg(target_os = "windows")]

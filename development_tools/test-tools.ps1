@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$python = Join-Path $root '.venv/Scripts/python.exe'
-if (-not (Test-Path -LiteralPath $python)) { throw 'Run npm run setup:checks first' }
+$python = Join-Path $root $(if ($IsWindows) { '.venv/Scripts/python.exe' } else { '.venv/bin/python' })
+if (-not (Test-Path -LiteralPath $python)) { throw 'Run pnpm run setup:checks first' }
 Push-Location $root
 try {
     & $python -m unittest discover -s development_tools -p 'test_*.py'

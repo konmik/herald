@@ -8,6 +8,8 @@ mod characters;
 mod elevenlabs;
 mod fonts;
 mod history;
+#[cfg(target_os = "linux")]
+mod linux_surface;
 mod platform;
 mod private;
 mod render;
@@ -240,8 +242,7 @@ fn run() -> Result<(), String> {
         event_loop.set_activate_ignoring_other_apps(false);
         event_loop
     };
-    let window = Rc::new(
-        WindowBuilder::new()
+    let builder = WindowBuilder::new()
             .with_title("Civilized Agent")
             .with_visible(false)
             .with_focused(false)
@@ -249,18 +250,39 @@ fn run() -> Result<(), String> {
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top(true)
-            .with_inner_size(LogicalSize::new(320.0, 240.0))
+            .with_inner_size(LogicalSize::new(320.0, 240.0));
+    #[cfg(target_os = "linux")]
+    let builder = {
+        use tao::platform::unix::WindowBuilderExtUnix;
+        builder.with_transparent(true).with_transparent_draw(false).with_default_vbox(false)
+    };
+    let window = Rc::new(
+        builder
             .build(&event_loop)
             .map_err(|e| e.to_string())?,
     );
     #[cfg(target_os = "linux")]
     {
+        use gtk::prelude::WidgetExt;
         use tao::platform::unix::WindowExtUnix;
         window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
+        window.gtk_window().realize();
     }
+    #[cfg(not(target_os = "linux"))]
     let context = softbuffer::Context::new(window.clone()).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "linux"))]
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let mut surface = linux_surface::Surface::new(window.clone());
+    #[cfg(target_os = "linux")]
+    let mut wake_timer = {
+        let proxy = event_loop.create_proxy();
+        Some(gtk::glib::timeout_add_local(Duration::from_millis(16), move || {
+            if proxy.send_event(()).is_ok() { gtk::glib::ControlFlow::Continue }
+            else { gtk::glib::ControlFlow::Break }
+        }))
+    };
     let mut renderer = Renderer::with_settings(&settings_store.current)?;
     let local = chrono::Local::now();
     let preload_speech = settings_store.current.volume > 0
@@ -376,7 +398,7 @@ fn run() -> Result<(), String> {
                         activation = Some((pending, true));
                     }
                 }
-                if activation.is_none() && matches!(current, Presentation::Idle) {
+                if activation.is_none() && matches!(current, Presentation::Idle) && meeting.ready() {
                     renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
@@ -387,6 +409,13 @@ fn run() -> Result<(), String> {
                         let scale = monitor.as_ref().map_or_else(|| window.scale_factor(), |monitor| monitor.scale_factor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
                         let height = (renderer.message_height(scale as f32) + 238).min(max_height).max(240);
+                        #[cfg(target_os = "linux")]
+                        {
+                            use gtk::prelude::WidgetExt;
+                            use tao::platform::unix::WindowExtUnix;
+                            window.gtk_window().set_size_request(320, height as i32);
+                        }
+                        #[cfg(not(target_os = "linux"))]
                         window.set_inner_size(LogicalSize::new(320.0, height as f64));
                         if let Some(monitor) = monitor {
                             let position = monitor.position();
@@ -527,6 +556,8 @@ fn run() -> Result<(), String> {
                 }
             }
             Event::LoopDestroyed => {
+                #[cfg(target_os = "linux")]
+                if let Some(timer) = wake_timer.take() { timer.remove(); }
                 stop.store(true, Ordering::Relaxed); speech.cancel(); signal.stop();
                 if let Presentation::Playing(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
                 inbox.save(current.notification());

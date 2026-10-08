@@ -52,6 +52,7 @@ Read [the verification skill](../.claude/skills/verify-civilized-agent/SKILL.md)
 | [verify-settings-status.ps1](verify-settings-status.ps1) | Settings status display checks. |
 | [verify-characters.ps1](verify-characters.ps1) | Character settings, video picker, prompts, text editing and playback checks. |
 | [verify-announcement-audio.py](verify-announcement-audio.py) | Capture output audio and check announcement/preview timing. |
+| [verify-linux-playback.py](verify-linux-playback.py) | Check Hyprland desktop transparency, sustained animation, focus and captured output audio with an isolated demo. |
 | [voice-api-fixture.mjs](voice-api-fixture.mjs) | Local speech API fixture for deterministic tests. |
 | [host-verification/](host-verification/) | Real Claude/OpenCode lifecycle drivers and proof capture. These tests make model requests. |
 | [benchmark-tts.ps1](benchmark-tts.ps1) | Measure local voice loading and synthesis across thread counts. |

@@ -8,7 +8,7 @@ foreach ($directory in @($PSScriptRoot, "$PSScriptRoot/../.claude/skills/verify-
     }
 }
 . "$PSScriptRoot/../.claude/skills/verify-civilized-agent/scripts/process.ps1"
-$missingLog = Join-Path $env:LOCALAPPDATA ('Temp/opencode/missing-' + [guid]::NewGuid())
+$missingLog = Join-Path ([IO.Path]::GetTempPath()) ('opencode/missing-' + [guid]::NewGuid())
 function New-TestProcess {
     param([bool]$Exited, [string]$Path, [switch]$ExitDuringPath, [switch]$ThrowDuringPath)
     $value = [pscustomobject]@{ HasExited = $Exited; ExpectedPath = $Path; Reads = 0; ExitDuringPath = [bool]$ExitDuringPath; ThrowDuringPath = [bool]$ThrowDuringPath }

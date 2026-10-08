@@ -45,7 +45,8 @@ try {
 } finally {
   await Service.stop({ file })
   if (server.exitCode === null) {
-    Bun.spawnSync(["taskkill", "/PID", String(server.pid), "/T", "/F"])
+    if (process.platform === "win32") Bun.spawnSync(["taskkill", "/PID", String(server.pid), "/T", "/F"])
+    else server.kill("SIGTERM")
     await server.exited
   }
 }
