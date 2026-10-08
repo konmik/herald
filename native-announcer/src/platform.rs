@@ -234,7 +234,7 @@ impl Speech {
         settings.elevenlabs_api_key.is_none() && settings.volume > 0 && !settings.quiet_at(minute) && !meeting
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn preview() -> Self {
         Self::worker(false, false)
     }
@@ -327,7 +327,15 @@ impl Drop for Speech {
 #[cfg(target_os = "windows")]
 use crate::tts::speak;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+#[path = "speech_linux.rs"]
+mod linux_speech;
+#[cfg(target_os = "linux")]
+use linux_speech::speak;
+#[cfg(target_os = "linux")]
+pub use linux_speech::espeak_program;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn speak(
     text: &str,
     voice: &ResolvedVoice,
@@ -491,7 +499,10 @@ impl Signal {
                 let mut command = hidden_command(program);
                 if program == "afplay" { command.args(["-v", &crate::settings::volume_gain(settings.volume).to_string()]); }
                 if program == "paplay" { command.arg(format!("--volume={}", (crate::settings::volume_gain(settings.volume) * 65536.0).round() as u32)); }
-                if program == "aplay" && settings.volume != 100 { continue; }
+                if program == "paplay" {
+                    if let Some(device) = &settings.output_device { command.arg(format!("--device={device}")); }
+                }
+                if program == "aplay" && (settings.volume != 100 || settings.output_device.is_some()) { continue; }
                 if let Ok(child) = command.arg(&self.path).spawn() {
                     self.child = Some(child);
                     break;
@@ -519,18 +530,18 @@ impl Drop for Signal {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub struct Preview {
     cancelled: Arc<AtomicBool>,
     playback: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn preview_timeout(settings: &Settings) -> Duration {
     Duration::from_secs(30 + u64::from(settings.silent_sound_seconds))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Preview {
     pub fn start(data: PathBuf, settings: Settings, assets: PathBuf) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -573,7 +584,7 @@ impl Preview {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Drop for Preview {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
@@ -581,7 +592,7 @@ impl Drop for Preview {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
     if stop.load(Ordering::Relaxed) { return Ok(()); }
     let mut speech = Speech::preview();

@@ -1,6 +1,12 @@
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
+#[cfg(target_os = "linux")]
+#[path = "audio_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{output_devices, play_noise, play_pcm};
+
 #[derive(Clone, Debug)]
 pub struct OutputDevice {
     pub id: String,

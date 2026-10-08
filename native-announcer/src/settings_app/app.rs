@@ -1,16 +1,23 @@
 #[path = "draft.rs"]
 mod draft;
-#[path = "instance.rs"]
+#[cfg_attr(target_os = "windows", path = "instance.rs")]
+#[cfg_attr(target_os = "linux", path = "instance_linux.rs")]
 mod instance;
-#[path = "theme.rs"]
+#[cfg_attr(target_os = "windows", path = "theme.rs")]
+#[cfg_attr(target_os = "linux", path = "theme_linux.rs")]
 mod theme;
+#[cfg(target_os = "windows")]
+#[path = "dialogs_windows.rs"]
+mod dialogs;
 
 use crate::characters::{Character, CharacterVoice};
 use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
 use crate::platform::Preview;
 use crate::settings::{format_time, FontPreference, Settings, DEFAULT_SUMMARY_PROMPT, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use chrono::Timelike;
-use draft::{capture_draft_video, capture_draft_voice, character_video, new_character_id, video_picker_path, voice_id_text, SettingsDraft};
+use draft::{capture_draft_video, capture_draft_voice, character_video, new_character_id, voice_id_text, SettingsDraft};
+#[cfg(target_os = "windows")]
+use draft::video_picker_path;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState};
@@ -38,6 +45,23 @@ enum Page {
     SpeechService,
     OfflineVoice,
     Announcements,
+}
+
+#[derive(Clone, Copy)]
+struct Layout {
+    compact: bool,
+    character_list_height: f32,
+}
+
+impl Layout {
+    fn for_window(window: &Window) -> Self {
+        let viewport = window.viewport_size();
+        let compact = viewport.width < px(900.);
+        Self {
+            compact,
+            character_list_height: if compact { (f32::from(viewport.height) * 0.22).clamp(72., 160.) } else { 360. },
+        }
+    }
 }
 
 struct PageSpec {
@@ -161,15 +185,17 @@ struct SettingsView {
     voice_usage: VoiceUsageState,
     usage_generation: u64,
     offline_installing: bool,
+    #[cfg(target_os = "windows")]
     offline_error: Option<String>,
     preview: Option<Preview>,
     voice_preview: Option<Preview>,
     subscriptions: Vec<Subscription>,
     theme_monitor: theme::ThemeMonitor,
+    instance: Rc<instance::InstanceGuard>,
 }
 
 impl SettingsView {
-    fn new(data: PathBuf, assets: PathBuf, settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(data: PathBuf, assets: PathBuf, settings: Settings, instance: Rc<instance::InstanceGuard>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, app| {
             weak.update(app, |view, cx| view.should_close(window, cx)).unwrap_or(true)
@@ -194,6 +220,7 @@ impl SettingsView {
         let size_choices = font_size_choices();
         let status = "Apply saves changes. Close discards unsaved edits.".to_owned();
         let mut view = Self {
+            instance,
             theme_monitor: theme::sync(Some(window), cx),
             data: data.clone(),
             assets,
@@ -267,6 +294,7 @@ impl SettingsView {
             voice_usage: initial_voice_usage_state(settings.elevenlabs_api_key.as_deref()),
             usage_generation: 0,
             offline_installing: false,
+            #[cfg(target_os = "windows")]
             offline_error: None,
             preview: None,
             voice_preview: None,
@@ -278,9 +306,10 @@ impl SettingsView {
         let weak = cx.weak_entity();
         cx.spawn(async move |_, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_millis(200)).await;
                 if handle.update(cx, |_, window, app| {
                     weak.update(app, |view, cx| {
+                        view.instance.activate_pending(window);
                         if view.theme_monitor.refresh(Some(window), cx) { cx.notify(); }
                     })
                 }).is_err() { break; }
@@ -539,19 +568,22 @@ impl SettingsView {
     }
 
     fn delete_character(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active_character.as_ref() else { return; };
-        let name = self.draft.characters.get(id).map(|character| character.name.as_str()).unwrap_or("this character");
-        let message: Vec<u16> = format!("Delete {name}?").encode_utf16().chain(Some(0)).collect();
-        let title: Vec<u16> = "Delete character".encode_utf16().chain(Some(0)).collect();
-        let Ok(owner) = instance::hwnd(window) else { return; };
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_YESNO, MB_ICONWARNING, MB_DEFBUTTON2};
-        if unsafe { MessageBoxW(owner, message.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) } != IDYES { return; }
-        let Some(id) = self.active_character.take() else { return; };
-        self.stop_previews();
-        self.draft.remove_character(&id);
-        self.sync_character_inputs(window, cx);
-        self.status = "Character marked for removal. Apply saves it; cloud voices are unchanged.".into();
-        cx.notify();
+        let Some(id) = self.active_character.clone() else { return; };
+        let name = self.draft.characters.get(&id).map(|character| character.name.as_str()).unwrap_or("this character");
+        let answer = window.prompt(gpui_kit::PromptLevel::Warning, &format!("Delete {name}?"),
+            Some("Apply saves the removal. Cloud voices are unchanged."),
+            &[gpui_kit::PromptButton::cancel("Cancel"), gpui_kit::PromptButton::ok("Delete")], cx);
+        cx.spawn_in(window, async move |view, cx| {
+            if answer.await.ok() != Some(1) { return; }
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.stop_previews();
+                view.draft.remove_character(&id);
+                if view.active_character.as_ref() == Some(&id) { view.active_character = None; }
+                view.sync_character_inputs(window, cx);
+                view.status = "Character marked for removal. Apply saves it; cloud voices are unchanged.".into();
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
@@ -786,6 +818,7 @@ impl SettingsView {
         cx.notify();
     }
 
+    #[cfg(target_os = "windows")]
     fn install_offline_voice(&mut self, cx: &mut Context<Self>) {
         if self.offline_installing || crate::tts::installed() {
             return;
@@ -837,67 +870,13 @@ impl SettingsView {
         cx.notify();
     }
 
+    #[cfg(target_os = "windows")]
     fn browse_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use windows::core::{w, PCWSTR};
-        use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
-            COINIT_APARTMENTTHREADED,
-        };
-        use windows::Win32::UI::Shell::{
-            FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
-            FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH,
-        };
-        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-
         let Some(id) = self.active_character.clone() else { return; };
         let current = self.character_video_input.read(cx).value().to_string();
         let path = video_picker_path(&current, &self.assets);
         let library = video_picker_path("", &self.assets);
-        let directory = if path.is_dir() { path.clone() } else { path.parent().unwrap_or(&library).to_path_buf() };
-        let directory = if directory.is_dir() { directory } else { library };
-        let initial_directory: Vec<u16> = directory.to_string_lossy().encode_utf16().chain(Some(0)).collect();
-        let owner = match instance::hwnd(window) {
-            Ok(hwnd) => hwnd,
-            Err(error) => {
-                self.status = format!("Could not open the video picker: {error}");
-                cx.notify();
-                return;
-            }
-        };
-        if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() } {
-            self.status = format!("Could not open the video picker: {error}");
-            cx.notify();
-            return;
-        }
-        let result = (|| -> windows::core::Result<Option<PathBuf>> {
-            let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
-            unsafe {
-                dialog.SetOptions(dialog.GetOptions()? | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM)?;
-                dialog.SetTitle(w!("Choose character animation"))?;
-                dialog.SetFileTypes(&[
-                    COMDLG_FILTERSPEC { pszName: w!("MP4 video"), pszSpec: w!("*.mp4") },
-                    COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
-                ])?;
-                let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(initial_directory.as_ptr()), None)?;
-                dialog.SetFolder(&folder)?;
-                if path.is_file() {
-                    let filename: Vec<u16> = path.file_name().unwrap().to_string_lossy().encode_utf16().chain(Some(0)).collect();
-                    dialog.SetFileName(PCWSTR(filename.as_ptr()))?;
-                }
-                if let Err(error) = dialog.Show(Some(windows::Win32::Foundation::HWND(owner))) {
-                    if error.code() == windows::core::HRESULT(0x800704C7u32 as i32) {
-                        return Ok(None);
-                    }
-                    return Err(error);
-                }
-                let name = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
-                let selected = name.to_string()?;
-                CoTaskMemFree(Some(name.0.cast()));
-                Ok(Some(PathBuf::from(selected)))
-            }
-        })();
-        unsafe { CoUninitialize(); }
-        let selected = match result {
+        let selected = match dialogs::pick_video(window, &path, &library) {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(error) => {
@@ -919,26 +898,10 @@ impl SettingsView {
         cx.notify();
     }
 
+    #[cfg(target_os = "windows")]
     fn open_my_voices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(hwnd) = instance::hwnd(window) else {
-            self.status = "Could not open ElevenLabs My Voices in your browser.".into();
-            cx.notify();
-            return;
-        };
-        let operation: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-        let url: Vec<u16> = "https://elevenlabs.io/app/voice-lab".encode_utf16().chain(Some(0)).collect();
-        let result = unsafe {
-            windows_sys::Win32::UI::Shell::ShellExecuteW(
-                hwnd,
-                operation.as_ptr(),
-                url.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-            )
-        };
-        if result as isize <= 32 {
-            self.status = "Could not open ElevenLabs My Voices in your browser.".into();
+        if let Err(error) = dialogs::open_my_voices(window) {
+            self.status = error;
             cx.notify();
         }
     }
@@ -960,15 +923,65 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    #[cfg(target_os = "linux")]
+    fn browse_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.active_character.clone() else { return; };
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true, directories: false, multiple: false,
+            prompt: Some("Choose character animation (MP4)".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            let result = paths.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        let Some(selected) = paths.into_iter().next() else { return; };
+                        if !selected.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")) {
+                            view.status = "Choose an MP4 animation file.".into();
+                        } else if view.draft.characters.contains_key(&id) {
+                            let existing = view.draft.characters.get(&id).and_then(|character| character.animation_path.clone());
+                            let stored = existing.filter(|existing| crate::characters::animation_path(&id, existing, &view.assets) == selected).unwrap_or(selected);
+                            view.draft.character(&id).animation_path = Some(stored.clone());
+                            if view.active_character.as_ref() == Some(&id) {
+                                view.character_video_input.update(cx, |state, cx| state.set_value(stored.to_string_lossy().into_owned(), window, cx));
+                            }
+                            view.status = "Character video selected. Apply saves the path.".into();
+                        }
+                    }
+                    Ok(Ok(None)) => return,
+                    Ok(Err(error)) => view.status = format!("Could not open the video picker: {error}"),
+                    Err(error) => view.status = format!("Video picker stopped: {error}"),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_my_voices(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.open_url("https://elevenlabs.io/app/voice-lab");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn render_offline_voice(&self, _: &mut Context<Self>) -> AnyElement {
+        let status = if crate::platform::espeak_program().is_some() {
+            "eSpeak is available. Linux offline speech uses your system eSpeak voices."
+        } else {
+            "eSpeak is unavailable. Install espeak-ng with your Linux package manager to enable offline speech."
+        };
+        v_flex().w_full().gap_4()
+            .child(div().text_base().child(status))
+            .child(div().child("Playback uses PulseAudio or PipeWire's PulseAudio compatibility service. Kitten voice downloads are Windows-only."))
+            .into_any_element()
+    }
+
+    fn render_sidebar(&self, layout: Layout, cx: &mut Context<Self>) -> impl IntoElement {
         let mut sidebar = v_flex()
-            .h_full()
-            .w(px(220.))
+            .when(layout.compact, |nav| nav.flex_row().flex_wrap().w_full().p_2().border_b_1())
+            .when(!layout.compact, |nav| nav.h_full().w(px(220.)).p_4().border_r_1())
             .flex_shrink_0()
             .gap_2()
-            .p_4()
             .bg(cx.theme().sidebar)
-            .border_r_1()
             .border_color(cx.theme().sidebar_border);
         for spec in PAGES {
             let selected = self.active_page == spec.page;
@@ -976,7 +989,8 @@ impl SettingsView {
             let button = Button::new(spec.key)
                 .accessibility_id(spec.key)
                 .label(spec.label)
-                .w_full()
+                .when(!layout.compact, |button| button.w_full())
+                .flex_shrink_0()
                 .selected(selected)
                 .on_click(cx.listener(move |view, _, window, cx| view.change_page(page, window, cx)));
             sidebar = sidebar.child(if selected { button.primary() } else { button.ghost() });
@@ -984,7 +998,7 @@ impl SettingsView {
         sidebar
     }
 
-    fn render_audio(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_audio(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
         let volume = v_flex()
             .gap_1()
             .child(div().text_sm().child(format!("Volume: {}%", self.draft.settings.volume)))
@@ -992,12 +1006,13 @@ impl SettingsView {
             .into_any_element();
         let output = h_flex()
             .w_full()
+            .when(layout.compact, |row| row.flex_col().items_start())
             .gap_2()
             .child(
                 Select::new(&self.output_select)
                     .id("output-device")
                     .accessibility_label("Output device")
-                    .w_full(),
+                    .min_w_0().flex_1().when(layout.compact, |select| select.w_full()),
             )
             .child(
                 Button::new("refresh-devices")
@@ -1007,8 +1022,10 @@ impl SettingsView {
             )
             .into_any_element();
         let preview = h_flex()
+            .w_full()
             .gap_2()
             .items_center()
+            .when(layout.compact, |row| row.flex_col().items_start())
             .child(
                 Button::new("preview")
                     .label(if self.preview.is_some() { "Stop example" } else { "Play example" })
@@ -1025,7 +1042,7 @@ impl SettingsView {
         v_flex().w_full().gap_4().child(volume).child(div().text_sm().child("Output device")).child(output).child(preview).child(silent).into_any_element()
     }
 
-    fn render_quiet_hours(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_quiet_hours(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
         let schedule = self.draft.settings.schedule_enabled;
         v_flex()
             .w_full()
@@ -1052,18 +1069,20 @@ impl SettingsView {
             )
             .child(
                 h_flex()
+                    .w_full().flex_wrap()
                     .gap_2()
                     .items_center()
+                    .when(layout.compact, |row| row.flex_col().items_start())
                     .child(div().text_sm().child("From"))
-                    .child(Input::new(&self.quiet_start_input).accessibility_id("quiet-start").disabled(!schedule).w(px(110.)))
+                    .child(Input::new(&self.quiet_start_input).accessibility_id("quiet-start").disabled(!schedule).w(px(110.)).when(layout.compact, |input| input.w_full()))
                     .child(div().text_sm().child("To"))
-                    .child(Input::new(&self.quiet_end_input).accessibility_id("quiet-end").disabled(!schedule).w(px(110.)))
+                    .child(Input::new(&self.quiet_end_input).accessibility_id("quiet-end").disabled(!schedule).w(px(110.)).when(layout.compact, |input| input.w_full()))
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Use HH:MM. 24:00 is allowed for the end.")),
             )
             .into_any_element()
     }
 
-    fn render_speech_service(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_speech_service(&mut self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_usage(window, cx);
         let key_status = api_key_status(self.draft.settings.elevenlabs_api_key.as_deref());
         v_flex()
@@ -1072,15 +1091,17 @@ impl SettingsView {
             .child(
                 h_flex()
                     .w_full()
+                    .when(layout.compact, |row| row.flex_col())
                     .gap_4()
-                    .child(v_flex().gap_1().flex_1().child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").w_full()))
-                    .child(v_flex().gap_1().flex_1().child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").w_full())),
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").w_full()))
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").w_full())),
             )
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Characters without a custom ElevenLabs voice use this ID."))
             .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").content_type(InputContentType::Password).mask_toggle().w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
             .child(Textarea::new(&self.usage_input).readonly(true).h(px(96.)).accessibility_id("voice-usage"))
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(Button::new("refresh-usage").label("Refresh").accessibility_id("refresh-usage").disabled(matches!(self.voice_usage, VoiceUsageState::Loading { .. })).on_click(cx.listener(|view, _, _, cx| view.refresh_usage(cx))))
                     .child(Button::new("my-voices").label("Open My Voices").on_click(cx.listener(|view, _, window, cx| view.open_my_voices(window, cx)))),
@@ -1088,6 +1109,7 @@ impl SettingsView {
             .into_any_element()
     }
 
+    #[cfg(target_os = "windows")]
     fn render_offline_voice(&self, cx: &mut Context<Self>) -> AnyElement {
         let installed = crate::tts::installed();
         let status = if self.offline_installing {
@@ -1108,7 +1130,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn render_characters(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_characters(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
         let rows = self
             .draft
             .characters
@@ -1116,13 +1138,13 @@ impl SettingsView {
             .filter(|(id, _)| !self.draft.removed_characters.contains(*id))
             .map(|(id, character)| (id.clone(), if character.name.trim().is_empty() { "New character".to_owned() } else { character.name.clone() }, self.active_character.as_deref() == Some(id.as_str())))
             .collect::<Vec<_>>();
-        let mut list = v_flex().w(px(230.)).gap_1();
+        let mut list = v_flex().w_full().gap_1();
         for (id, name, selected) in rows {
             let button = Button::new(format!("character-{id}")).label(name).w_full().selected(selected).on_click(cx.listener(move |view, _, window, cx| view.select_character(id.clone(), window, cx)));
             list = list.child(if selected { button.primary() } else { button.ghost() });
         }
-        let list = v_flex().w(px(230.)).gap_2()
-            .child(list.h(px(360.)).overflow_y_scrollbar())
+        let list = v_flex().w(px(230.)).when(layout.compact, |list| list.w_full()).flex_shrink_0().min_w_0().gap_2()
+            .child(list.id("character-list").h(px(layout.character_list_height)).overflow_y_scrollbar())
             .child(Button::new("new-character").label("New").accessibility_id("new-character").secondary().on_click(cx.listener(|view, _, window, cx| view.add_character(window, cx))));
         let editor = if self.active_character.is_some() {
             let selected = self
@@ -1133,15 +1155,17 @@ impl SettingsView {
             v_flex()
                 .min_w_0()
                 .flex_1()
+                .when(layout.compact, |editor| editor.w_full())
                 .gap_2()
                 .child(div().text_sm().child("Character name"))
                 .child(Input::new(&self.character_name_input).accessibility_id("character-name").w_full())
                 .child(div().text_sm().child("Character video"))
-                .child(h_flex().gap_2().child(Input::new(&self.character_video_input).accessibility_id("character-video").readonly(true).flex_1()).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx)))))
+                .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").readonly(true).min_w_0().flex_1().when(layout.compact, |input| input.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx)))))
                 .child(div().text_sm().child("ElevenLabs voice ID"))
                 .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").w_full())
                 .child(
                     h_flex()
+                        .flex_wrap()
                         .gap_2()
                         .child(Button::new("character-preview").label(if self.voice_preview.is_some() { "Stop example" } else { "Play voice example" }).accessibility_id("character-preview").on_click(cx.listener(|view, _, _, cx| view.start_voice_preview(cx))))
                         .child(Button::new("delete-character").label("Delete").accessibility_id("delete-character").danger().on_click(cx.listener(|view, _, window, cx| view.delete_character(window, cx)))),
@@ -1158,16 +1182,17 @@ impl SettingsView {
         } else {
             v_flex().flex_1().min_w_0().child(div().text_base().child("Choose a character or create a new one." )).into_any_element()
         };
-        h_flex().w_full().items_start().gap_4().child(list).child(editor).into_any_element()
+        h_flex().w_full().items_start().when(layout.compact, |row| row.flex_col()).gap_4().child(list).child(editor).into_any_element()
     }
 
-    fn render_announcements(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_announcements(&mut self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let font_row = |label: &'static str, font: &Entity<ChoiceSelect>, size_state: &Entity<ChoiceSelect>, font_id: &'static str, size_id: &'static str| {
             h_flex()
                 .w_full()
+                .when(layout.compact, |row| row.flex_col())
                 .gap_2()
-                .child(v_flex().gap_1().flex_1().child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).w_full()))
-                .child(v_flex().gap_1().w(px(130.)).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).w_full()))
+                .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).w_full()))
+                .child(v_flex().gap_1().w(px(130.)).when(layout.compact, |field| field.w_full()).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).w_full()))
         };
         let _ = window;
         v_flex()
@@ -1181,14 +1206,14 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&mut self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.active_page {
-            Page::Characters => self.render_characters(cx),
-            Page::Audio => self.render_audio(cx),
-            Page::QuietHours => self.render_quiet_hours(cx),
-            Page::SpeechService => self.render_speech_service(window, cx),
+            Page::Characters => self.render_characters(layout, cx),
+            Page::Audio => self.render_audio(layout, cx),
+            Page::QuietHours => self.render_quiet_hours(layout, cx),
+            Page::SpeechService => self.render_speech_service(layout, window, cx),
             Page::OfflineVoice => self.render_offline_voice(cx),
-            Page::Announcements => self.render_announcements(window, cx),
+            Page::Announcements => self.render_announcements(layout, window, cx),
         }
     }
 }
@@ -1196,17 +1221,20 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_status(window, cx);
+        let layout = Layout::for_window(window);
         let page = self.active_page.spec();
-        let page_content = self.render_page(window, cx);
+        let page_content = self.render_page(layout, window, cx);
         let footer = h_flex()
             .w_full()
-            .gap_4()
+            .flex_shrink_0()
+            .gap_2()
             .border_t_1()
             .border_color(cx.theme().border)
             .pt_3()
-            .child(Textarea::new(&self.status_input).readonly(true).h(px(72.)).flex_1().accessibility_id("status"))
+            .child(Textarea::new(&self.status_input).readonly(true).h(px(if layout.compact { 48. } else { 72. })).min_w_0().flex_1().accessibility_id("status"))
             .child(
                 h_flex()
+                    .flex_shrink_0()
                     .gap_2()
                     .child(Button::new("apply").label("Apply").accessibility_id("apply").primary().on_click(cx.listener(|view, _, _, cx| view.apply(cx))))
                     .child(Button::new("close").label("Close").accessibility_id("close").disabled(self.offline_installing).secondary().on_click(cx.listener(|view, _, window, cx| {
@@ -1219,19 +1247,25 @@ impl Render for SettingsView {
             .id("settings-view")
             .size_full()
             .flex()
+            .when(layout.compact, |root| root.flex_col())
+            .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar(layout, cx))
             .child(
                 v_flex()
-                    .h_full()
+                    .min_h_0()
                     .min_w_0()
                     .flex_1()
-                    .p_8()
+                    .when(layout.compact, |body| body.w_full().p_3())
+                    .when(!layout.compact, |body| body.h_full().p_8())
                     .gap_3()
-                    .child(div().id("page-title").role(gpui_kit::Role::Heading).accessibility_id("page-title").aria_label(page.label).text_2xl().font_weight(FontWeight::SEMIBOLD).child(page.label))
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(page.description))
-                    .child(v_flex().min_h_0().flex_1().w_full().overflow_y_scrollbar().child(page_content))
+                    .child(v_flex().id("page-scroll").min_h_0().flex_1().w_full().overflow_y_scrollbar().child(
+                        v_flex().w_full().min_w_0().gap_3().flex_shrink_0()
+                            .child(div().id("page-title").role(gpui_kit::Role::Heading).accessibility_id("page-title").aria_label(page.label).text_2xl().font_weight(FontWeight::SEMIBOLD).child(page.label))
+                            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(page.description))
+                            .child(page_content)
+                    ))
                     .child(footer),
             )
     }
@@ -1316,8 +1350,8 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let options = WindowOptions {
+            app_id: Some("herald-settings".into()),
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
-            window_min_size: Some(size(px(800.), px(600.))),
             titlebar: Some(gpui_kit::TitlebarOptions { title: Some("Herald settings".into()), ..Default::default() }),
             ..WindowOptions::default()
         };
@@ -1325,7 +1359,7 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
             if let Err(error) = instance.register(window) {
                 *launch_error_for_app.borrow_mut() = Some(error);
             }
-            cx.new(|cx| SettingsView::new(data, assets, settings, window, cx))
+            cx.new(|cx| SettingsView::new(data, assets, settings, instance.clone(), window, cx))
         }) {
             Ok((handle, _view)) => {
                 let _ = handle.downcast::<Root>();

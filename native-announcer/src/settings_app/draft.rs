@@ -143,14 +143,18 @@ mod tests {
 
     #[test]
     fn video_picker_starts_at_the_current_video_or_library() {
-        let assets = Path::new("C:\\Library\\resources");
-        assert_eq!(video_picker_path("C:\\Custom Ω\\herald.mp4", assets), PathBuf::from("C:\\Custom Ω\\herald.mp4"));
+        let assets = Path::new(if cfg!(target_os = "windows") { "C:\\Library\\resources" } else { "/opt/herald/resources" });
+        let custom = if cfg!(target_os = "windows") { "C:\\Custom Ω\\herald.mp4" } else { "/home/example/Custom Ω/herald.mp4" };
+        assert_eq!(video_picker_path(custom, assets), PathBuf::from(custom));
         assert_eq!(video_picker_path("videos/herald.mp4", assets), assets.join("videos/herald.mp4"));
         assert_eq!(video_picker_path("Choose video…", assets), assets.join("videos"));
         assert_eq!(video_picker_path("", assets), assets.join("videos"));
-        let installed_assets = Path::new("C:\\Library\\bin\\..\\resources");
-        assert_eq!(video_picker_path("Choose video…", installed_assets), assets.join("videos"));
-        assert_eq!(video_picker_path("C:\\Library\\bin\\..\\resources\\videos/herald.mp4", installed_assets), assets.join("videos/herald.mp4"));
+        #[cfg(target_os = "windows")]
+        {
+            let installed_assets = Path::new("C:\\Library\\bin\\..\\resources");
+            assert_eq!(video_picker_path("Choose video…", installed_assets), assets.join("videos"));
+            assert_eq!(video_picker_path("C:\\Library\\bin\\..\\resources\\videos/herald.mp4", installed_assets), assets.join("videos/herald.mp4"));
+        }
     }
 
     #[test]

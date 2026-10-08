@@ -30,8 +30,17 @@ fn supports_family(family: &str) -> bool {
     font_bytes(family, Some(4)).is_some_and(|bytes| bytes.starts_with(&[0, 1, 0, 0]) || bytes.starts_with(b"OTTO"))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn supports_family(family: &str) -> bool { load_font(family).is_some() }
+
+#[cfg(target_os = "linux")]
+fn supports_family(family: &str) -> bool {
+    use std::io::Read;
+    font_path(family).and_then(|path| std::fs::File::open(path).ok()).is_some_and(|mut file| {
+        let mut signature = [0; 4];
+        file.read_exact(&mut signature).is_ok() && (signature == [0, 1, 0, 0] || &signature == b"OTTO")
+    })
+}
 
 fn parse_font(bytes: Vec<u8>) -> Option<Font> {
     Font::from_bytes(bytes, FontSettings::default()).ok()
@@ -60,15 +69,50 @@ fn fallback_paths() -> Vec<(String, PathBuf)> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn family_names() -> BTreeSet<String> {
     fallback_paths().into_iter().map(|(family, _)| family).collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn load_font(family: &str) -> Option<Font> {
     fallback_paths().into_iter().filter(|(name, _)| name == family)
         .find_map(|(_, path)| std::fs::read(path).ok().and_then(parse_font))
+}
+
+#[cfg(target_os = "linux")]
+fn family_names() -> BTreeSet<String> {
+    linux_font_paths().keys().cloned().collect()
+}
+
+#[cfg(target_os = "linux")]
+fn font_path(family: &str) -> Option<PathBuf> {
+    linux_font_paths().get(family).cloned()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_font_paths() -> &'static std::collections::BTreeMap<String, PathBuf> {
+    static PATHS: std::sync::OnceLock<std::collections::BTreeMap<String, PathBuf>> = std::sync::OnceLock::new();
+    PATHS.get_or_init(|| {
+        let mut paths: std::collections::BTreeMap<String, PathBuf> = fallback_paths().into_iter().filter(|(_, path)| path.is_file()).collect();
+        if let Ok(output) = std::process::Command::new("fc-list").args(["--format", "%{family}\t%{file}\n"]).output() {
+            if output.status.success() {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    if let Some((families, path)) = line.split_once('\t') {
+                        for family in families.split(',').map(str::trim).filter(|family| !family.is_empty()) {
+                            paths.entry(family.to_owned()).or_insert_with(|| PathBuf::from(path));
+                        }
+                    }
+                }
+            }
+        }
+        paths
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn load_font(family: &str) -> Option<Font> {
+    font_path(family).and_then(|path| std::fs::read(path).ok()).and_then(parse_font)
 }
 
 #[cfg(target_os = "windows")]

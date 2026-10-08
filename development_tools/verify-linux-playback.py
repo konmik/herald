@@ -30,7 +30,7 @@ def main():
     (data / "settings.json").write_text(json.dumps(settings))
     (evidence / "settings.json").write_text(json.dumps(settings))
     before = hypr("activewindow")
-    subprocess.run(["grim", str(evidence / "before.png")], check=True)
+    subprocess.run(["grim", "-l", "0", str(evidence / "before.png")], check=True)
     process = recorder = None
     samples = []
     try:
@@ -46,7 +46,7 @@ def main():
                 if window:
                     index = len(samples)
                     shot = evidence / f"desktop-{index:03}.png"
-                    subprocess.run(["grim", str(shot)], check=True)
+                    subprocess.run(["grim", "-l", "0", str(shot)], check=True)
                     samples.append({"elapsed": time.monotonic() - started, "window": window, "focus": hypr("activewindow").get("address"), "image": shot.name})
                 time.sleep(0.25)
             process.wait(timeout=5)

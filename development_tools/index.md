@@ -55,6 +55,7 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [verify-characters.ps1](verify-characters.ps1) | Legacy Win32 character controls and playback checks. |
 | [verify-announcement-audio.py](verify-announcement-audio.py) | Capture output audio and check announcement/preview timing. |
 | [verify-linux-playback.py](verify-linux-playback.py) | Check Hyprland desktop transparency, sustained animation, focus and captured output audio with an isolated demo. |
+| [verify-linux-settings.py](verify-linux-settings.py) | Launch installed graphical settings on Hyprland, drive its AT-SPI controls, and verify navigation, Apply, draft discard, and reopening. |
 | [voice-api-fixture.mjs](voice-api-fixture.mjs) | Local speech API fixture for deterministic tests. |
 | [host-verification/](host-verification/) | Real Claude/OpenCode lifecycle drivers and proof capture. These tests make model requests. |
 | [benchmark-tts.ps1](benchmark-tts.ps1) | Measure local voice loading and synthesis across thread counts. |
@@ -62,6 +63,10 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [profile-plugin.ts](profile-plugin.ts) | Measure memory during 10,000 simulated completion cycles. |
 
 `pnpm run test:settings` drives GPUI controls through Windows UI Automation. Sliders and dropdowns use normal pointer actions on the owned controls when GPUI Kit's accessibility actions are unsupported. It checks navigation, single-instance activation, draft persistence, Close/reopen, silent previews, unavailable output devices and System default. It does not play audible speech or install a voice model.
+
+`pnpm run test:settings:linux` launches the installed application entry on Hyprland and drives the graphical settings window through AT-SPI. It requires Python GObject bindings with the Atspi typelib, `gio`, `hyprctl`, and `grim`. It temporarily enables the accessibility bus and restores its original state during cleanup. It captures each page, verifies Apply and Close, and reopens the saved settings. Its disposable data does not change your saved settings or stop the live announcer. Evidence remains in `temp/verification/`.
+
+`pnpm run test:settings:layout:linux` also needs the Gtk 3 typelib. It opens a disposable workspace and a tiling peer, checks a tiled launch, resizes through 420×650, 420×360, and 1100×700, then returns to tiling. It checks all six pages for horizontal overflow, reachable navigation and footer controls, and retained draft values. Cleanup closes its peer and restores the original workspace. An optional `--scroll-helper <path>` accepts a Wayland pointer helper taking x, y, screen width, screen height, and wheel steps. Without that helper, the proof records wheel scrolling as unverified.
 
 Idle settings and zero-volume previews must not load the offline speech runtime. Audible previews load the model on demand and release it when playback finishes or is cancelled; each local preview pays the model-loading cost. The background announcer preloads and retains its speech cache only when no ElevenLabs key is configured and speech is not muted. With remote speech configured, the local model loads only if remote speech fails and is released after fallback playback. Font enumeration reads format signatures, not complete font files.
 

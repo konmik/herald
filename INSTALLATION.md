@@ -14,7 +14,9 @@ pnpm run build:announcer -- --release
 
 The executable is `native-announcer/bin/herald-linux-x64` on x86-64. Keep the checkout and its `native-announcer/resources` directory available.
 
-Linux builds automatically add **Herald Settings** to the application launcher. It opens the settings file in Omarchy's selected editor, or in `$EDITOR` through `xdg-terminal-exec` on other desktops. Existing settings are preserved. To install or refresh just the menu entry, run `pnpm run install:linux-menu`.
+Linux builds automatically add **Herald Settings** to the application launcher. It opens the graphical settings app. Existing settings are preserved. To install or refresh just the menu entry, run `pnpm run install:linux-menu`.
+
+Settings follows your window manager's tiling policy. Narrow windows use wrapped top navigation and stacked forms. Page content scrolls while Apply and Close remain visible. Do not add a floating rule for `herald-settings` unless you prefer floating settings windows.
 
 Use `HERALD_DATA`, `HERALD_BINARY` and `HERALD_TTS` for explicit development overrides.
 
@@ -54,11 +56,12 @@ o.window({ title = "^Herald$" }, {
   opacity = "1 override 1 override",
   move = { "monitor_w-window_w-20", "monitor_h-window_h-20" },
 })
+
 ```
 
 Run `hyprctl reload`, then confirm `hyprctl configerrors` reports no errors.
 
-Linux uses eSpeak NG for speech. The settings window is Windows-only. Edit `~/.local/share/herald/settings.json` to configure quiet hours, volume, and characters. `XDG_DATA_HOME` or `HERALD_DATA` can override the data location.
+Linux uses eSpeak NG for speech. Open **Herald Settings** to configure quiet hours, volume, and characters. Settings are stored in `~/.local/share/herald/settings.json`. `XDG_DATA_HOME` or `HERALD_DATA` can override the data location.
 
 ## Windows bundle
 

@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -9,13 +10,15 @@ function execArgument(value) {
 }
 
 export async function installLinuxMenu(root, { env = process.env, refresh = true } = {}) {
-  const opener = join(root, 'development_tools', 'open-linux-settings.sh')
-  await access(opener)
+  if (/[\r\n]/.test(root)) throw new Error('The installation path must not contain carriage returns or newlines.')
+  const binary = join(root, 'native-announcer', 'bin', `herald-linux-${process.arch}`)
+  const assets = join(root, 'native-announcer', 'resources')
+  await access(binary, constants.X_OK)
   const applications = join(env.XDG_DATA_HOME || join(env.HOME || homedir(), '.local/share'), 'applications')
   const path = join(applications, 'herald-settings.desktop')
   const icon = join(root, 'native-announcer', 'resources', 'portraits', 'flamboyant-herald.png')
   await access(icon)
-  const content = `[Desktop Entry]\nType=Application\nName=Herald Settings\nComment=Edit Herald announcement settings\nExec=sh ${execArgument(opener)}\nIcon=${icon}\nTerminal=false\nCategories=Settings;\n`
+  const content = `[Desktop Entry]\nType=Application\nName=Herald Settings\nComment=Configure Herald announcements\nExec=/usr/bin/env -- ${execArgument(binary)} --settings --assets ${execArgument(assets)}\nIcon=${icon.replaceAll('\\', '\\\\')}\nTerminal=false\nCategories=Settings;\n`
   await mkdir(applications, { recursive: true })
   const previous = await readFile(path, 'utf8').catch(error => {
     if (error.code === 'ENOENT') return undefined
