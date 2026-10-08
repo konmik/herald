@@ -10,6 +10,6 @@ Click the preview to watch a recorded replay with Mad Hatter and his configured 
 
 ## How it works
 
-Works with OpenCode and Claude. Tasks lasting at least one minute trigger an announcement when they finish. It waits for background jobs and stays above other windows without taking focus. Speech is muted during meetings and 22:00–08:00.
+Works with OpenCode and Claude. Tasks lasting at least one minute trigger an announcement when they finish. It waits for background jobs and stays above other windows without taking focus. Speech is muted during meetings. Quiet hours default to 22:00–08:00 and can be changed or disabled.
 
 See [installation instructions](INSTALLATION.md) for the Windows bundle.

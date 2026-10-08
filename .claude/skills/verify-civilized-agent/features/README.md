@@ -12,11 +12,11 @@ Read this index before choosing a proof. Each entry point remains separately acc
 
 ## Driving conventions
 
-Use `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1` for real native controls, or `announce.ps1` for the production transport boundary. Control IDs are stable Win32 handles, not coordinate guesses. Preserve action transcripts, resulting controls, persisted state and process identity. Additional host paths require a disposable real host session; record unavailable entries as skipped, not passed.
+Use `pwsh -NoProfile -File .claude/skills/verify-civilized-agent/scripts/verify.ps1` for real native controls, or `announce.ps1` for the production transport boundary. Stable numeric control IDs resolve to the owned window's current Win32 handles; handles can change between launches. Preserve action transcripts, resulting controls, persisted state and process identity. Additional host paths require a disposable real host session; record unavailable entries as skipped, not passed.
 
 ## Features
 
-- [Settings persistence](settings.md): Apply, Close without saving, reopen, CPU/GPU selection.
+- [Settings persistence](settings.md): Apply, Close without saving, reopen, speech-model selection.
 - [Quiet mode and schedule](quiet.md): immediate mute, daily times, persisted controls, meeting suppression.
 - [Audio output](output.md): missing device uses system default, refresh, persisted selection.
 - [Audio preview](preview.md): silent preview, unsaved audio settings, start/stop, completion.

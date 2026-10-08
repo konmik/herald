@@ -2,11 +2,11 @@
 
 A desktop herald that announces completed AI tasks with animated characters and spoken summaries. Works with OpenCode and Claude. Tasks lasting at least one minute trigger an announcement when they finish.
 
-It waits for background jobs, stays above other windows without taking focus, and works while the current session is open. New messages reset the timer. Speech is muted during meetings and 22:00–08:00.
+It waits for background jobs, stays above other windows without taking focus, and works while the current session is open. New messages reset the timer. Speech is muted during meetings. Quiet hours default to 22:00–08:00 and can be changed or disabled.
 
 ## Announcement generation
 
-Forking the existing conversation is a critical requirement for every announcement, including subagent completions. Append the announcement prompt to the existing context without changing the original conversation. Claude uses `$.model.fork`; its fork uses the main conversation, with the completed task's report appended. OpenCode uses `ctx.session.generate` with the existing session ID. Never replace this with a standalone request built only from a report.
+Forking the existing conversation is a critical requirement for every announcement. Subagents stay silent; announce the final main-task result after background work finishes. Append the announcement prompt to the main conversation's existing context without changing the original conversation. Claude uses `$.model.fork`; OpenCode uses `ctx.session.generate` with the existing session ID. Never replace this with a standalone request built only from a report.
 
 ## Layout
 
@@ -21,7 +21,7 @@ Save every character image in the single `native-announcer/resources/portraits/`
 
 For playback, settings, audio, or plugin-completion changes, read `.claude/skills/verify-civilized-agent/SKILL.md` and verify each affected entry point. Run `npm run check` after code changes.
 
-When asked to rebuild and deploy on Windows, run `npm run deploy:plugins` from the repository root. It tests both plugins, rebuilds and deploys the shared executable to `native-announcer/bin/civilized-announcer-win32-<arch>.exe`, deploys the plugins to the Claude WHG profile and the existing OpenCode registration, and restarts the announcer with videos from `native-announcer/resources/videos/`. Restart Claude sessions to load new hooks. Reload OpenCode only when requested with `npm run deploy:plugins -- -ReloadOpenCode`; this reloads all loaded locations and cancels pending permissions and forms. Use `-- -WhatIf` for a dry run.
+When asked to rebuild and deploy on Windows, run `pnpm run deploy:plugins` from the repository root. It checks both plugins, builds and verifies a release bundle, then installs it under `%LOCALAPPDATA%/Programs/CivilizedAgent/versions/<version>-<arch>-<payloadHash>`. Claude receives a physical plugin cache copy; OpenCode points to the installed package. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise an existing `.claude-whg`, otherwise `.claude`. The installer restarts the announcer with the installed bundle's videos, leaving the checkout executable unchanged. Restart Claude sessions to load new hooks. Reload OpenCode only when requested with `pnpm run deploy:plugins -ReloadOpenCode`; this reloads all loaded locations and cancels pending permissions and forms. Use `pnpm run deploy:plugins -WhatIf` for a dry run.
 
 ## Generate herald video
 
