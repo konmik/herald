@@ -21,7 +21,7 @@ Done when the exact text, title, character video and voice settings are identifi
 
 Read `development_tools/record-announcement.py --help` and inspect its implementation before running it. Use an existing deployed binary through `--binary` when it supports `--isolated`, `--capture-frames` and `--capture-speech-seconds`. Otherwise build a separate binary outside the repository. Leave the live announcer and its deployment unchanged.
 
-This machine's recording environment is `%LOCALAPPDATA%/Temp/opencode/civilized-recording-venv/Scripts/python.exe`. If absent, create that virtual environment with Python 3.13 and install `pillow` into it. Install provider dependencies there only when needed. Keep adapters, dependencies, temporary frames and audio outside the repository.
+Use a Python 3.13 virtual environment outside the repository with `pillow` installed. Install provider dependencies there only when needed. Keep adapters, dependencies, temporary frames and audio outside the repository.
 
 The helper's SAPI narration and plain-background rendering do not satisfy a configured ElevenLabs voice or desktop capture. If the current helper lacks these options, use a temporary adapter around its existing playback and timing functions. Keep the repository helper unchanged unless the user asks to change it.
 

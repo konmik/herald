@@ -58,7 +58,7 @@ try {
             permissions = @(@{ action = '*'; resource = '*'; effect = 'deny' }, @{ action = 'shell'; resource = 'pwsh *'; effect = 'allow' }, @{ action = 'subagent'; resource = '*'; effect = 'allow' })
         } | ConvertTo-Json -Depth 6 | Set-Content "$scratch/config/opencode/opencode.json" -Encoding utf8NoBOM
     } else {
-        $profile = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } elseif (Test-Path "$HOME/.claude-whg/.credentials.json") { "$HOME/.claude-whg" } else { "$HOME/.claude" }
+        $profile = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { "$HOME/.claude" }
         if (Test-Path "$profile/.credentials.json") { Copy-Item -LiteralPath "$profile/.credentials.json" -Destination "$scratch/claude-profile/.credentials.json" }
     }
     $launch = [Diagnostics.ProcessStartInfo]::new($binary)

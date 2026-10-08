@@ -262,7 +262,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate and publish one character portrait and talking video")
     parser.add_argument("name", type=validate_name)
     parser.add_argument("--description", required=True)
-    parser.add_argument("--comfy-dir", type=Path, default=generator.COMFY)
+    parser.add_argument("--comfy-dir", type=Path, default=generator.COMFY, help="ComfyUI installation directory; defaults to COMFYUI_DIRECTORY or ~/ComfyUI")
     parser.add_argument("--audio", type=Path, help="Speech recording of the full announcement phrase; normalized to four seconds")
     parser.add_argument("--resume", action="store_true", help="Keep the saved portrait and generate its missing video")
     parser.add_argument("--seed", type=int)
@@ -270,7 +270,7 @@ def main():
     if not args.description.strip():
         parser.error("--description must not be empty")
     try:
-        for path in generate(args.name, args.description, args.comfy_dir, args.audio, args.resume, args.seed):
+        for path in generate(args.name, args.description, args.comfy_dir.expanduser().resolve(), args.audio, args.resume, args.seed):
             print(path)
     except (OSError, RuntimeError, ValueError, generator.requests.RequestException, subprocess.SubprocessError) as error:
         parser.exit(1, f"{error}\n")

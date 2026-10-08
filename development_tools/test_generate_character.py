@@ -1,5 +1,7 @@
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, nullcontext
@@ -13,6 +15,19 @@ from development_tools.asset_library import clean_assets
 
 
 class CharacterTests(unittest.TestCase):
+    def test_generation_directory_can_be_configured_without_machine_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = dict(os.environ, COMFYUI_DIRECTORY=directory)
+            result = subprocess.run([sys.executable, "-c", "from development_tools.generate_assets import COMFY; print(COMFY)"], env=environment, capture_output=True, text=True, check=True)
+            self.assertEqual(Path(result.stdout.strip()), Path(directory))
+
+    def test_cli_resolves_the_supplied_comfy_directory(self):
+        directory = Path("~/custom-comfy")
+        arguments = ["generate_character.py", "herald", "--description", "A herald.", "--comfy-dir", str(directory)]
+        with patch.object(sys, "argv", arguments), patch.object(generate_character, "generate", return_value=[]) as generate:
+            generate_character.main()
+        self.assertEqual(generate.call_args.args[2], directory.expanduser().resolve())
+
     def test_names_cannot_escape_the_library(self):
         for name in ("../escape", "UPPER", "a/b", "a\\b", "con", "nul", "a" * 65, "", "-hat"):
             with self.subTest(name=name), self.assertRaises(ValueError):

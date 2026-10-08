@@ -55,7 +55,7 @@ try {
     $blockedPrograms = Join-Path $scratch 'blocked-programs'
     New-Item -ItemType Directory -Path $blockedPrograms | Out-Null
     $blockedShortcut = Join-Path $blockedPrograms 'Civilized Agent settings.lnk'
-    Write-NativeShortcut $blockedShortcut 'C:/Windows/notepad.exe' '' 'C:/Windows'
+    Write-NativeShortcut $blockedShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
     $rollbackPaths = @($config, (Join-Path $profile 'settings.json'), (Join-Path $profile 'plugins/known_marketplaces.json'), (Join-Path $profile 'plugins/installed_plugins.json'), $blockedShortcut)
     $rollbackBytes = @{}
     foreach ($path in $rollbackPaths) { $rollbackBytes[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }

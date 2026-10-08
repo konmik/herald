@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import time
@@ -19,7 +20,7 @@ else:
     from asset_library import clean_assets
 
 ROOT = Path(__file__).resolve().parents[1]
-COMFY = Path(r"C:\ComfyUI")
+COMFY = Path(os.environ.get("COMFYUI_DIRECTORY", Path.home() / "ComfyUI")).expanduser()
 API = "http://127.0.0.1:8188"
 ASSETS = ROOT / "generated-assets"
 RUNTIME_ASSETS = ROOT / "native-announcer" / "resources"
@@ -246,11 +247,14 @@ def release_idle_models():
 
 
 def main():
+    global COMFY
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["portrait", "video", "publish", "animations", "characters", "preview", "clean"])
     parser.add_argument("--emotion", choices=["neutral"], default="neutral")
     parser.add_argument("--character", choices=CHARACTERS)
+    parser.add_argument("--comfy-dir", type=Path, default=COMFY, help="ComfyUI installation directory; defaults to COMFYUI_DIRECTORY or ~/ComfyUI")
     args = parser.parse_args()
+    COMFY = args.comfy_dir.expanduser().resolve()
     if args.action == "clean":
         try:
             queue = requests.get(f"{API}/queue", timeout=5).json()

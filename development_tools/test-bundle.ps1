@@ -281,7 +281,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $rollbackPrograms = Join-Path $temporary 'rollback-programs'
     New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
     $rollbackShortcut = Join-Path $rollbackPrograms 'Civilized Agent settings.lnk'
-    Write-NativeShortcut $rollbackShortcut 'C:/Windows/notepad.exe' '' 'C:/Windows'
+    Write-NativeShortcut $rollbackShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
     $rollbackPaths = @($config, "$profile/settings.json", "$profile/plugins/known_marketplaces.json", "$profile/plugins/installed_plugins.json", "$cache/hooks/register.ts", $rollbackShortcut)
     $beforeRollback = @{}
     foreach ($path in $rollbackPaths) { $beforeRollback[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
@@ -310,8 +310,8 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Write-NativeShortcut $shortcutPath $target '--other' (Split-Path $target -Parent)
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer overwrote a shortcut with unrelated arguments'
     Assert-True ((Read-NativeShortcut $shortcutPath).Arguments -ceq '--other') 'Argument ownership rejection changed the existing shortcut'
-    Write-NativeShortcut "$programs/Unrelated.lnk" 'C:/Windows/notepad.exe' '' 'C:/Windows'
-    Write-NativeShortcut $shortcutPath 'C:/Windows/notepad.exe' '--settings' 'C:/Windows'
+    Write-NativeShortcut "$programs/Unrelated.lnk" (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
+    Write-NativeShortcut $shortcutPath (Join-Path $env:SystemRoot 'notepad.exe') '--settings' $env:SystemRoot
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer overwrote an unrelated shortcut'
     $foreignBinary = Join-Path $temporary "foreign-app/native-announcer/bin/civilized-announcer-win32-$arch.exe"
     New-Item -ItemType Directory -Path (Split-Path $foreignBinary -Parent) -Force | Out-Null
@@ -320,7 +320,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Write-NativeShortcut $shortcutPath $foreignBinary '--settings' (Split-Path $foreignBinary -Parent)
     Assert-Rejected { Install-SettingsShortcut $target $programs } 'Installer trusted an unrelated package with an announcer executable name'
     Assert-True ((Read-NativeShortcut $shortcutPath).TargetPath -ceq $foreignBinary) 'Ownership rejection changed the existing shortcut'
-    Assert-True ((Read-NativeShortcut "$programs/Unrelated.lnk").TargetPath -eq 'C:\Windows\notepad.exe') 'Installer changed an unrelated shortcut'
+    Assert-True ((Read-NativeShortcut "$programs/Unrelated.lnk").TargetPath -eq (Join-Path $env:SystemRoot 'notepad.exe')) 'Installer changed an unrelated shortcut'
     Assert-True (@(Get-ChildItem $root -Force | Where-Object Name -Like '.civilized-*').Count -eq 0) 'Installation left staging or backup directories'
     Write-Output 'Bundle unit checks passed: compiled imports and licenses, file integrity, copying, repair and mocked host migration. Native startup and real host installation require test:bundle:installed.'
 } finally {

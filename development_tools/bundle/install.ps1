@@ -469,7 +469,7 @@ $app = Install-Payload $Bundle $InstallDirectory -LockHeld
 $manifest = Test-Bundle $app
 $binary = Join-Path $app "native-announcer/bin/civilized-announcer-win32-$($manifest.arch).exe"
 if (-not $SkipHostRegistration) {
-    if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } elseif (Test-Path (Join-Path $HOME '.claude-whg')) { Join-Path $HOME '.claude-whg' } else { Join-Path $HOME '.claude' } }
+    if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }
     Get-Command claude -ErrorAction Stop | Out-Null
     $openCodeCommand = @(Get-Command opencode -CommandType Application,ExternalScript -ErrorAction Stop | Select-Object -First 1).Source

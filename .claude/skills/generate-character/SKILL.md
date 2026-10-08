@@ -9,11 +9,11 @@ argument-hint: <name> <character description>
 
 Run only when the user invokes this skill: `@generate-character <name> <description>` in OpenCode or `/generate-character <name> <description>` in Claude. The invocation authorizes generating one character and publishing it to the shared library, not committing, playing it, or generating extra variants.
 
-1. Use the supplied name and description. Ask for either if missing. Names use lowercase letters, digits and hyphens. Read `~/_admin/image-generation.md` before generation.
+1. Use the supplied name and description. Ask for either if missing. Names use lowercase letters, digits and hyphens. Read [the generation requirements](../../../development_tools/index.md#generation-requirements) before generation.
 2. From the repository root, run one command:
 
    ```powershell
-   C:\ComfyUI\venv\Scripts\python.exe development_tools/generate_character.py <name> --description "<character description>"
+   python development_tools/generate_character.py <name> --description "<character description>" --comfy-dir "<ComfyUI directory>"
    ```
 
     The helper checks CUDA and an idle ComfyUI queue, starts ComfyUI only if needed, generates a native 256×256 portrait, synthesizes mono 16 kHz speech outside the repository, and animates it with the existing Wan graph. It publishes a silent four-second, 64-frame, 16 fps MP4 without resizing the portrait. It removes its temporary inputs and ComfyUI outputs. Before reporting completion, confirm the generation process has exited and any ComfyUI server started for this job has stopped; enforce this cleanup on failure or cancellation too. Leave pre-existing servers running. It preserves an existing portrait after failure; rerun with `--resume` to finish that character. A completed name is never overwritten.
