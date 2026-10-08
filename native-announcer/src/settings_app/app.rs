@@ -1,5 +1,8 @@
 #[path = "draft.rs"]
 mod draft;
+#[path = "keyboard.rs"]
+mod keyboard;
+use keyboard::RevealFocused;
 #[cfg_attr(target_os = "windows", path = "instance.rs")]
 #[cfg_attr(target_os = "linux", path = "instance_linux.rs")]
 mod instance;
@@ -20,16 +23,16 @@ use draft::{capture_draft_video, capture_draft_voice, character_video, new_chara
 use draft::video_picker_path;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState, TextareaState};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Root, Selectable};
+use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Root, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, size, AnyElement, App, Context, Entity, FontWeight, IntoElement, ParentElement,
-    Render, SharedString, Subscription, Window, WindowBounds, WindowOptions,
+    Render, SharedString, Subscription, Window, WindowBounds, WindowOptions, FocusHandle, ScrollHandle,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -155,6 +158,14 @@ enum VoiceUsageState {
 type ChoiceSelect = SelectState<Vec<Choice>>;
 
 struct SettingsView {
+    initial_focus_pending: bool,
+    navigation_focus: [FocusHandle; 6],
+    character_list_focus: FocusHandle,
+    volume_focus: FocusHandle,
+    silent_sound_focus: FocusHandle,
+    page_scroll: ScrollHandle,
+    character_scroll: ScrollHandle,
+    character_anchor: gpui_kit::ScrollAnchor,
     data: PathBuf,
     assets: PathBuf,
     saved: Settings,
@@ -162,7 +173,6 @@ struct SettingsView {
     active_page: Page,
     active_character: Option<String>,
     status: String,
-    status_input: Entity<TextareaState>,
     usage_input: Entity<TextareaState>,
     quiet_start_input: Entity<InputState>,
     quiet_end_input: Entity<InputState>,
@@ -219,7 +229,17 @@ impl SettingsView {
         let title_font_choices = font_choices(&font_families, &draft.settings.announcement_title_font.family);
         let size_choices = font_size_choices();
         let status = "Apply saves changes. Close discards unsaved edits.".to_owned();
+        let character_scroll = ScrollHandle::new();
+        let character_anchor = gpui_kit::ScrollAnchor::for_handle(character_scroll.clone());
         let mut view = Self {
+            initial_focus_pending: true,
+            navigation_focus: std::array::from_fn(|_| cx.focus_handle()),
+            character_list_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            volume_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            silent_sound_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            page_scroll: ScrollHandle::new(),
+            character_scroll,
+            character_anchor,
             instance,
             theme_monitor: theme::sync(Some(window), cx),
             data: data.clone(),
@@ -229,7 +249,6 @@ impl SettingsView {
             active_page: Page::Audio,
             active_character,
             status: status.clone(),
-            status_input: cx.new(|cx| TextareaState::new(window, cx).default_value(status)),
             usage_input: cx.new(|cx| TextareaState::new(window, cx).default_value("Enter an ElevenLabs key to load voice usage.")),
             quiet_start_input: cx.new(|cx| InputState::new(window, cx).default_value(format_time(settings.quiet_start))),
             quiet_end_input: cx.new(|cx| InputState::new(window, cx).default_value(format_time(settings.quiet_end))),
@@ -319,6 +338,9 @@ impl SettingsView {
     }
 
     fn install_subscriptions(&mut self, cx: &mut Context<Self>) {
+        for state in [&self.character_prompt_input, &self.summary_prompt_input, &self.usage_input] {
+            self.subscriptions.push(cx.observe(state, |_, _, cx| cx.notify()));
+        }
         let state = self.quiet_start_input.clone();
         self.subscriptions.push(cx.subscribe(&state, |view, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -498,13 +520,6 @@ impl SettingsView {
         }
     }
 
-    fn sync_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.status_input.read(cx).value().as_ref() != self.status {
-            let value = self.status.clone();
-            self.status_input.update(cx, |state, cx| state.set_value(value, window, cx));
-        }
-    }
-
     fn sync_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = voice_usage_text(&self.voice_usage);
         if self.usage_input.read(cx).value().as_ref() != text {
@@ -538,11 +553,52 @@ impl SettingsView {
         self.capture_inputs(cx);
         self.stop_previews();
         self.active_page = page;
+        self.page_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
         if page == Page::SpeechService && matches!(self.voice_usage, VoiceUsageState::NotLoaded) {
             self.refresh_usage(cx);
         }
         cx.notify();
         let _ = window;
+    }
+
+    fn navigate_page(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_page(PAGES[index].page, window, cx);
+        self.navigation_focus[index].focus(window, cx);
+    }
+
+    fn step_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let current = PAGES.iter().position(|spec| spec.page == self.active_page).unwrap();
+        self.navigate_page(if forward { (current + 1) % PAGES.len() } else { (current + PAGES.len() - 1) % PAGES.len() }, window, cx);
+    }
+
+    fn navigate_character(&mut self, direction: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.draft.characters.keys().filter(|id| !self.draft.removed_characters.contains(*id)).cloned().collect::<Vec<_>>();
+        if ids.is_empty() { return; }
+        let current = ids.iter().position(|id| Some(id) == self.active_character.as_ref());
+        let index = match direction {
+            i32::MIN => 0,
+            i32::MAX => ids.len() - 1,
+            -1 => current.map(|index| index.saturating_sub(1)).unwrap_or(ids.len() - 1),
+            _ => current.map(|index| (index + 1).min(ids.len() - 1)).unwrap_or(0),
+        };
+        self.select_character(ids[index].clone(), window, cx);
+        self.character_anchor.scroll_to(window, cx);
+    }
+
+    fn choice_boundary(&self, last: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::Focusable;
+        for state in [&self.output_select, &self.model_select, &self.body_font_select, &self.body_size_select, &self.title_font_select, &self.title_size_select] {
+            let focus = state.read(cx).focus_handle(cx);
+            if focus.contains_focused(window, cx) {
+                let row = state.read(cx).selected_index(cx).map(|index| index.row).unwrap_or(0);
+                // These selects use a single, unfiltered Vec. List's Up action wraps
+                // from its first row to its last and retains the pending selection.
+                for _ in 0..row + usize::from(last) {
+                    focus.dispatch_action(&gpui_kit::base::actions::SelectUp, window, cx);
+                }
+                return;
+            }
+        }
     }
 
     fn select_character(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -570,20 +626,30 @@ impl SettingsView {
     fn delete_character(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_character.clone() else { return; };
         let name = self.draft.characters.get(&id).map(|character| character.name.as_str()).unwrap_or("this character");
-        let answer = window.prompt(gpui_kit::PromptLevel::Warning, &format!("Delete {name}?"),
-            Some("Apply saves the removal. Cloud voices are unchanged."),
-            &[gpui_kit::PromptButton::cancel("Cancel"), gpui_kit::PromptButton::ok("Delete")], cx);
-        cx.spawn_in(window, async move |view, cx| {
-            if answer.await.ok() != Some(1) { return; }
-            let _ = view.update_in(cx, |view, window, cx| {
-                view.stop_previews();
-                view.draft.remove_character(&id);
-                if view.active_character.as_ref() == Some(&id) { view.active_character = None; }
-                view.sync_character_inputs(window, cx);
-                view.status = "Character marked for removal. Apply saves it; cloud voices are unchanged.".into();
-                cx.notify();
-            });
-        }).detach();
+        let title = format!("Delete {name}?");
+        let view = cx.weak_entity();
+        let after_delete_focus = self.character_list_focus.clone();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let id = id.clone();
+            let view = view.clone();
+            let after_delete_focus = after_delete_focus.clone();
+            dialog.title(title.clone()).close_button(false)
+                .description("Apply saves the removal. Cloud voices are unchanged.")
+                .button_props(gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true).ok_text("Delete").cancel_text("Cancel"))
+                .on_ok(move |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        view.stop_previews();
+                        view.draft.remove_character(&id);
+                        if view.active_character.as_ref() == Some(&id) { view.active_character = None; }
+                        view.sync_character_inputs(window, cx);
+                        view.status = "Character marked for removal. Apply saves it; cloud voices are unchanged.".into();
+                        cx.notify();
+                    });
+                    let focus = after_delete_focus.clone();
+                    window.on_next_frame(move |window, cx| focus.focus(window, cx));
+                    true
+                })
+        });
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
@@ -737,15 +803,10 @@ impl SettingsView {
         self.devices = crate::audio::output_devices();
         let choices = output_choices(&self.devices, self.draft.settings.output_device.as_deref());
         let selected = output_value(self.draft.settings.output_device.as_deref()).to_owned();
-        self.output_select = cx.new(|cx| {
-            SelectState::new(
-                choices.clone(),
-                Some(IndexPath::new(choice_index(&choices, &selected))),
-                window,
-                cx,
-            )
+        self.output_select.update(cx, |state, cx| {
+            state.set_items(choices, window, cx);
+            state.set_selected_value(&selected, window, cx);
         });
-        self.subscribe_output_select(cx);
         self.status = "Output devices refreshed.".into();
         cx.notify();
     }
@@ -876,7 +937,10 @@ impl SettingsView {
         let current = self.character_video_input.read(cx).value().to_string();
         let path = video_picker_path(&current, &self.assets);
         let library = video_picker_path("", &self.assets);
-        let selected = match dialogs::pick_video(window, &path, &library) {
+        let focus = window.focused(cx);
+        let result = dialogs::pick_video(window, &path, &library);
+        if let Some(focus) = focus { focus.focus(window, cx); }
+        let selected = match result {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(error) => {
@@ -926,6 +990,7 @@ impl SettingsView {
     #[cfg(target_os = "linux")]
     fn browse_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_character.clone() else { return; };
+        let focus = window.focused(cx);
         let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true, directories: false, multiple: false,
             prompt: Some("Choose character animation (MP4)".into()),
@@ -933,6 +998,7 @@ impl SettingsView {
         cx.spawn_in(window, async move |view, cx| {
             let result = paths.await;
             let _ = view.update_in(cx, |view, window, cx| {
+                if let Some(focus) = focus { focus.focus(window, cx); }
                 match result {
                     Ok(Ok(Some(paths))) => {
                         let Some(selected) = paths.into_iter().next() else { return; };
@@ -970,39 +1036,115 @@ impl SettingsView {
             "eSpeak is unavailable. Install espeak-ng with your Linux package manager to enable offline speech."
         };
         v_flex().w_full().gap_4()
-            .child(div().text_base().child(status))
+            .child(div().id("offline-status").role(gpui_kit::Role::Status).aria_label(status)
+                .a11y_synthetic_children(|builder| builder.parent_node().set_live(gpui_kit::accesskit::Live::Polite))
+                .text_base().child(status))
             .child(div().child("Playback uses PulseAudio or PipeWire's PulseAudio compatibility service. Kitten voice downloads are Windows-only."))
             .into_any_element()
     }
 
     fn render_sidebar(&self, layout: Layout, cx: &mut Context<Self>) -> impl IntoElement {
         let mut sidebar = v_flex()
+            .id("settings-navigation")
+            .role(gpui_kit::Role::TabList)
+            .aria_label("Settings pages")
+            .aria_orientation(if layout.compact { gpui_kit::Orientation::Horizontal } else { gpui_kit::Orientation::Vertical })
+            .key_context(if layout.compact { "HeraldNavigation HeraldNavHorizontal" } else { "HeraldNavigation HeraldNavVertical" })
+            .on_action(cx.listener(|view, _: &keyboard::NextItem, window, cx| view.step_page(true, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::PreviousItem, window, cx| view.step_page(false, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::FirstItem, window, cx| view.navigate_page(0, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::LastItem, window, cx| view.navigate_page(PAGES.len() - 1, window, cx)))
+            .on_action(cx.listener(|_, _: &keyboard::Activate, _, _| {}))
             .when(layout.compact, |nav| nav.flex_row().flex_wrap().w_full().p_2().border_b_1())
             .when(!layout.compact, |nav| nav.h_full().w(px(220.)).p_4().border_r_1())
             .flex_shrink_0()
             .gap_2()
             .bg(cx.theme().sidebar)
             .border_color(cx.theme().sidebar_border);
-        for spec in PAGES {
+        for (index, spec) in PAGES.iter().enumerate() {
             let selected = self.active_page == spec.page;
             let page = spec.page;
-            let button = Button::new(spec.key)
+            let focus = self.navigation_focus[index].clone().tab_index(0).tab_stop(selected);
+            let button = div().id(spec.key)
+                .role(gpui_kit::Role::Tab)
                 .accessibility_id(spec.key)
-                .label(spec.label)
+                .aria_label(spec.label)
+                .aria_selected(selected)
+                .track_focus(&focus)
+                .tab_stop(selected)
+                .px_3().py_2().rounded_md().cursor_pointer()
+                .border_2().border_color(cx.theme().transparent)
+                .focus_visible(|style| style.border_color(cx.theme().ring))
+                .when(selected, |button| button.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
                 .when(!layout.compact, |button| button.w_full())
                 .flex_shrink_0()
-                .selected(selected)
-                .on_click(cx.listener(move |view, _, window, cx| view.change_page(page, window, cx)));
-            sidebar = sidebar.child(if selected { button.primary() } else { button.ghost() });
+                .child(spec.label)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.change_page(page, window, cx);
+                    view.navigation_focus[index].focus(window, cx);
+                }));
+            sidebar = sidebar.child(button);
         }
         sidebar
+    }
+
+    fn render_slider(&self, id: &'static str, label: &'static str, state: &Entity<SliderState>, focus: &FocusHandle, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::base::{SliderTrack, SliderIndicator, SliderThumb};
+        let value = state.read(cx);
+        let min = value.min_value();
+        let max = value.max_value();
+        let current = value.value().start();
+        let step = value.step_value();
+        let percentage = value.percentage().end;
+        let update = |amount: f32| {
+            let state = state.clone();
+            move |window: &mut Window, cx: &mut App| {
+                state.update(cx, |state, cx| {
+                    let value = (state.value().start() + amount).clamp(state.min_value(), state.max_value());
+                    state.set_value(value, window, cx);
+                    cx.emit(SliderEvent::Change(state.value()));
+                });
+            }
+        };
+        let increase = update(step);
+        let decrease = update(-step);
+        let minimum = state.clone();
+        let maximum = state.clone();
+        let increment_a11y = update(step);
+        let decrement_a11y = update(-step);
+        let release = state.clone();
+        let mouse_focus = focus.clone();
+        div().id(id).role(gpui_kit::Role::Slider).accessibility_id(id).aria_label(label)
+            .aria_numeric_value(current as f64).aria_min_numeric_value(min as f64).aria_max_numeric_value(max as f64)
+            .aria_numeric_value_step(step as f64).aria_orientation(gpui_kit::Orientation::Horizontal)
+            .track_focus(focus).tab_index(0).key_context("HeraldSlider")
+            .w_full().h_8().px_2().border_2().border_color(cx.theme().transparent).rounded_md()
+            .focus_visible(|style| style.border_color(cx.theme().ring))
+            .on_action(move |_: &keyboard::Increase, window, cx| increase(window, cx))
+            .on_action(move |_: &keyboard::Decrease, window, cx| decrease(window, cx))
+            .on_action(move |_: &keyboard::Minimum, window, cx| minimum.update(cx, |state, cx| {
+                state.set_value(min, window, cx);
+                cx.emit(SliderEvent::Change(state.value()));
+            }))
+            .on_action(move |_: &keyboard::Maximum, window, cx| maximum.update(cx, |state, cx| {
+                state.set_value(max, window, cx);
+                cx.emit(SliderEvent::Change(state.value()));
+            }))
+            .on_a11y_action(gpui_kit::AccessibleAction::Increment, move |_, window, cx| increment_a11y(window, cx))
+            .on_a11y_action(gpui_kit::AccessibleAction::Decrement, move |_, window, cx| decrement_a11y(window, cx))
+            .capture_any_mouse_down(move |_, window, cx| mouse_focus.focus(window, cx))
+            .on_mouse_up(gpui_kit::MouseButton::Left, move |_, _, cx| release.update(cx, |state, cx| state.handle_release(cx)))
+            .child(SliderTrack::new(state).axis(gpui_kit::Axis::Horizontal).w_full().h_6().flex().items_center()
+                .child(SliderIndicator::new(state).relative().w_full().h(px(6.)).rounded_full().bg(cx.theme().muted)
+                    .child(div().absolute().h_full().left_0().w(gpui_kit::relative(percentage)).rounded_full().bg(cx.theme().primary))
+                    .child(SliderThumb::new(state).absolute().top(px(-5.)).left(gpui_kit::relative(percentage)).ml(px(-8.)).size_4().rounded_full().bg(cx.theme().primary))))
     }
 
     fn render_audio(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
         let volume = v_flex()
             .gap_1()
             .child(div().text_sm().child(format!("Volume: {}%", self.draft.settings.volume)))
-            .child(div().id("volume").role(gpui_kit::Role::Group).accessibility_id("volume").aria_label("Announcer volume").w_full().child(Slider::new(&self.volume_slider).horizontal()))
+            .child(self.render_slider("volume", "Announcer volume", &self.volume_slider, &self.volume_focus, cx).reveal("reveal-volume", &self.page_scroll))
             .into_any_element();
         let output = h_flex()
             .w_full()
@@ -1012,13 +1154,13 @@ impl SettingsView {
                 Select::new(&self.output_select)
                     .id("output-device")
                     .accessibility_label("Output device")
-                    .min_w_0().flex_1().when(layout.compact, |select| select.w_full()),
+                    .w_full().reveal("reveal-output", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full()),
             )
             .child(
                 Button::new("refresh-devices")
                     .label("Refresh")
                     .accessibility_id("refresh-devices")
-                    .on_click(cx.listener(|view, _, window, cx| view.refresh_devices(window, cx))),
+                    .on_click(cx.listener(|view, _, window, cx| view.refresh_devices(window, cx))).reveal("reveal-refresh-devices", &self.page_scroll),
             )
             .into_any_element();
         let preview = h_flex()
@@ -1030,19 +1172,31 @@ impl SettingsView {
                 Button::new("preview")
                     .label(if self.preview.is_some() { "Stop example" } else { "Play example" })
                     .accessibility_id("preview")
-                    .on_click(cx.listener(|view, _, _, cx| view.start_audio_preview(cx))),
+                    .on_click(cx.listener(|view, _, _, cx| view.start_audio_preview(cx))).reveal("reveal-preview", &self.page_scroll),
             )
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Previews your selected settings without saving."))
             .into_any_element();
         let silent = v_flex()
             .gap_1()
             .child(div().text_sm().child(format!("Silent sound: {} seconds", self.draft.settings.silent_sound_seconds)))
-            .child(div().id("silent-sound").role(gpui_kit::Role::Group).accessibility_id("silent-sound").aria_label("Silent sound").w_full().child(Slider::new(&self.silent_sound_slider).horizontal()))
+            .child(self.render_slider("silent-sound", "Silent sound", &self.silent_sound_slider, &self.silent_sound_focus, cx).reveal("reveal-silent-sound", &self.page_scroll))
             .into_any_element();
         v_flex().w_full().gap_4().child(volume).child(div().text_sm().child("Output device")).child(output).child(preview).child(silent).into_any_element()
     }
 
-    fn render_quiet_hours(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
+    fn render_time_input(&self, state: &Entity<InputState>, id: &'static str, label: &'static str, enabled: bool, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::Div {
+        div().min_w_0().child(if enabled {
+            keyboard::input(state, id, label, window, cx).into_any_element()
+        } else {
+            div().id(id).role(gpui_kit::Role::TextInput).accessibility_id(id).aria_label(label)
+                .a11y_synthetic_children(|builder| builder.parent_node().set_disabled())
+                .aria_value(state.read(cx).value().clone()).h_8().px_3().py_1().border_1().rounded(cx.theme().radius)
+                .border_color(cx.theme().border).bg(cx.theme().input.opacity(0.5)).text_color(cx.theme().muted_foreground)
+                .child(state.read(cx).value().clone()).into_any_element()
+        })
+    }
+
+    fn render_quiet_hours(&self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let schedule = self.draft.settings.schedule_enabled;
         v_flex()
             .w_full()
@@ -1055,7 +1209,7 @@ impl SettingsView {
                     .on_change(cx.listener(|view, value, _, cx| {
                         view.draft.settings.quiet_mode = *value;
                         cx.notify();
-                    })),
+                    })).reveal("reveal-quiet-mode", &self.page_scroll),
             )
             .child(
                 Checkbox::new("schedule")
@@ -1065,7 +1219,7 @@ impl SettingsView {
                     .on_change(cx.listener(|view, value, _, cx| {
                         view.draft.settings.schedule_enabled = *value;
                         cx.notify();
-                    })),
+                    })).reveal("reveal-schedule", &self.page_scroll),
             )
             .child(
                 h_flex()
@@ -1074,9 +1228,9 @@ impl SettingsView {
                     .items_center()
                     .when(layout.compact, |row| row.flex_col().items_start())
                     .child(div().text_sm().child("From"))
-                    .child(Input::new(&self.quiet_start_input).accessibility_id("quiet-start").disabled(!schedule).w(px(110.)).when(layout.compact, |input| input.w_full()))
+                    .child(self.render_time_input(&self.quiet_start_input, "quiet-start", "From", schedule, window, cx).w(px(110.)).when(layout.compact, |input| input.w_full()).reveal("reveal-quiet-start", &self.page_scroll).when(layout.compact, |field| field.w_full()))
                     .child(div().text_sm().child("To"))
-                    .child(Input::new(&self.quiet_end_input).accessibility_id("quiet-end").disabled(!schedule).w(px(110.)).when(layout.compact, |input| input.w_full()))
+                    .child(self.render_time_input(&self.quiet_end_input, "quiet-end", "To", schedule, window, cx).w(px(110.)).when(layout.compact, |input| input.w_full()).reveal("reveal-quiet-end", &self.page_scroll).when(layout.compact, |field| field.w_full()))
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Use HH:MM. 24:00 is allowed for the end.")),
             )
             .into_any_element()
@@ -1093,18 +1247,18 @@ impl SettingsView {
                     .w_full()
                     .when(layout.compact, |row| row.flex_col())
                     .gap_4()
-                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").w_full()))
-                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").w_full())),
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").w_full().reveal("reveal-model", &self.page_scroll).w_full()))
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").aria_label("Default voice ID").w_full().reveal("reveal-default-voice", &self.page_scroll).w_full())),
             )
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Characters without a custom ElevenLabs voice use this ID."))
-            .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").content_type(InputContentType::Password).mask_toggle().w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
-            .child(Textarea::new(&self.usage_input).readonly(true).h(px(96.)).accessibility_id("voice-usage"))
+            .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").aria_label("ElevenLabs key").content_type(InputContentType::Password).mask_toggle().w_full().reveal("reveal-api-key", &self.page_scroll).w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
+            .child(keyboard::textarea(&self.usage_input, "voice-usage", "Voice usage", 96., true, window, cx).reveal("reveal-voice-usage", &self.page_scroll).w_full())
             .child(
                 h_flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(Button::new("refresh-usage").label("Refresh").accessibility_id("refresh-usage").disabled(matches!(self.voice_usage, VoiceUsageState::Loading { .. })).on_click(cx.listener(|view, _, _, cx| view.refresh_usage(cx))))
-                    .child(Button::new("my-voices").label("Open My Voices").on_click(cx.listener(|view, _, window, cx| view.open_my_voices(window, cx)))),
+                    .child(Button::new("refresh-usage").label("Refresh").accessibility_id("refresh-usage").disabled(matches!(self.voice_usage, VoiceUsageState::Loading { .. })).on_click(cx.listener(|view, _, _, cx| view.refresh_usage(cx))).reveal("reveal-refresh-usage", &self.page_scroll))
+                    .child(Button::new("my-voices").label("Open My Voices").on_click(cx.listener(|view, _, window, cx| view.open_my_voices(window, cx))).reveal("reveal-my-voices", &self.page_scroll)),
             )
             .into_any_element()
     }
@@ -1125,12 +1279,14 @@ impl SettingsView {
         v_flex()
             .w_full()
             .gap_4()
-            .child(div().text_base().child(status))
-            .child(Button::new("install-voice").label(label).accessibility_id("install-voice").disabled(self.offline_installing || installed).on_click(cx.listener(|view, _, _, cx| view.install_offline_voice(cx))))
+            .child(div().id("offline-status").role(gpui_kit::Role::Status).aria_label(status.clone())
+                .a11y_synthetic_children(|builder| builder.parent_node().set_live(gpui_kit::accesskit::Live::Polite))
+                .text_base().child(status))
+            .child(Button::new("install-voice").label(label).accessibility_id("install-voice").disabled(self.offline_installing || installed).on_click(cx.listener(|view, _, _, cx| view.install_offline_voice(cx))).reveal("reveal-install-voice", &self.page_scroll))
             .into_any_element()
     }
 
-    fn render_characters(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
+    fn render_characters(&self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows = self
             .draft
             .characters
@@ -1138,14 +1294,30 @@ impl SettingsView {
             .filter(|(id, _)| !self.draft.removed_characters.contains(*id))
             .map(|(id, character)| (id.clone(), if character.name.trim().is_empty() { "New character".to_owned() } else { character.name.clone() }, self.active_character.as_deref() == Some(id.as_str())))
             .collect::<Vec<_>>();
-        let mut list = v_flex().w_full().gap_1();
+        let mut list = v_flex().id("character-list").role(gpui_kit::Role::ListBox).aria_label("Characters")
+            .track_focus(&self.character_list_focus.clone().tab_stop(!rows.is_empty())).key_context("HeraldCharacters")
+            .border_2().border_color(cx.theme().transparent).focus_visible(|style| style.border_color(cx.theme().ring))
+            .on_action(cx.listener(|view, _: &keyboard::NextItem, window, cx| view.navigate_character(1, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::PreviousItem, window, cx| view.navigate_character(-1, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::FirstItem, window, cx| view.navigate_character(i32::MIN, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::LastItem, window, cx| view.navigate_character(i32::MAX, window, cx)))
+            .w_full().gap_1();
         for (id, name, selected) in rows {
-            let button = Button::new(format!("character-{id}")).label(name).w_full().selected(selected).on_click(cx.listener(move |view, _, window, cx| view.select_character(id.clone(), window, cx)));
-            list = list.child(if selected { button.primary() } else { button.ghost() });
+            let row = div().id(format!("character-{id}")).role(gpui_kit::Role::ListBoxOption).aria_label(name.clone())
+                .aria_selected(selected).when(selected, |row| row.aria_active_descendant().anchor_scroll(Some(self.character_anchor.clone())).bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                .w_full().p_2().rounded_md().cursor_pointer().child(name)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.select_character(id.clone(), window, cx);
+                    view.character_list_focus.focus(window, cx);
+                }));
+            list = list.child(row);
         }
         let list = v_flex().w(px(230.)).when(layout.compact, |list| list.w_full()).flex_shrink_0().min_w_0().gap_2()
-            .child(list.id("character-list").h(px(layout.character_list_height)).overflow_y_scrollbar())
-            .child(Button::new("new-character").label("New").accessibility_id("new-character").secondary().on_click(cx.listener(|view, _, window, cx| view.add_character(window, cx))));
+            .child(div().relative().w_full().h(px(layout.character_list_height)).overflow_hidden()
+                .child(list.size_full().track_scroll(&self.character_scroll).overflow_y_scroll())
+                .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.character_scroll).viewport_from_layout()))
+                .reveal("reveal-character-list", &self.page_scroll).w_full())
+            .child(Button::new("new-character").label("New").accessibility_id("new-character").secondary().on_click(cx.listener(|view, _, window, cx| view.add_character(window, cx))).reveal("reveal-new-character", &self.page_scroll));
         let editor = if self.active_character.is_some() {
             let selected = self
                 .active_character
@@ -1158,26 +1330,26 @@ impl SettingsView {
                 .when(layout.compact, |editor| editor.w_full())
                 .gap_2()
                 .child(div().text_sm().child("Character name"))
-                .child(Input::new(&self.character_name_input).accessibility_id("character-name").w_full())
+                .child(Input::new(&self.character_name_input).accessibility_id("character-name").aria_label("Character name").w_full().reveal("reveal-character-name", &self.page_scroll).w_full())
                 .child(div().text_sm().child("Character video"))
-                .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").readonly(true).min_w_0().flex_1().when(layout.compact, |input| input.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx)))))
+                .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").aria_label("Character video").readonly(true).w_full().reveal("reveal-character-video", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx))).reveal("reveal-browse-video", &self.page_scroll)))
                 .child(div().text_sm().child("ElevenLabs voice ID"))
-                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").w_full())
+                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").aria_label("ElevenLabs voice ID").w_full().reveal("reveal-character-voice", &self.page_scroll).w_full())
                 .child(
                     h_flex()
                         .flex_wrap()
                         .gap_2()
-                        .child(Button::new("character-preview").label(if self.voice_preview.is_some() { "Stop example" } else { "Play voice example" }).accessibility_id("character-preview").on_click(cx.listener(|view, _, _, cx| view.start_voice_preview(cx))))
-                        .child(Button::new("delete-character").label("Delete").accessibility_id("delete-character").danger().on_click(cx.listener(|view, _, window, cx| view.delete_character(window, cx)))),
+                        .child(Button::new("character-preview").label(if self.voice_preview.is_some() { "Stop example" } else { "Play voice example" }).accessibility_id("character-preview").on_click(cx.listener(|view, _, _, cx| view.start_voice_preview(cx))).reveal("reveal-character-preview", &self.page_scroll))
+                        .child(Button::new("delete-character").label("Delete").accessibility_id("delete-character").danger().on_click(cx.listener(|view, _, window, cx| view.delete_character(window, cx))).reveal("reveal-delete-character", &self.page_scroll)),
                 )
                 .child(Checkbox::new("character-selected").label("Selected").accessibility_label("Selected").checked(selected).on_change(cx.listener(|view, value, _, cx| {
                     if let Some(id) = view.active_character.clone() {
                         view.draft.character(&id).selected = *value;
                         cx.notify();
                     }
-                })))
+                })).reveal("reveal-character-selected", &self.page_scroll))
                 .child(div().text_sm().child("Summary prompt (blank uses the default prompt)"))
-                .child(Textarea::new(&self.character_prompt_input).accessibility_id("character-prompt").h(px(180.)).w_full())
+                .child(keyboard::textarea(&self.character_prompt_input, "character-prompt", "Character summary prompt", 180., false, window, cx).reveal("reveal-character-prompt", &self.page_scroll).w_full())
                 .into_any_element()
         } else {
             v_flex().flex_1().min_w_0().child(div().text_base().child("Choose a character or create a new one." )).into_any_element()
@@ -1191,26 +1363,25 @@ impl SettingsView {
                 .w_full()
                 .when(layout.compact, |row| row.flex_col())
                 .gap_2()
-                .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).w_full()))
-                .child(v_flex().gap_1().w(px(130.)).when(layout.compact, |field| field.w_full()).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).w_full()))
+                .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).w_full().reveal(font_id, &self.page_scroll).w_full()))
+                .child(v_flex().gap_1().w(px(130.)).when(layout.compact, |field| field.w_full()).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).w_full().reveal(size_id, &self.page_scroll).w_full()))
         };
-        let _ = window;
         v_flex()
             .w_full()
             .gap_4()
             .child(font_row("Body font", &self.body_font_select, &self.body_size_select, "body-font", "body-size"))
             .child(font_row("Title font", &self.title_font_select, &self.title_size_select, "title-font", "title-size"))
             .child(div().text_sm().child("Summary prompt"))
-            .child(Textarea::new(&self.summary_prompt_input).accessibility_id("summary-prompt").h(px(220.)).w_full())
-            .child(Button::new("reset-defaults").label("Reset defaults").accessibility_id("reset-defaults").secondary().on_click(cx.listener(|view, _, window, cx| view.reset_defaults(window, cx))))
+            .child(keyboard::textarea(&self.summary_prompt_input, "summary-prompt", "Summary prompt", 220., false, window, cx).reveal("reveal-summary-prompt", &self.page_scroll).w_full())
+            .child(Button::new("reset-defaults").label("Reset defaults").accessibility_id("reset-defaults").secondary().on_click(cx.listener(|view, _, window, cx| view.reset_defaults(window, cx))).reveal("reveal-reset-defaults", &self.page_scroll))
             .into_any_element()
     }
 
     fn render_page(&mut self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.active_page {
-            Page::Characters => self.render_characters(layout, cx),
+            Page::Characters => self.render_characters(layout, window, cx),
             Page::Audio => self.render_audio(layout, cx),
-            Page::QuietHours => self.render_quiet_hours(layout, cx),
+            Page::QuietHours => self.render_quiet_hours(layout, window, cx),
             Page::SpeechService => self.render_speech_service(layout, window, cx),
             Page::OfflineVoice => self.render_offline_voice(cx),
             Page::Announcements => self.render_announcements(layout, window, cx),
@@ -1220,7 +1391,11 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_status(window, cx);
+        if self.initial_focus_pending {
+            self.initial_focus_pending = false;
+            let focus = self.navigation_focus[1].clone();
+            window.on_next_frame(move |window, cx| focus.focus(window, cx));
+        }
         let layout = Layout::for_window(window);
         let page = self.active_page.spec();
         let page_content = self.render_page(layout, window, cx);
@@ -1231,7 +1406,10 @@ impl Render for SettingsView {
             .border_t_1()
             .border_color(cx.theme().border)
             .pt_3()
-            .child(Textarea::new(&self.status_input).readonly(true).h(px(if layout.compact { 48. } else { 72. })).min_w_0().flex_1().accessibility_id("status"))
+            .child(div().id("status").role(gpui_kit::Role::Status).accessibility_id("status")
+                .aria_label(format!("Settings status: {}", self.status))
+                .a11y_synthetic_children(|builder| builder.parent_node().set_live(gpui_kit::accesskit::Live::Polite))
+                .min_h(px(if layout.compact { 48. } else { 72. })).min_w_0().flex_1().text_sm().child(self.status.clone()))
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -1245,6 +1423,14 @@ impl Render for SettingsView {
             );
         gpui_kit::div()
             .id("settings-view")
+            .key_context("HeraldSettings")
+            .on_action(cx.listener(|view, _: &keyboard::Apply, _, cx| view.apply(cx)))
+            .on_action(cx.listener(|view, _: &keyboard::NextPage, window, cx| view.step_page(true, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::PreviousPage, window, cx| view.step_page(false, window, cx)))
+            .on_action(cx.listener(|_, _: &keyboard::NextField, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &keyboard::PreviousField, window, cx| window.focus_prev(cx)))
+            .on_action(cx.listener(|view, _: &keyboard::FirstChoice, window, cx| view.choice_boundary(false, window, cx)))
+            .on_action(cx.listener(|view, _: &keyboard::LastChoice, window, cx| view.choice_boundary(true, window, cx)))
             .size_full()
             .flex()
             .when(layout.compact, |root| root.flex_col())
@@ -1260,12 +1446,14 @@ impl Render for SettingsView {
                     .when(layout.compact, |body| body.w_full().p_3())
                     .when(!layout.compact, |body| body.h_full().p_8())
                     .gap_3()
-                    .child(v_flex().id("page-scroll").min_h_0().flex_1().w_full().overflow_y_scrollbar().child(
-                        v_flex().w_full().min_w_0().gap_3().flex_shrink_0()
+                    .child(div().id("page-scroll-wrapper").relative().min_h_0().flex_1().w_full().overflow_hidden()
+                        .child(v_flex().id("page-scroll").size_full().track_scroll(&self.page_scroll).overflow_y_scroll().child(
+                         v_flex().w_full().min_w_0().gap_3().flex_none()
                             .child(div().id("page-title").role(gpui_kit::Role::Heading).accessibility_id("page-title").aria_label(page.label).text_2xl().font_weight(FontWeight::SEMIBOLD).child(page.label))
                             .child(div().text_sm().text_color(cx.theme().muted_foreground).child(page.description))
                             .child(page_content)
-                    ))
+                        ))
+                        .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.page_scroll).viewport_from_layout())))
                     .child(footer),
             )
     }
@@ -1349,6 +1537,7 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
     let launch_error_for_app = launch_error.clone();
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        keyboard::init(cx);
         let options = WindowOptions {
             app_id: Some("herald-settings".into()),
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),

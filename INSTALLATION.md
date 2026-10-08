@@ -18,6 +18,12 @@ Linux builds automatically add **Herald Settings** to the application launcher. 
 
 Settings follows your window manager's tiling policy. Narrow windows use wrapped top navigation and stacked forms. Page content scrolls while Apply and Close remain visible. Do not add a floating rule for `herald-settings` unless you prefer floating settings windows.
 
+### Settings keyboard navigation
+
+Use Tab and Shift+Tab to move through controls. The page navigation is one Tab stop; arrow keys move between pages. Ctrl+Tab and Ctrl+Shift+Tab select the next or previous page. Enter or Space activates a focused button; Space toggles a checkbox. Lists, dropdowns, and sliders use arrow keys and Home/End.
+
+Ctrl+S applies settings without closing the window. Enter in a multiline prompt inserts a newline. Escape dismisses a popup or dialog without closing Settings or discarding its draft. Window management shortcuts remain owned by your desktop, including Omarchy's Super+W and Alt+Tab.
+
 Use `HERALD_DATA`, `HERALD_BINARY` and `HERALD_TTS` for explicit development overrides.
 
 If a cold build exceeds the helper's two-minute limit, run `cargo build --release --locked --manifest-path native-announcer/Cargo.toml` first. Then rerun the helper to copy the executable.

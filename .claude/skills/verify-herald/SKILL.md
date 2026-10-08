@@ -51,6 +51,7 @@ If an instance looks wrong, stop the helper and inspect `instance.json`, `failur
 Use the shipped Win32 helper rather than coordinates. It uses the production controls and their normal Apply, Close, Refresh devices and Play example handlers. Exact recipes and assertions live in the feature map:
 
 - [Settings persistence](features/settings.md)
+- [Keyboard navigation](features/keyboard.md), including the Linux GPUI keyboard helper and separate platform checks
 - [Quiet mode and schedule](features/quiet.md)
 - [Audio output](features/output.md)
 - [Audio preview](features/preview.md)

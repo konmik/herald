@@ -25,7 +25,12 @@ def enable_accessibility(connection, enabled):
 def wait_for(predicate, description):
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        value = predicate()
+        try:
+            value = predicate()
+        except GLib.GError as error:
+            if "Unknown object" not in error.message:
+                raise
+            value = None
         if value:
             return value
         time.sleep(0.1)
@@ -75,7 +80,10 @@ def application(pid):
 
 
 def control(app, name, role):
-    return next((node for node in walk(app) if node.get_name() == name and node.get_role() == role and node.get_state_set().contains(Atspi.StateType.SHOWING) and node.get_state_set().contains(Atspi.StateType.VISIBLE)), None)
+    roles = {role}
+    if role == Atspi.Role.PUSH_BUTTON and name in {"Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements"}:
+        roles.add(Atspi.Role.PAGE_TAB)
+    return next((node for node in walk(app) if node.get_name() == name and node.get_role() in roles and node.get_state_set().contains(Atspi.StateType.SHOWING) and node.get_state_set().contains(Atspi.StateType.VISIBLE)), None)
 
 
 def click(node):
@@ -102,7 +110,7 @@ def dispatch_window(window, operation, arguments):
 def layout_bounds(app, window):
     width, height = window["size"]
     controls = []
-    roles = {Atspi.Role.PUSH_BUTTON, Atspi.Role.ENTRY, Atspi.Role.COMBO_BOX, Atspi.Role.CHECK_BOX, Atspi.Role.SLIDER}
+    roles = {Atspi.Role.PUSH_BUTTON, Atspi.Role.PAGE_TAB, Atspi.Role.ENTRY, Atspi.Role.COMBO_BOX, Atspi.Role.CHECK_BOX, Atspi.Role.SLIDER}
     for node in walk(app):
         if node.get_role() not in roles or not node.get_state_set().contains(Atspi.StateType.VISIBLE):
             continue
@@ -129,6 +137,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--desktop-entry", default=str(Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "applications/herald-settings.desktop"))
     parser.add_argument("--layout", action="store_true")
+    parser.add_argument("--keyboard", action="store_true")
     parser.add_argument("--scroll-helper", help="Wayland pointer helper accepting x, y, screen width, screen height, and wheel steps")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
@@ -209,7 +218,7 @@ def main():
             for index, label in enumerate(pages):
                 page(app, label)
                 if label == "Characters":
-                    click(control(app, "Astronaut", Atspi.Role.PUSH_BUTTON))
+                    click(control(app, "Astronaut", Atspi.Role.LIST_ITEM))
                 if label == "Quiet hours":
                     assert checked(control(app, "Quiet mode", Atspi.Role.CHECK_BOX)), "Live resizing lost an unsaved edit."
                 controls = layout_bounds(app, current)
@@ -225,21 +234,207 @@ def main():
         click(control(app, "Quiet mode", Atspi.Role.CHECK_BOX))
         assert json.loads(settings_path.read_text())["quietMode"] is False, "Resizing saved an unapplied edit."
 
+    def verify_keyboard(app, window):
+        def focused():
+            return next((node for node in walk(app) if node.get_state_set().contains(Atspi.StateType.FOCUSED) and node.get_role() != Atspi.Role.FRAME), None)
+
+        def press(key, *modifiers):
+            active = json.loads(subprocess.check_output(["hyprctl", "-j", "activewindow"]))
+            assert active.get("pid") == window["pid"], "Keyboard verification lost its owned window focus."
+            command = ["wtype"]
+            for modifier in modifiers:
+                command.extend(["-M", modifier])
+            command.extend(["-k", key])
+            for modifier in reversed(modifiers):
+                command.extend(["-m", modifier])
+            subprocess.run(command, check=True)
+            time.sleep(0.1)
+            actions.append({"action": "key", "key": key, "modifiers": modifiers})
+
+        def type_text(text):
+            active = json.loads(subprocess.check_output(["hyprctl", "-j", "activewindow"]))
+            assert active.get("pid") == window["pid"], "Text verification lost its owned window focus."
+            subprocess.run(["wtype", "-d", "20", text], check=True)
+            time.sleep(0.1)
+            actions.append({"action": "type", "text": text})
+
+        def expect_focus(name):
+            def matches():
+                node = focused()
+                return node if node is not None and node.get_name() == name else None
+            return wait_for(matches, f"Keyboard focus did not reach {name}.")
+
+        def tab_to(name):
+            visited = []
+            for _ in range(45):
+                node = focused()
+                if node is not None:
+                    visited.append(node.get_name())
+                    if node.get_name() == name:
+                        return node
+                press("Tab")
+                time.sleep(0.05)
+            raise AssertionError(f"Tab did not reach {name}. Visited {visited}")
+
+        expect_focus("Audio")
+        press("Home")
+        expect_focus("Characters")
+        press("End")
+        expect_focus("Announcements")
+        press("Tab", "ctrl")
+        expect_focus("Characters")
+        press("Tab", "ctrl")
+        expect_focus("Audio")
+        press("Tab", "ctrl")
+        wait_for(lambda: control(app, "Quiet hours", Atspi.Role.HEADING), "Ctrl+Tab did not change pages.")
+        expect_focus("Quiet hours")
+        press("Tab")
+        expect_focus("Quiet mode")
+        press("space")
+        wait_for(lambda: checked(control(app, "Quiet mode", Atspi.Role.CHECK_BOX)), "Space did not toggle the focused checkbox.")
+        assert json.loads(settings_path.read_text())["quietMode"] is False, "The keyboard edit saved before Apply."
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["quietMode"] is True, "Ctrl+S did not Apply settings.")
+        press("Escape")
+        assert any(item["pid"] == window["pid"] for item in clients()), "Escape closed the settings window."
+        press("space")
+        wait_for(lambda: not checked(control(app, "Quiet mode", Atspi.Role.CHECK_BOX)), "The second Space did not toggle quiet mode.")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["quietMode"] is False, "The second Ctrl+S did not Apply.")
+        press("Tab")
+        expect_focus("Daily schedule")
+        press("Tab")
+        expect_focus("Apply")
+        press("Tab", "shift")
+        expect_focus("Daily schedule")
+        press("space")
+        wait_for(lambda: checked(control(app, "Daily schedule", Atspi.Role.CHECK_BOX)), "Space did not enable the schedule fields.")
+        press("Tab")
+        expect_focus("From")
+        before = settings_path.read_bytes()
+        press("a", "ctrl")
+        type_text("bad")
+        press("s", "ctrl")
+        wait_for(lambda: control(app, "Settings status: Use HH:MM for times.", Atspi.Role.STATUS_BAR), "The validation error was not exposed as accessible status text.")
+        assert settings_path.read_bytes() == before, "An invalid keyboard edit changed saved settings."
+        press("a", "ctrl")
+        type_text("22:00")
+        press("Tab", "shift")
+        expect_focus("Daily schedule")
+        press("space")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["scheduleEnabled"] is False, "The repaired schedule draft did not save.")
+        proof["keyboardValidationStatusVerified"] = True
+        proof["keyboardDisabledControlsSkipped"] = True
+        press("Tab", "ctrl", "shift")
+        wait_for(lambda: control(app, "Audio", Atspi.Role.HEADING), "Ctrl+Shift+Tab did not select the previous page.")
+        expect_focus("Audio")
+        press("Right")
+        wait_for(lambda: control(app, "Quiet hours", Atspi.Role.HEADING), "Navigation arrows did not change pages.")
+        press("Tab", "ctrl", "shift")
+        slider = tab_to("Announcer volume")
+        press("Right")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["volume"] == 1, "The focused slider did not respond to Right.")
+        press("End")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["volume"] == 100, "End did not move the slider to its maximum.")
+        press("Home")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["volume"] == 0, "Home did not return the slider to mute.")
+        output = tab_to("Output device")
+        before = settings_path.read_bytes()
+        press("space")
+        wait_for(lambda: any(node.get_role() == Atspi.Role.LIST and node.get_child_count() > 0 for node in walk(app)), "Space did not open the output dropdown.")
+        press("Escape")
+        wait_for(lambda: not any(node.get_role() == Atspi.Role.LIST for node in walk(app)), "Escape did not close the output dropdown.")
+        expect_focus("Output device")
+        assert settings_path.read_bytes() == before, "Popup dismissal changed saved settings."
+        press("space")
+        wait_for(lambda: any(node.get_role() == Atspi.Role.LIST for node in walk(app)), "The dropdown did not reopen.")
+        press("End")
+        wait_for(lambda: (items := [node for node in walk(app) if node.get_role() == Atspi.Role.LIST_ITEM]) and items[-1].get_state_set().contains(Atspi.StateType.SELECTED), "End did not select the last dropdown item.")
+        press("Home")
+        wait_for(lambda: (items := [node for node in walk(app) if node.get_role() == Atspi.Role.LIST_ITEM]) and items[0].get_state_set().contains(Atspi.StateType.SELECTED), "Home did not select the first dropdown item.")
+        press("Return")
+        wait_for(lambda: not any(node.get_role() == Atspi.Role.LIST for node in walk(app)), "Enter did not confirm and close the dropdown.")
+        expect_focus("Output device")
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text()).get("outputDevice") is None, "Home did not select System default.")
+        for name in ["Quiet hours", "Speech service", "Offline voice", "Announcements"]:
+            press("Tab", "ctrl")
+            expect_focus(name)
+        wait_for(lambda: control(app, "Announcements", Atspi.Role.HEADING), "Keyboard page cycling did not reach Announcements.")
+        prompt = tab_to("Summary prompt")
+        before = settings_path.read_bytes()
+        press("a", "ctrl")
+        type_text("Keyboard first line")
+        press("Return")
+        type_text("Keyboard second line")
+        assert settings_path.read_bytes() == before, "Enter in a multiline field applied settings."
+        press("s", "ctrl")
+        wait_for(lambda: json.loads(settings_path.read_text())["summaryPrompt"] == "Keyboard first line\nKeyboard second line", "Multiline keyboard editing did not persist the literal text.")
+        snapshot(app, window, evidence, "keyboard-applied")
+        focused_id = focused().get_accessible_id()
+        dispatch_window(window, "float", '')
+        dispatch_window(window, "resize", 'x = 420, y = 360, relative = false')
+        wait_for(lambda: next((item for item in clients() if item["pid"] == window["pid"] and item["size"] == [420, 360]), None), "Keyboard test window did not resize.")
+        assert expect_focus("Summary prompt").get_accessible_id() == focused_id, "Resizing replaced the focused input."
+        reset_before = bounds(control(app, "Reset defaults", Atspi.Role.PUSH_BUTTON))
+        footer_top = min(bounds(node)["y"] for node in walk(app) if node.get_accessible_id() == "status" or node.get_name() in {"Apply", "Close"})
+        assert reset_before["y"] + reset_before["height"] > footer_top, "The scroll target was already visible before Tab."
+        reset = tab_to("Reset defaults")
+        nav_bottom = max(bounds(control(app, name, Atspi.Role.PUSH_BUTTON))["y"] + bounds(control(app, name, Atspi.Role.PUSH_BUTTON))["height"] for name in pages)
+        wait_for(lambda: nav_bottom <= bounds(reset)["y"] and bounds(reset)["y"] + bounds(reset)["height"] <= footer_top, "Tab did not scroll the focused bottom button into view.")
+        snapshot(app, window, evidence, "keyboard-scrolled")
+        press("Tab", "shift")
+        expect_focus("Summary prompt")
+        dispatch_window(window, "float", '')
+        expect_focus("Summary prompt")
+        press("Tab", "ctrl")
+        expect_focus("Characters")
+        press("Tab")
+        wait_for(lambda: (node := focused()) is not None and node.get_role() in {Atspi.Role.LIST, Atspi.Role.LIST_BOX}, "Tab did not enter the character list.")
+        press("End")
+        wait_for(lambda: (items := [node for node in walk(app) if node.get_role() == Atspi.Role.LIST_ITEM]) and items[-1].get_state_set().contains(Atspi.StateType.SELECTED), "End did not select the last character.")
+        press("Home")
+        wait_for(lambda: any(node.get_name() == "Astronaut" and node.get_state_set().contains(Atspi.StateType.SELECTED) for node in walk(app)), "Home did not select the first character.")
+        tab_to("Delete")
+        press("Return")
+        cancel = wait_for(lambda: control(app, "Cancel", Atspi.Role.PUSH_BUTTON), "Enter did not open the delete confirmation.")
+        dialog_delete = next(node for node in reversed(list(walk(app))) if node.get_name() == "Delete" and node.get_role() == Atspi.Role.PUSH_BUTTON)
+        dialog_controls = [(node.get_name(), bounds(node)) for node in [cancel, dialog_delete]]
+        for _ in range(6):
+            press("Tab")
+            wait_for(lambda: (node := focused()) is not None and (node.get_name(), bounds(node)) in dialog_controls, "Tab escaped the modal dialog.")
+        snapshot(app, window, evidence, "keyboard-dialog")
+        press("Escape")
+        wait_for(lambda: control(app, "Cancel", Atspi.Role.PUSH_BUTTON) is None, "Escape did not dismiss the confirmation.")
+        expect_focus("Delete")
+        assert any(node.get_name() == "Astronaut" for node in walk(app)), "Dismissing the confirmation deleted the character."
+        proof["keyboardDialogFocusVerified"] = True
+        proof["keyboardCharacterListVerified"] = True
+        proof["keyboardResizeFocusPreserved"] = True
+        proof["keyboardScrolledIntoView"] = True
+        proof["keyboardVerified"] = True
+
     try:
         enable_accessibility(connection, True)
         settings_path.write_text(json.dumps({"quietMode": False, "scheduleEnabled": False, "volume": 0}))
-        if args.layout:
+        if args.layout or args.keyboard:
             original_workspace = json.loads(subprocess.check_output(["hyprctl", "-j", "activeworkspace"]))
             subprocess.run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{workspace = "name:herald-layout-{os.getpid()}"}}))'], check=True, capture_output=True)
             peer = subprocess.Popen(["python3", "-c", 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk; window = Gtk.Window(title="Layout verification peer"); window.connect("destroy", Gtk.main_quit); window.show_all(); Gtk.main()'], stdout=log, stderr=log)
             wait_for(lambda: next((item for item in clients() if item["pid"] == peer.pid), None), "The tiling peer did not open.")
         window, app = launch()
+        if args.keyboard:
+            verify_keyboard(app, window)
         if args.layout:
             verify_layout(app, window)
         for index, label in enumerate(pages):
             page(app, label)
             if label == "Characters":
-                click(control(app, "Astronaut", Atspi.Role.PUSH_BUTTON))
+                click(control(app, "Astronaut", Atspi.Role.LIST_ITEM))
                 wait_for(lambda: control(app, "Delete", Atspi.Role.PUSH_BUTTON), "Selecting a character did not open its editor.")
             if label == "Audio":
                 click(control(app, "Play example", Atspi.Role.PUSH_BUTTON))
