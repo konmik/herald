@@ -1,6 +1,6 @@
-# Civilized Agent
+# herald
 
-A desktop companion for OpenCode and Claude. When a task lasting at least one minute finishes, it displays an animated character and speaks a short summary of the result.
+A desktop herald that announces completed AI tasks with animated characters and spoken summaries. Works with OpenCode and Claude. Tasks lasting at least one minute trigger an announcement when they finish.
 
 It waits for background jobs, stays above other windows without taking focus, and works while the current session is open. New messages reset the timer. Speech is muted during meetings and 22:00–08:00.
 

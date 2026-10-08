@@ -1,4 +1,8 @@
-# Windows bundle
+# herald installation
+
+A desktop herald that announces completed AI tasks with animated characters and spoken summaries.
+
+## Windows bundle
 
 PowerShell 7 is required. Build on Windows with Bun, Node and Cargo matching the machine architecture:
 
@@ -18,7 +22,7 @@ Repackaging refreshes the installer and its helpers and generates a new manifest
 
 `npm run test:bundle` runs unit checks with placeholder native files and mocked Claude commands. It does not prove a working native installation. Before deployment, run `npm run test:bundle:installed -- -Archive <release.zip>`. This uses a disposable Claude profile and real host commands, verifies the installed cache and shortcut, removes the extraction folder, boots OpenCode from the installed compiled package, and starts the real native executable. It makes no model requests and leaves the disposable installation available for further runtime checks.
 
-Close any open Civilized Agent settings windows. Extract the ZIP, then run its installer:
+Close any open herald settings windows (currently titled `Civilized Agent settings`). Extract the ZIP, then run its installer:
 
 ```powershell
 pwsh -NoProfile -File .\install.ps1 -WhatIf
