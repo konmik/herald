@@ -1,0 +1,3 @@
+allowBuilds:
+  '@anthropic-ai/claude-code': true
+  msgpackr-extract: true
