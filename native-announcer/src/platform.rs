@@ -226,8 +226,12 @@ pub struct Speech {
 }
 
 impl Speech {
-    pub fn new(preload: bool) -> Self {
-        Self::worker(preload, true)
+    pub fn new(settings: &Settings, minute: u32, meeting: bool) -> Self {
+        Self::worker(Self::should_preload(settings, minute, meeting), true)
+    }
+
+    fn should_preload(settings: &Settings, minute: u32, meeting: bool) -> bool {
+        settings.elevenlabs_api_key.is_none() && settings.volume > 0 && !settings.quiet_at(minute) && !meeting
     }
 
     #[cfg(target_os = "windows")]
@@ -266,7 +270,7 @@ impl Speech {
                 let playback = SpeechPlayback { gate: &gate, ready: &ready };
                 let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback));
                 #[cfg(target_os = "windows")]
-                if !retain_engine { crate::tts::release_engine(); }
+                if !retain_engine || settings.elevenlabs_api_key.is_some() { crate::tts::release_engine(); }
                 #[cfg(not(target_os = "windows"))]
                 let _ = retain_engine;
                 let _ = events.send(SpeechEvent::Finished { id, result });
@@ -735,6 +739,27 @@ fn meeting_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_speech_does_not_preload_the_local_model() {
+        let mut settings = Settings { schedule_enabled: false, ..Settings::default() };
+        assert!(Speech::should_preload(&settings, 720, false));
+        settings.elevenlabs_api_key = Some("test-remote-speech-key".into());
+        assert!(!Speech::should_preload(&settings, 720, false));
+    }
+
+    #[test]
+    fn local_speech_preloading_respects_mute_quiet_hours_and_meetings() {
+        let mut settings = Settings::default();
+        assert!(Speech::should_preload(&settings, 720, false));
+        assert!(!Speech::should_preload(&settings, 720, true));
+        assert!(!Speech::should_preload(&settings, 0, false));
+        settings.quiet_mode = true;
+        assert!(!Speech::should_preload(&settings, 720, false));
+        settings.quiet_mode = false;
+        settings.volume = 0;
+        assert!(!Speech::should_preload(&settings, 720, false));
+    }
 
     #[test]
     fn preview_timeout_allows_selected_silent_sound() {

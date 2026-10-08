@@ -285,10 +285,7 @@ fn run() -> Result<(), String> {
     };
     let mut renderer = Renderer::with_settings(&settings_store.current)?;
     let local = chrono::Local::now();
-    let preload_speech = settings_store.current.volume > 0
-        && !settings_store.current.quiet_at(local.hour() * 60 + local.minute())
-        && !platform::meeting_override(&data);
-    let mut speech = Speech::new(preload_speech);
+    let mut speech = Speech::new(&settings_store.current, local.hour() * 60 + local.minute(), platform::meeting_override(&data));
     let mut signal = Signal::new(&data);
     let meeting = Arc::new(MeetingStatus::new());
     let stop = Arc::new(AtomicBool::new(false));
