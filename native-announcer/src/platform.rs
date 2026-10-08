@@ -516,7 +516,7 @@ impl Preview {
         let playback = std::thread::spawn(move || {
             let signal = Signal::new(&data);
             let mut speech = Speech::new(false);
-            let character = crate::characters::resolve(&settings, &assets, "opencode");
+            let character = crate::characters::resolve(&settings, &assets, "opencode", settings.selected_character.as_deref());
             speech.start("This is an announcement", "settings-preview", &character, &settings);
             let started = std::time::Instant::now();
             loop {
@@ -563,7 +563,7 @@ impl Drop for Preview {
 fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
     if stop.load(Ordering::Relaxed) { return Ok(()); }
     let mut speech = Speech::new(false);
-    let character = crate::characters::resolve(settings, assets, "opencode");
+    let character = crate::characters::resolve(settings, assets, "opencode", settings.selected_character.as_deref());
     speech.start(text, "settings-preview", &character, settings);
     let started = std::time::Instant::now();
     loop {

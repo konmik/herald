@@ -315,10 +315,17 @@ try {
         $promptClass = [Text.StringBuilder]::new(64)
         [CivilizedCharacterTest]::GetClassName((Get-Control 218), $promptClass, $promptClass.Capacity) | Out-Null
         if ($promptClass.ToString() -ne 'Edit') { throw 'The character prompt control is not an editable text box.' }
+        if ((Send-Control 219 0xF0) -ne 0) { throw 'A character without selection preferences should start unchecked.' }
+        Set-Control 216 'first-selection-voice'
+        if ((Send-Control 219 0xF0) -ne 1) { throw 'Entering a voice ID did not select the character.' }
+        Send-Control 219 0xF5 | Out-Null
+        if ((Send-Control 219 0xF0) -ne 0) { throw 'The character could not be unchecked manually.' }
         Set-Control 218 $firstPrompt
         Send-Control 201 0x186 1 | Out-Null
         [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
         Set-Control 218 $secondPrompt
+        Set-Control 216 'second-selection-voice'
+        if ((Send-Control 219 0xF0) -ne 1) { throw 'Entering the second voice ID did not select its character.' }
         Send-Control 201 0x186 0 | Out-Null
         [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
         if ((Read-Control 218) -cne $firstPrompt) { throw 'Switching characters lost the first prompt draft.' }
@@ -326,6 +333,7 @@ try {
         $saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
         $firstId = $saved.selectedCharacter
         if ($saved.characters.$firstId.summaryPrompt -cne $firstPrompt) { throw 'Apply did not save the first character prompt.' }
+        if ($saved.characters.$firstId.selected) { throw 'Apply overrode the first character manual deselection.' }
         Send-Control 201 0x186 1 | Out-Null
         [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
         if ((Read-Control 218) -cne $secondPrompt) { throw 'Switching characters lost the second prompt draft.' }
@@ -333,6 +341,7 @@ try {
         $saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
         $secondId = $saved.selectedCharacter
         if ($firstId -eq $secondId -or $saved.characters.$secondId.summaryPrompt -cne $secondPrompt) { throw 'Apply did not save separate character prompts.' }
+        if (-not $saved.characters.$secondId.selected) { throw 'Apply did not save the second character selection.' }
         Copy-Item $settingsPath (Join-Path $Evidence 'settings-after.json')
         $applied = Get-Content $settingsPath -Raw
         Set-Control 218 'Discard this prompt.'
@@ -342,13 +351,15 @@ try {
         Open-Settings
         Select-CharactersPage
         if ((Read-Control 218) -cne $secondPrompt) { throw 'Reopening did not restore the second character prompt.' }
+        if ((Send-Control 219 0xF0) -ne 1) { throw 'Reopening did not restore the selected checkbox.' }
         Send-Control 201 0x186 0 | Out-Null
         [CivilizedCharacterTest]::SendMessage($process.MainWindowHandle, 0x111, [IntPtr](201 + 65536), (Get-Control 201)) | Out-Null
         if ((Read-Control 218) -cne $firstPrompt) { throw 'Reopening did not restore the first character prompt.' }
+        if ((Send-Control 219 0xF0) -ne 0) { throw 'Reopening did not restore the unchecked checkbox.' }
         Send-Control 108 0xF5 | Out-Null
         if (-not $process.WaitForExit(5000)) { throw 'Reopened character prompt settings did not close.' }
         @{ passed = $true; characterPromptsOnly = $true; firstCharacter = $firstId; secondCharacter = $secondId } | ConvertTo-Json | Set-Content (Join-Path $Evidence 'result.json')
-        Write-Output 'PASS: separate character prompts, draft switching, Apply, discard and reopen.'
+        Write-Output 'PASS: separate prompts, voice ID auto-selection, checkbox persistence, Apply, discard and reopen.'
         return
     }
     if ($VideoPickerOnly) {
@@ -585,7 +596,7 @@ try {
         $inbox = Join-Path $data 'inbox'
         New-Item -ItemType Directory -Path $inbox -Force | Out-Null
         Start-Sleep -Seconds 3
-        $notification = @{ type = 'notify'; id = 'character-runtime'; sessionID = 'character-runtime-session'; completed = 1; text = 'The native voice adviser uses the selected character for this announcement.'; title = 'Custom character verification'; character = 'opencode'; emotion = 'neutral' }
+        $notification = @{ type = 'notify'; id = 'character-runtime'; sessionID = 'character-runtime-session'; completed = 1; text = 'The native voice adviser uses the selected character for this announcement.'; title = 'Custom character verification'; character = 'opencode'; characterID = $characterId; emotion = 'neutral' }
         $notification | ConvertTo-Json | Set-Content (Join-Path $Evidence 'notification.json') -Encoding utf8NoBOM
         $notification | ConvertTo-Json | Set-Content (Join-Path $inbox 'notify.tmp') -Encoding utf8NoBOM
         Move-Item (Join-Path $inbox 'notify.tmp') (Join-Path $inbox 'notify.json')

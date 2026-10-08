@@ -171,13 +171,13 @@ test("sends the saved prompt unchanged and rereads it", async () => {
   const secondPrompt = "Describe the result in one sentence."
   try {
     process.env.CIVILIZED_AGENT_DATA = data
-    writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", selectedCharacter: "herald", characters: { herald: { summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
+    writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", characters: { herald: { selected: true, summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
     const f = await fixture()
     try {
       await f.start()
       await f.finish()
       expect(generatedPrompts).toEqual([firstPrompt])
-      writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", selectedCharacter: "robot", characters: { herald: { summaryPrompt: firstPrompt }, robot: { summaryPrompt: secondPrompt } } }))
+      writeFileSync(join(data, "settings.json"), JSON.stringify({ summaryPrompt: "Global fallback.", characters: { herald: { summaryPrompt: firstPrompt }, robot: { selected: true, summaryPrompt: secondPrompt } } }))
       await f.start()
       await f.fail(80_000)
       expect(generatedPrompts).toEqual([
@@ -185,6 +185,7 @@ test("sends the saved prompt unchanged and rereads it", async () => {
         secondPrompt,
       ])
       expect(generated).toEqual(["root", "root"])
+      expect(commands.filter(command => command.type === "notify").map(command => command.characterID)).toEqual(["herald", "robot"])
     } finally { await f.cleanup() }
   } finally {
     if (previousData === undefined) delete process.env.CIVILIZED_AGENT_DATA

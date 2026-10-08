@@ -37,11 +37,11 @@ async function bridge($: EngineInterface, command: object) {
   return result
 }
 
-async function summaryPrompt($: EngineInterface) {
-  const result = await bridge($, { type: 'read-summary-prompt' })
-  const prompt = JSON.parse(result.stdout)
-  if (typeof prompt !== 'string') throw new Error('Civilized Agent bridge returned an invalid summary prompt')
-  return prompt
+async function announcementProfile($: EngineInterface) {
+  const result = await bridge($, { type: 'read-announcement-profile' })
+  const profile = JSON.parse(result.stdout) as { prompt: string; characterID?: string }
+  if (typeof profile.prompt !== 'string') throw new Error('Civilized Agent bridge returned an invalid summary prompt')
+  return profile
 }
 
 async function keyFor($: EngineInterface, agentId?: string) {
@@ -74,13 +74,13 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
     pending.delete(key)
     return
   }
-  const prompt = await summaryPrompt($)
+  const profile = await announcementProfile($)
   if (pending.get(key) !== token) return
   if (background.get(key)) {
     pending.delete(key)
     return
   }
-  const reply = await $.model.fork({ prompt })
+  const reply = await $.model.fork({ prompt: profile.prompt })
   if (pending.get(key) !== token) return
   pending.delete(key)
   started.delete(key)
@@ -90,7 +90,7 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
   }
   const text = reply.text.replace(/\s+/g, ' ').trim()
   if (!text || (viewed.get(key) ?? -1) >= at) return
-  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', emotion: 'neutral' })
+  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', characterID: profile.characterID, emotion: 'neutral' })
 }
 
 export const register: Register = (on) => {

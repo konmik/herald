@@ -7,13 +7,13 @@ const test = (name: string, body: TestBody) => engineTest(name, async ($, on) =>
 
 const usage = { model: 'claude-opus-5', input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const processResult = { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-type BridgeCommand = { type: string; sessionID?: string; text?: string; sessionIDs?: string[]; title?: string }
+type BridgeCommand = { type: string; sessionID?: string; text?: string; sessionIDs?: string[]; title?: string; characterID?: string }
 const bridgeCommand = (stdin = '') => JSON.parse(stdin || '{}') as BridgeCommand
 const defaultPrompt = 'Report the outcome of the task you just finished in one explicit, concise spoken sentence. State what was done and any important failure or remaining blocker. Use plain English, no Markdown. Do not run tools. Output only that sentence.'
-const runResult = (stdin?: string, prompt = defaultPrompt) => {
+const runResult = (stdin?: string, prompt = defaultPrompt, characterID = 'herald') => {
   const command = bridgeCommand(stdin)
-  return command.type === 'read-summary-prompt'
-    ? { ...processResult, stdout: JSON.stringify(prompt) }
+  return command.type === 'read-announcement-profile'
+    ? { ...processResult, stdout: JSON.stringify({ prompt, characterID }) }
     : processResult
 }
 
@@ -45,7 +45,7 @@ test('long main tasks fork the current conversation once', async ($, on) => {
   })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-summary-prompt') commands.push(command)
+    if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
   const event = { turnId: 'long', answer: 'All tests passed.', durationMs: 60000, isAborted: false, reason: 'answer' as const, usage }
@@ -54,7 +54,7 @@ test('long main tasks fork the current conversation once', async ($, on) => {
   await $.turn.complete(event)
   await clock.settle()
   expect(forks).toBe(1)
-  expect(commands).toMatchObject([{ type: 'notify', sessionID: 'claude:main', text: 'The tests passed.' }])
+  expect(commands).toMatchObject([{ type: 'notify', sessionID: 'claude:main', text: 'The tests passed.', characterID: 'herald' }])
 })
 
 test('custom Claude prompts are sent unchanged and reread without task data', async ($, on) => {
@@ -62,6 +62,7 @@ test('custom Claude prompts are sent unchanged and reread without task data', as
   const prompts: string[] = []
   const commands: BridgeCommand[] = []
   let savedPrompt = 'Línea Ω 😀\nReport the outcome clearly and briefly.'
+  let savedCharacter = 'herald'
   on('session.id', () => ({ value: 'custom-prompt' }))
   on('turn.complete', () => ({ text: '' }))
   on('model.fork', (_, e) => {
@@ -70,13 +71,14 @@ test('custom Claude prompts are sent unchanged and reread without task data', as
   })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type === 'read-summary-prompt') expect(command).toEqual({ type: 'read-summary-prompt' })
+    if (command.type === 'read-announcement-profile') expect(command).toEqual({ type: 'read-announcement-profile' })
     if (command.type === 'notify') commands.push(command)
-    return { value: runResult(e.init?.stdin, savedPrompt) }
+    return { value: runResult(e.init?.stdin, savedPrompt, savedCharacter) }
   })
   await $.turn.complete({ turnId: 'custom-complete', answer: 'The task finished.', durationMs: 70000, isAborted: false, reason: 'answer', usage })
   await clock.settle()
   savedPrompt = 'Describe the result in one sentence.'
+  savedCharacter = 'robot'
   await $.turn.complete({ turnId: 'custom-failed', answer: '结果 😀', durationMs: 70000, isAborted: false, reason: 'error', usage })
   await clock.settle()
   expect(prompts).toEqual([
@@ -84,6 +86,7 @@ test('custom Claude prompts are sent unchanged and reread without task data', as
     'Describe the result in one sentence.',
   ])
   expect(commands).toHaveLength(2)
+  expect(commands.map(command => command.characterID)).toEqual(['herald', 'robot'])
 })
 
 test('short tasks and interrupted tasks make no summary request', async ($, on) => {
@@ -119,7 +122,7 @@ test('subagents stay silent until the main task finishes', async ($, on) => {
   })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-summary-prompt') commands.push(command)
+    if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
   const event = { turnId: 'review', agentId: 'child', answer: 'Reviewed the implementation.', durationMs: 70000, isAborted: false, reason: 'answer' as const }
@@ -152,7 +155,7 @@ test('a new user turn cancels a queued summary', async ($, on) => {
   })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-summary-prompt') commands.push(command)
+    if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
   await $.turn.complete({ turnId: 'old', answer: 'Done.', durationMs: 70000, isAborted: false, reason: 'answer', usage })
@@ -176,7 +179,7 @@ test('a new turn during prompt loading cancels the old fork and allows the next 
   })
   on('process.run', async (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type === 'read-summary-prompt' && cancelRead) {
+    if (command.type === 'read-announcement-profile' && cancelRead) {
       cancelRead = false
       await $.turn.start({ turnId: 'new-race', text: 'Continue.' })
     }
@@ -249,7 +252,7 @@ test('session presence is renewed and removed on exit', async ($, on) => {
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-summary-prompt') commands.push(command)
+    if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
   await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
@@ -273,7 +276,7 @@ test('clearing a conversation renews presence for the replacement session', asyn
   on('agent.list', () => ({ value: [] }))
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-summary-prompt') commands.push(command)
+    if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
   await $.classic.SessionStart({ source: 'startup' })
@@ -295,7 +298,7 @@ test('a new user turn cancels pending child summaries', async ($, on) => {
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('agent.list', () => ({ value: [{ id: 'child', description: 'Review', type: 'general-purpose', status: 'completed' }] }))
   on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'Old result.', usage } } })
-  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-summary-prompt') commands.push(command); return { value: runResult(e.init?.stdin) } })
+  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-announcement-profile') commands.push(command); return { value: runResult(e.init?.stdin) } })
   await $.turn.complete({ turnId: 'old-child', agentId: 'child', answer: 'Done.', durationMs: 70000, isAborted: false, reason: 'answer' })
   await $.turn.start({ turnId: 'new-user', text: 'Continue.' })
   await clock.settle()
@@ -313,7 +316,7 @@ test('background shell work defers announcement and counts the whole task', asyn
   on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: [] }))
   on('model.fork', () => ({ value: { isAnswered: true, text: 'The background work finished.', usage } }))
-  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-summary-prompt') commands.push(command); return { value: runResult(e.init?.stdin) } })
+  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-announcement-profile') commands.push(command); return { value: runResult(e.init?.stdin) } })
   await $.turn.start({ turnId: 'launch', text: 'Run it.' })
   await clock.advance(70000)
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'shell', type: 'shell', status: 'running', description: 'Build' }] })
@@ -337,7 +340,7 @@ test('the main task waits for every background agent and the final reply', async
   on('turn.complete', () => ({ text: '' }))
   on('classic.Stop', () => ({}))
   on('model.fork', () => ({ value: { isAnswered: true, text: 'Both reviews passed.', usage } }))
-  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-summary-prompt') commands.push(command); return { value: runResult(e.init?.stdin) } })
+  on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-announcement-profile') commands.push(command); return { value: runResult(e.init?.stdin) } })
   await $.turn.start({ turnId: 'launch', text: 'Run both reviews.' })
   await clock.advance(70000)
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [

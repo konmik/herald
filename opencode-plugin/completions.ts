@@ -3,6 +3,7 @@ export type Completion = {
   sessionID: string
   completed: number
   text: string
+  characterID?: string
   emotion: "neutral"
 }
 
@@ -11,7 +12,7 @@ export class Completions {
   private pending = new Map<string, object>()
 
   constructor(
-    private onSummarize: (sessionID: string, failed: boolean) => Promise<string>,
+    private onSummarize: (sessionID: string, failed: boolean) => Promise<Pick<Completion, "text" | "characterID">>,
     private onPublish: (completion: Completion) => Promise<void>,
     private onCheckReady: (sessionID: string, failed: boolean) => Promise<boolean>,
     private minimumDuration = 60_000,
@@ -68,10 +69,11 @@ export class Completions {
         this.onReport(sessionID, "below-minimum-duration")
         return
       }
-      const text = (await this.onSummarize(sessionID, failed)).replace(/\s+/g, " ").trim()
+      const summary = await this.onSummarize(sessionID, failed)
+      const text = summary.text.replace(/\s+/g, " ").trim()
       if (!text || this.pending.get(sessionID) !== run.token) return
       if (!(await this.onCheckReady(sessionID, failed)) || this.pending.get(sessionID) !== run.token) return
-      await this.onPublish({ id, sessionID, completed, text, emotion: "neutral" })
+      await this.onPublish({ id, sessionID, completed, text, characterID: summary.characterID, emotion: "neutral" })
       consumed = true
       this.onReport(sessionID, "announcement-sent")
     } finally {

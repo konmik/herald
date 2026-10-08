@@ -42,6 +42,7 @@ impl CharacterVoice {
 #[serde(default, rename_all = "camelCase")]
 pub struct Character {
     pub name: String,
+    pub selected: bool,
     pub animation_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub summary_prompt: String,
@@ -53,6 +54,7 @@ impl Default for Character {
     fn default() -> Self {
         Self {
             name: String::new(),
+            selected: false,
             animation_path: None,
             summary_prompt: String::new(),
             voice: CharacterVoice::default(),
@@ -93,10 +95,18 @@ impl ResolvedCharacter {
     }
 }
 
-pub fn resolve(settings: &Settings, assets: &Path, source_character: &str) -> ResolvedCharacter {
+pub fn resolve(settings: &Settings, assets: &Path, source_character: &str, character_id: Option<&str>) -> ResolvedCharacter {
     let local_speaker = settings.voices.get(source_character).cloned();
     let default_video = crate::video::select_path(assets, source_character);
-    if let Some(id) = settings.selected_character.as_deref() {
+    let character_id = character_id.or_else(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let selected = settings.characters.values().any(|character| character.selected);
+        let candidates: Vec<_> = settings.characters.iter().filter(|(_, character)| !selected || character.selected).collect();
+        if candidates.is_empty() { return None; }
+        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        Some(candidates[random as usize % candidates.len()].0.as_str())
+    });
+    if let Some(id) = character_id {
         if let Some(character) = settings.characters.get(id) {
             let resolved_animation = character.animation_path.as_ref().map(|path| animation_path(id, path, assets));
             let (video_path, video_warning) = match resolved_animation.as_ref() {
@@ -209,6 +219,7 @@ mod tests {
     fn character(voice: CharacterVoice) -> Character {
         Character {
             name: "Royal herald".into(),
+            selected: false,
             animation_path: Some(PathBuf::from("herald.mp4")),
             summary_prompt: String::new(),
             voice,
@@ -216,14 +227,41 @@ mod tests {
     }
 
     #[test]
+    fn random_choices_use_selected_characters_or_the_entire_registry() {
+        let mut settings = Settings::default();
+        settings.characters = BTreeMap::from([
+            ("herald".into(), character(CharacterVoice::default())),
+            ("robot".into(), character(CharacterVoice::ElevenLabs { voice_id: "robot-voice".into() })),
+        ]);
+        settings.selected_character = Some("herald".into());
+        for _ in 0..50 {
+            let resolved = resolve(&settings, Path::new("missing-assets"), "opencode", None);
+            assert!(matches!(resolved.id.as_deref(), Some("herald" | "robot")));
+            assert_eq!(resolved.voice, match &settings.characters[resolved.id.as_ref().unwrap()].voice {
+                CharacterVoice::Local { speaker } => ResolvedVoice::Local { speaker: speaker.clone() },
+                CharacterVoice::ElevenLabs { voice_id } => ResolvedVoice::ElevenLabs { voice_id: voice_id.clone() },
+            });
+        }
+        settings.characters.get_mut("robot").unwrap().selected = true;
+        for _ in 0..50 {
+            assert_eq!(resolve(&settings, Path::new("missing-assets"), "opencode", None).id.as_deref(), Some("robot"));
+        }
+        assert_eq!(resolve(&settings, Path::new("missing-assets"), "opencode", Some("herald")).id.as_deref(), Some("herald"));
+        settings.characters.clear();
+        assert!(resolve(&settings, Path::new("missing-assets"), "opencode", None).id.is_none());
+    }
+
+    #[test]
     fn character_prompts_preserve_multiline_text_and_validate_length() {
         let mut characters = BTreeMap::new();
         let mut herald = character(CharacterVoice::default());
         herald.summary_prompt = "Speak as a royal herald.\nReport the outcome briefly.".into();
+        herald.selected = true;
         characters.insert("herald".into(), herald);
         validate_registry(&characters, None).unwrap();
         let restored: BTreeMap<String, Character> = serde_json::from_slice(&serde_json::to_vec(&characters).unwrap()).unwrap();
         assert_eq!(restored["herald"].summary_prompt, "Speak as a royal herald.\nReport the outcome briefly.");
+        assert!(restored["herald"].selected);
         characters.get_mut("herald").unwrap().summary_prompt = "😀".repeat(16_384);
         validate_registry(&characters, None).unwrap();
         characters.get_mut("herald").unwrap().summary_prompt.push('x');
@@ -250,7 +288,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.characters.insert("royal-herald".into(), character(CharacterVoice::ElevenLabs { voice_id: "saved-voice".into() }));
         settings.selected_character = Some("royal-herald".into());
-        let resolved = resolve(&settings, Path::new("missing-assets"), "opencode");
+        let resolved = resolve(&settings, Path::new("missing-assets"), "opencode", Some("royal-herald"));
         assert_eq!(resolved.voice, ResolvedVoice::ElevenLabs { voice_id: "saved-voice".into() });
         assert!(resolved.video_warning.is_some());
         assert_eq!(resolved.video_path, Path::new("missing-assets/opencode/neutral.mp4"));
@@ -264,9 +302,8 @@ mod tests {
         ] {
             let profile: Character = serde_json::from_value(input).unwrap();
             assert_eq!(profile.voice, CharacterVoice::Local { speaker: None });
-            assert_eq!(serde_json::to_value(profile).unwrap(), serde_json::json!({
-                "name": "Local herald", "animationPath": null
-            }));
+            assert!(!profile.selected);
+            assert!(serde_json::to_value(profile).unwrap().get("voice").is_none());
         }
         let profile = character(CharacterVoice::Local { speaker: Some("Luna".into()) });
         assert_eq!(serde_json::to_value(profile).unwrap()["voice"], serde_json::json!({"type": "local", "speaker": "Luna"}));
@@ -281,7 +318,7 @@ mod tests {
         std::fs::write(&video, []).unwrap();
         let mut settings = Settings::default();
         settings.selected_character = Some("hatted-herald-01".into());
-        let resolved = resolve(&settings, &directory, "opencode");
+        let resolved = resolve(&settings, &directory, "opencode", Some("hatted-herald-01"));
         assert_eq!(resolved.video_path, video);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -296,7 +333,7 @@ mod tests {
         settings.characters.insert("custom".into(), character(CharacterVoice::default()));
         settings.characters.get_mut("custom").unwrap().animation_path = Some(video.clone());
         settings.selected_character = Some("custom".into());
-        let resolved = resolve(&settings, Path::new("relocated-assets"), "opencode");
+        let resolved = resolve(&settings, Path::new("relocated-assets"), "opencode", Some("custom"));
         assert_eq!(resolved.video_path, video);
         std::fs::remove_dir_all(directory).unwrap();
     }

@@ -6,7 +6,7 @@ import { Completions } from "./completions"
 import { send } from "./bridge"
 import { consumeEvents } from "./events"
 import { canAnnounceFromLocalServer } from "./state-client"
-import { readSummaryPrompt } from "../claude-plugin/scripts/summary-prompt.mjs"
+import { readAnnouncementProfile } from "../claude-plugin/scripts/summary-prompt.mjs"
 
 export default Plugin.define({
   id: "civilized-agent",
@@ -25,11 +25,12 @@ export default Plugin.define({
     }
     const completions = new Completions(
       async (sessionID) => {
+        const profile = readAnnouncementProfile()
         const result = await ctx.session.generate({
           sessionID,
-          prompt: readSummaryPrompt(),
+          prompt: profile.prompt,
         })
-        return result.text
+        return { text: result.text, characterID: profile.characterID }
       },
       async (completion) => {
         const session = await ctx.session.get({ sessionID: completion.sessionID })

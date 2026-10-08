@@ -17,6 +17,8 @@ pub struct Notification {
     pub title: String,
     #[serde(default)]
     pub character: String,
+    #[serde(default, rename = "characterID", skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
     #[serde(default = "neutral")]
     pub emotion: String,
 }
@@ -450,12 +452,13 @@ mod tests {
 
     #[test]
     fn bridge_notification_deserializes() {
-        let command: Command = serde_json::from_str(r#"{"type":"notify","id":"1","sessionID":"claude:1","completed":10,"text":"Done.","title":"My task"}"#).unwrap();
+        let command: Command = serde_json::from_str(r#"{"type":"notify","id":"1","sessionID":"claude:1","completed":10,"text":"Done.","title":"My task","characterID":"herald"}"#).unwrap();
         let Command::Notify(n) = command else {
             panic!()
         };
         assert_eq!(n.title, "My task");
         assert_eq!(n.character(), "claude");
+        assert_eq!(n.character_id.as_deref(), Some("herald"));
     }
 
     fn test_directory() -> PathBuf {

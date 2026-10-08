@@ -4,11 +4,11 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { boot, dataDirectory } from './runtime.mjs'
 import { sessionTitle } from './session-title.mjs'
-import { readSummaryPrompt } from './summary-prompt.mjs'
+import { readAnnouncementProfile } from './summary-prompt.mjs'
 
 const command = JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''))
-if (command.type === 'read-summary-prompt') {
-  process.stdout.write(JSON.stringify(readSummaryPrompt()))
+if (command.type === 'read-announcement-profile') {
+  process.stdout.write(JSON.stringify(readAnnouncementProfile()))
 } else if (command.type === 'boot') {
   boot()
 } else {

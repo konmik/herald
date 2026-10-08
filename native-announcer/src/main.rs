@@ -195,7 +195,7 @@ fn run() -> Result<(), String> {
     let mut inbox = Inbox::new(data.clone());
     let demo_mode = demo.is_some();
     if let Some(character) = demo {
-        inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, emotion: "neutral".into() });
+        inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Civilized Agent verification".into(), character, character_id: None, emotion: "neutral".into() });
     }
     let before = platform::foreground();
     let event_loop = EventLoop::new();
@@ -359,7 +359,7 @@ fn run() -> Result<(), String> {
                             let position = monitor.position();
                             window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
                         }
-                        let mut character = characters::resolve(settings, &assets, notification.character());
+                        let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
                         let mut path = character.video_path.clone();
                         let video = match video::Video::open(&path) {
@@ -522,9 +522,10 @@ mod tests {
                 text: "Done.".into(),
                 title: "Test".into(),
                 character: "opencode".into(),
+                character_id: None,
                 emotion: "neutral".into(),
             },
-            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode"),
+            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode", None),
             started,
             expires: started + Duration::from_secs(10),
             end: None,
@@ -554,12 +555,13 @@ mod tests {
             text: "Done.".into(),
             title: "Test".into(),
             character: "opencode".into(),
+            character_id: None,
             emotion: "neutral".into(),
         };
         let requested = Instant::now();
         let mut presentation = Presentation::Preparing(Pending {
             notification,
-            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode"),
+            character: characters::resolve(&settings::Settings::default(), &PathBuf::new(), "opencode", None),
             requested,
             duration: Duration::from_secs(10),
             video: None,

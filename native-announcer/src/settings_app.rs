@@ -81,6 +81,7 @@ mod native {
     const SUMMARY_PROMPT_LABEL: i32 = 334;
     const SUMMARY_PROMPT_HINT: i32 = 335;
     const CHARACTER_PROMPT: i32 = 218;
+    const CHARACTER_SELECTED: i32 = 219;
     const CHARACTER_PROMPT_LABEL: i32 = 336;
     const SHOW_ON_DESKTOP: usize = 0x43415354;
     const VOICE_EXAMPLE: &str = "I bring news for your attention. Listen as I deliver this announcement. Your work is ready, and every check has passed.";
@@ -122,6 +123,7 @@ mod native {
         REMOVE_CHARACTER,
         CHARACTER_PROMPT,
         CHARACTER_PROMPT_LABEL,
+        CHARACTER_SELECTED,
     ];
     const AUDIO_PAGE_CONTROLS: &[i32] = &[
         VOLUME_LABEL,
@@ -174,7 +176,7 @@ mod native {
         PageSpec {
             page: Page::Characters,
             label: "Characters",
-            hint: "Edit animation and voice details, or create a new character.",
+            hint: "Random choice uses selected characters, or all characters when none are selected.",
             controls: CHARACTER_PAGE_CONTROLS,
         },
         PageSpec {
@@ -394,6 +396,9 @@ mod native {
     fn capture_draft_voice(draft: &mut Character, entered_id: &str) {
         let voice_id = entered_id.trim();
         if !voice_id.is_empty() {
+            if !matches!(&draft.voice, CharacterVoice::ElevenLabs { voice_id: current } if current == voice_id) {
+                draft.selected = true;
+            }
             draft.voice = CharacterVoice::ElevenLabs { voice_id: voice_id.to_owned() };
         } else if matches!(draft.voice, CharacterVoice::ElevenLabs { .. }) {
             draft.voice = CharacterVoice::default();
@@ -424,6 +429,19 @@ mod native {
             let installed_assets = Path::new("C:\\Library\\bin\\../resources");
             assert_eq!(video_picker_path("Choose video…", installed_assets), assets.join("videos"));
             assert_eq!(video_picker_path("C:\\Library\\bin\\../resources\\videos/herald.mp4", installed_assets), assets.join("videos/herald.mp4"));
+        }
+
+        #[test]
+        fn entering_a_voice_id_selects_the_character_without_overriding_manual_deselection() {
+            let mut draft = empty_draft();
+            assert!(!draft.selected);
+            capture_draft_voice(&mut draft, "own-voice");
+            assert!(draft.selected);
+            draft.selected = false;
+            capture_draft_voice(&mut draft, "own-voice");
+            assert!(!draft.selected);
+            capture_draft_voice(&mut draft, "replacement-voice");
+            assert!(draft.selected);
         }
 
         #[test]
@@ -472,11 +490,14 @@ mod native {
         let entered_id = text(window, VOICE_ID);
         let video = text(window, VIDEO_PATH);
         let prompt = text(window, CHARACTER_PROMPT).replace("\r\n", "\n");
+        let selected = checked(window, CHARACTER_SELECTED);
         let assets = form.assets.clone();
         let draft = draft_for(form, &id);
         draft.name = name;
         draft.summary_prompt = prompt;
+        draft.selected = selected;
         capture_draft_voice(draft, &entered_id);
+        set_checked(window, CHARACTER_SELECTED, draft.selected);
         let video = PathBuf::from(video);
         draft.animation_path = if video.as_os_str().is_empty() || video == PathBuf::from("Choose video…") {
             None
@@ -504,7 +525,7 @@ mod native {
             for id in page.controls { ShowWindow(GetDlgItem(window, *id), visibility); }
         }
         let show_editor = form.active_page == Page::Characters && form.active_draft.is_some();
-        for id in [NAME_LABEL, CHARACTER_NAME, VOICE_ID_LABEL, VOICE_ID, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER, CHARACTER_PROMPT, CHARACTER_PROMPT_LABEL] {
+        for id in [NAME_LABEL, CHARACTER_NAME, VOICE_ID_LABEL, VOICE_ID, VIDEO_LABEL, VIDEO_PATH, PLAY_VOICE, REMOVE_CHARACTER, CHARACTER_PROMPT, CHARACTER_PROMPT_LABEL, CHARACTER_SELECTED] {
             ShowWindow(GetDlgItem(window, id), if show_editor { SW_SHOW } else { SW_HIDE });
         }
         ShowWindow(GetDlgItem(window, CHARACTER_EMPTY), if form.active_page == Page::Characters && !show_editor { SW_SHOW } else { SW_HIDE });
@@ -516,6 +537,7 @@ mod native {
             let assets = form.assets.clone();
             let draft = draft_for(form, &id);
             label(window, CHARACTER_NAME, &draft.name);
+            set_checked(window, CHARACTER_SELECTED, draft.selected);
             label(window, CHARACTER_PROMPT, &draft.summary_prompt.replace("\r\n", "\n").replace('\n', "\r\n"));
             label(window, VOICE_ID, voice_id_text(&draft.voice));
             label(window, VIDEO_PATH, &draft.animation_path.as_ref().map_or_else(|| "Choose video…".into(), |path| crate::characters::animation_path(&id, path, &assets).to_string_lossy().into_owned()));
@@ -973,7 +995,8 @@ mod native {
         move_control(CHARACTER_LIST, main_left, character_list_y, 220, character_list_height);
         move_control(NEW_CHARACTER, main_left, character_list_y + character_list_height + 12, 220, 34);
         move_control(CHARACTER_EMPTY, character_editor_x, character_list_y + 26, character_editor_width, 110);
-        move_control(NAME_LABEL, character_editor_x, character_list_y, character_editor_width, 24);
+        move_control(NAME_LABEL, character_editor_x, character_list_y, character_editor_width - 116, 24);
+        move_control(CHARACTER_SELECTED, main_right - 104, character_list_y, 104, 24);
         move_control(CHARACTER_NAME, character_editor_x, character_list_y + 28, character_editor_width, 34);
         move_control(VIDEO_LABEL, character_editor_x, character_list_y + 78, character_editor_width, 24);
         move_control(VIDEO_PATH, character_editor_x, character_list_y + 106, character_editor_width, 36);
@@ -1219,6 +1242,7 @@ mod native {
                             label(window, STATUS, "Character marked for removal. Apply saves it; cloud voices are unchanged.");
                         }
                     }
+                    CHARACTER_SELECTED => capture_current_draft(window, &mut *form),
                     CHARACTER_NAME | VOICE_ID if code == EN_CHANGE => capture_current_draft(window, &mut *form),
                     _ => {}
                 }
@@ -1415,6 +1439,7 @@ mod native {
                 control(window, "STATIC", "Video", VIDEO_LABEL, 0, (502, 204, 426, 24))?;
                 control(window, "BUTTON", "Choose video…", VIDEO_PATH, WS_TABSTOP | BS_LEFT as u32, (502, 232, 426, 36))?;
                 control(window, "STATIC", "Summary prompt (blank uses default)", CHARACTER_PROMPT_LABEL, 0, (502, 408, 426, 24))?;
+                control(window, "BUTTON", "Selected", CHARACTER_SELECTED, WS_TABSTOP | BS_AUTOCHECKBOX as u32, (824, 126, 104, 24))?;
                 control(window, "EDIT", "", CHARACTER_PROMPT, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32, (502, 436, 426, 120))?;
                 SendMessageW(GetDlgItem(window, CHARACTER_PROMPT), EM_SETLIMITTEXT, 32_768, 0);
                 control(window, "STATIC", "ElevenLabs voice ID", VOICE_ID_LABEL, 0, (502, 284, 426, 24))?;

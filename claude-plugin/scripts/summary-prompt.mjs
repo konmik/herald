@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { randomInt } from 'node:crypto'
 
 export const DEFAULT_SUMMARY_PROMPT = 'Report the outcome of the task you just finished in one explicit, concise spoken sentence. State what was done and any important failure or remaining blocker. Use plain English, no Markdown. Do not run tools. Output only that sentence.'
 export const SUMMARY_PROMPT_MAX_LENGTH = 16384
@@ -19,15 +20,19 @@ export function isValidSummaryPrompt(value) {
     && !value.includes('\0')
 }
 
-export function readSummaryPrompt(directory = dataDirectory()) {
+export function readAnnouncementProfile(directory = dataDirectory()) {
   try {
     const settings = JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
-    const characterPrompt = typeof settings?.selectedCharacter === 'string'
-      ? settings.characters?.[settings.selectedCharacter]?.summaryPrompt
-      : undefined
-    if (isValidSummaryPrompt(characterPrompt)) return characterPrompt
-    return isValidSummaryPrompt(settings?.summaryPrompt) ? settings.summaryPrompt : DEFAULT_SUMMARY_PROMPT
+    const characters = Object.entries(settings.characters ?? {})
+    const selected = characters.filter(([, character]) => character?.selected === true)
+    const candidates = selected.length ? selected : characters
+    const character = candidates.length ? candidates[randomInt(candidates.length)] : undefined
+    const prompt = character?.[1]?.summaryPrompt
+    return {
+      characterID: character?.[0],
+      prompt: isValidSummaryPrompt(prompt) ? prompt : isValidSummaryPrompt(settings.summaryPrompt) ? settings.summaryPrompt : DEFAULT_SUMMARY_PROMPT,
+    }
   } catch {
-    return DEFAULT_SUMMARY_PROMPT
+    return { characterID: undefined, prompt: DEFAULT_SUMMARY_PROMPT }
   }
 }
