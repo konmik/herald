@@ -1311,6 +1311,9 @@ try {
     }
     Select-Page 'Speech service'
     Assert-EnvironmentKeyIgnored
+    $voiceUsage = Find-Semantic 'Voice usage' -AutomationIds @('voice-usage')
+    if ($voiceUsage.Current.ControlType -ne [System.Windows.Automation.ControlType]::Text -or (Get-UiaPattern $voiceUsage 'Value') -or $voiceUsage.Current.IsKeyboardFocusable) { throw 'Voice usage must be plain text, not a focusable input.' }
+    Write-Action 'voice-usage-plain-text' @{ verified = $true }
     Select-Page 'Audio'
     Assert-SpeechUnloaded
     $outputDropdown = if ($Feature -in @('All', 'Settings', 'Output')) { Inspect-OutputDropdown } else { $null }
