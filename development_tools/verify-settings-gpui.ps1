@@ -1262,20 +1262,22 @@ function Read-LightningPixels {
     param([string]$Path, $Panel)
     $bitmap = [Drawing.Bitmap]::new($Path)
     try {
-        $scale = [math]::Min($Panel.width / 352.0, $Panel.height / 336.0)
-        $left = $Panel.left + ($Panel.width - 352 * $scale) / 2
-        $top = $Panel.top + ($Panel.height - 336 * $scale) / 2
+        $scale = [HeraldGpuiSettingsCaptureNative]::GetDpiForWindow($script:activeRecord.Hwnd) / 96.0
+        $left = $Panel.left
+        $top = $Panel.top
+        $height = $Panel.height / $scale
+        if ([math]::Abs($Panel.width / $scale - 352.0) -gt 1.0) { throw 'The inline preview is not displayed at announcement scale.' }
         $outer = 0
-        for ($y = 10; $y -lt 332; $y += 3) {
+        for ($y = 10; $y -lt $height - 4; $y += 3) {
             for ($x = 10; $x -lt 348; $x += 3) {
-                if ($x -lt 288 -and $y -lt 268) { continue }
+                if ($x -lt 332 -and $y -lt $height - 76) { continue }
                 $pixel = $bitmap.GetPixel([int]($left + $x * $scale), [int]($top + $y * $scale))
                 if ($pixel.B -gt 70 -and $pixel.R -gt 40 -and $pixel.G -gt 40) { $outer++ }
             }
         }
         $face = [Collections.Generic.List[int]]::new()
-        for ($y = 142; $y -lt 198; $y += 2) {
-            for ($x = 198; $x -lt 264; $x += 2) {
+        for ($y = [int]($height - 188); $y -lt $height - 132; $y += 2) {
+            for ($x = 220; $x -lt 286; $x += 2) {
                 $face.Add($bitmap.GetPixel([int]($left + $x * $scale), [int]($top + $y * $scale)).ToArgb())
             }
         }
@@ -1316,6 +1318,7 @@ function Assert-LightningContainment {
 
 function Capture-LightningCycle {
     param([string]$Name)
+    Select-Page 'Lightning'
     $root = $script:activeRoot.Current.BoundingRectangle
     $panelRect = (Get-Control 'lightningPreview' '').Current.BoundingRectangle
     $infoRect = (Get-Control 'lightningInfo' '').Current.BoundingRectangle

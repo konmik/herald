@@ -395,6 +395,10 @@ impl Renderer {
         (layout.height() / scale).ceil() as u32
     }
 
+    pub fn announcement_height(&self, scale: f32, max_height: u32) -> u32 {
+        (self.message_height(scale) + 238).min(max_height).max(240)
+    }
+
     fn text(
         &self,
         buffer: &mut [u32],

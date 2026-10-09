@@ -444,7 +444,7 @@ fn run() -> Result<(), String> {
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
                         let scale = monitor.as_ref().map_or_else(|| window.scale_factor(), |monitor| monitor.scale_factor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
-                        let height = (renderer.message_height(scale as f32) + 238).min(max_height).max(240);
+                        let height = renderer.announcement_height(scale as f32, max_height);
                         let position = monitor.as_ref().map(|monitor| {
                             let position = monitor.position();
                             PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32)
