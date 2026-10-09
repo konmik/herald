@@ -47,17 +47,23 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | Tool | Purpose |
 | --- | --- |
 | [verify-announcer.ps1](verify-announcer.ps1) | Checkout-binary playback checks. |
-| [verify-settings.ps1](verify-settings.ps1) | Settings persistence, speech models, audio previews and single-instance checks. |
-| [verify-settings-layout.ps1](verify-settings-layout.ps1) | Settings layout checks. |
-| [verify-settings-theme.ps1](verify-settings-theme.ps1) | Settings theme checks. |
-| [verify-settings-status.ps1](verify-settings-status.ps1) | Settings status display checks. |
-| [verify-characters.ps1](verify-characters.ps1) | Character settings, video picker, prompts, text editing and playback checks. |
+| [verify-settings.ps1](verify-settings.ps1) | Legacy Win32 baseline checks; does not drive the GPUI settings window. |
+| [verify-settings-gpui.ps1](verify-settings-gpui.ps1) | Drive the GPUI settings window through Windows UI Automation and preserve persistence, navigation and screenshot evidence. |
+| [verify-settings-layout.ps1](verify-settings-layout.ps1) | Legacy Win32 baseline layout checks. |
+| [verify-settings-theme.ps1](verify-settings-theme.ps1) | Legacy Win32 baseline theme checks. |
+| [verify-settings-status.ps1](verify-settings-status.ps1) | Legacy Win32 baseline status checks. |
+| [verify-characters.ps1](verify-characters.ps1) | Legacy Win32 character controls and playback checks. |
 | [verify-announcement-audio.py](verify-announcement-audio.py) | Capture output audio and check announcement/preview timing. |
 | [verify-linux-playback.py](verify-linux-playback.py) | Check Hyprland desktop transparency, sustained animation, focus and captured output audio with an isolated demo. |
 | [voice-api-fixture.mjs](voice-api-fixture.mjs) | Local speech API fixture for deterministic tests. |
 | [host-verification/](host-verification/) | Real Claude/OpenCode lifecycle drivers and proof capture. These tests make model requests. |
 | [benchmark-tts.ps1](benchmark-tts.ps1) | Measure local voice loading and synthesis across thread counts. |
+| [benchmark-settings-memory.ps1](benchmark-settings-memory.ps1) | Compare release settings-process working set and private bytes with isolated data and alternating runs. |
 | [profile-plugin.ts](profile-plugin.ts) | Measure memory during 10,000 simulated completion cycles. |
+
+`pnpm run test:settings` drives GPUI controls through Windows UI Automation. Sliders and dropdowns use normal pointer actions on the owned controls when GPUI Kit's accessibility actions are unsupported. It checks navigation, single-instance activation, draft persistence, Close/reopen, silent previews, unavailable output devices and System default. It does not play audible speech or install a voice model.
+
+Compare two preserved release executables with `pnpm run benchmark:settings -Baseline <old.exe> -Treatment <new.exe> -Evidence temp/verification/settings-memory`. The defaults are five alternating runs per executable, five seconds of warmup and ten seconds of sampling. The results include per-run working-set and private-byte medians, ranges, raw samples, executable hashes and cleanup evidence. Working set is resident RAM; private bytes are committed private memory. GPU memory is excluded. `complete` means all measurements finished, not that a difference is statistically significant.
 
 ## Tooling tests
 

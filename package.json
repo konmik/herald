@@ -25,8 +25,9 @@
     "deploy:plugins": "pwsh -NoProfile -File development_tools/deploy-plugins.ps1",
     "test:companion": "cargo test --locked --manifest-path native-announcer/Cargo.toml",
     "test:windows": "pwsh -NoProfile -File development_tools/verify-announcer.ps1",
-    "test:settings": "pwsh -NoProfile -File development_tools/verify-settings.ps1",
-    "test:characters": "pwsh -NoProfile -File development_tools/verify-characters.ps1",
+    "test:settings": "pwsh -NoProfile -File development_tools/verify-settings-gpui.ps1",
+    "test:characters": "pwsh -NoProfile -File development_tools/verify-settings-gpui.ps1 -Feature Characters",
+    "benchmark:settings": "pwsh -NoProfile -File development_tools/benchmark-settings-memory.ps1",
     "test:assets": "node --test development_tools/tests/assets.test.mjs development_tools/tests/linux-menu.test.mjs",
     "install:linux-menu": "node development_tools/install-linux-menu.mjs",
     "profile:plugin": "bun development_tools/profile-plugin.ts"
