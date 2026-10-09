@@ -63,7 +63,7 @@ pub fn textarea(
         NamedEditor { editor: state.render(window, cx).into_element(), id, label, value, readonly, role: gpui_kit::Role::MultilineTextInput }.into_any_element()
     });
     div().id(id).flex().w_full().h(px(height)).min_w_0().overflow_hidden()
-        .border_1().rounded(cx.theme().radius).bg(cx.theme().input)
+        .border_1().rounded(cx.theme().radius).bg(cx.theme().input_background())
         .border_color(if focused { cx.theme().ring } else { cx.theme().border })
         .child(editor)
 }
@@ -117,7 +117,7 @@ pub fn input(state: &gpui_kit::Entity<gpui_kit::component::input::InputState>, i
         state.set_editor_paddings(gpui_kit::Edges::all(px(8.)));
         NamedEditor { editor: state.render(window, cx).into_element(), id, label, value, readonly: false, role: gpui_kit::Role::TextInput }.into_any_element()
     });
-    div().id(id).flex().w_full().h_8().min_w_0().overflow_hidden().border_1().rounded(cx.theme().radius).bg(cx.theme().input)
+    div().id(id).flex().w_full().h_8().min_w_0().overflow_hidden().border_1().rounded(cx.theme().radius).bg(cx.theme().input_background())
         .border_color(if focused { cx.theme().ring } else { cx.theme().border }).child(editor)
 }
 

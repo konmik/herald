@@ -1,7 +1,7 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald.exe'),
     [string]$Evidence = ('temp/verification/gpui-settings-' + [guid]::NewGuid()),
-    [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'All')]
+    [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'All')]
     [string]$Feature = 'All'
 )
 
@@ -28,6 +28,7 @@ $characterDraftName = $null
 $announcementPrompt = "GPUI exact prompt line one.`nLine two must remain separate."
 $appliedBytes = $null
 $firstLaunchBytes = $null
+$themeVerification = $null
 
 $pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service', 'Offline voice', 'Announcements')
 $pageSpecs = [ordered]@{
@@ -41,6 +42,10 @@ $pageSpecs = [ordered]@{
 $controlSpecs = [ordered]@{
     apply = [ordered]@{ ids = @('apply'); names = @('Apply') }
     close = [ordered]@{ ids = @('close'); names = @('Close') }
+    navigation = [ordered]@{ ids = @('settings-sidebar'); names = @('Settings sidebar') }
+    themeDark = [ordered]@{ ids = @('theme-dark'); names = @('Dark') }
+    themeLight = [ordered]@{ ids = @('theme-light'); names = @('Light') }
+    themeSystem = [ordered]@{ ids = @('theme-system'); names = @('System') }
     quiet = [ordered]@{ ids = @('quiet-mode'); names = @('Quiet mode') }
     schedule = [ordered]@{ ids = @('schedule'); names = @('Daily schedule') }
     quietStart = [ordered]@{ ids = @('quiet-start'); names = @('From') }
@@ -65,11 +70,13 @@ $script:binaryPath = $binaryPath
 $script:evidencePath = $evidencePath
 $script:scratch = $scratch
 $script:settingsPath = $settingsPath
+$script:appearancePath = Join-Path $scratch 'appearance.json'
 $script:emptyEnvironment = $emptyEnvironment
 $script:binaryHash = $null
 $script:transcribing = $false
 
 $frameworkCandidates = @()
+if ($PSEdition -eq 'Core') { $frameworkCandidates += $PSHOME }
 if ([IntPtr]::Size -eq 8) {
     $frameworkCandidates += Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/WPF'
 }
@@ -83,6 +90,7 @@ foreach ($assemblyName in @('UIAutomationTypes.dll', 'UIAutomationClient.dll')) 
 }
 if (-not [type]::GetType('System.Windows.Automation.AutomationElement, UIAutomationClient')) { throw 'System.Windows.Automation could not be loaded from the Windows .NET Framework assemblies.' }
 try { Add-Type -AssemblyName System.Drawing -ErrorAction Stop } catch { Add-Type -AssemblyName System.Drawing.Common -ErrorAction Stop }
+Add-Type -AssemblyName System.Windows.Forms
 if (-not ('HeraldGpuiSettingsCaptureNative' -as [type])) {
     Add-Type @'
 using System;
@@ -94,11 +102,44 @@ public static class HeraldGpuiSettingsCaptureNative
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("dwmapi.dll")] public static extern int DwmFlush();
+    [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X; public int Y; public uint Data; public uint Flags; public uint Time; public UIntPtr Extra; }
+    [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public MouseInput Mouse; }
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+    public static void ClickOwnedPoint(Point point, uint expectedProcess)
+    {
+        SetThreadDpiAwarenessContext(new IntPtr(-4));
+        uint owner;
+        GetWindowThreadProcessId(WindowFromPoint(point), out owner);
+        if (owner != expectedProcess) throw new InvalidOperationException("The click point is not inside the owned settings process.");
+        int x = (int)Math.Round((point.X - GetSystemMetrics(76)) * 65535.0 / Math.Max(1, GetSystemMetrics(78) - 1));
+        int y = (int)Math.Round((point.Y - GetSystemMetrics(77)) * 65535.0 / Math.Max(1, GetSystemMetrics(79) - 1));
+        var inputs = new[] {
+            new Input { Mouse = new MouseInput { X = x, Y = y, Flags = 0xC003 } },
+            new Input { Mouse = new MouseInput { X = x, Y = y, Flags = 0xC005 } }
+        };
+        if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2)
+        {
+            mouse_event(4, 0, 0, 0, UIntPtr.Zero);
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct HighContrast { public uint Size; public uint Flags; public IntPtr Scheme; }
+    [DllImport("user32.dll")] private static extern bool SystemParametersInfoW(uint action, uint parameter, ref HighContrast contrast, uint flags);
+    public static bool HighContrastEnabled()
+    {
+        var contrast = new HighContrast { Size = (uint)Marshal.SizeOf(typeof(HighContrast)) };
+        if (!SystemParametersInfoW(0x0042, contrast.Size, ref contrast, 0)) throw new InvalidOperationException("Could not read Windows high contrast.");
+        return (contrast.Flags & 1) != 0;
+    }
 }
 '@
 }
@@ -435,9 +476,23 @@ function Set-UiaValue {
     param($Element, [string]$Value, [string]$Label)
     $pattern = Get-UiaPattern $Element 'Value'
     if (-not $pattern) { throw "UI Automation control '$Label' does not expose ValuePattern." }
-    $pattern.SetValue($Value)
-    Write-Action 'set-value' @{ target = $Label; length = $Value.Length }
-    Wait-Until { (Get-UiaValue $Element) -ceq $Value } "UI Automation did not reread the '$Label' value after setting it."
+    if ($pattern.Current.IsReadOnly) { throw "UI Automation control '$Label' is read-only." }
+    try {
+        $pattern.SetValue($Value)
+        Wait-Until { (Get-UiaValue $Element) -ceq $Value } "UI Automation did not reread the '$Label' value after setting it." 2
+        Write-Action 'set-value' @{ target = $Label; length = $Value.Length; method = 'ValuePattern' }
+        return
+    } catch {
+        Write-Action 'value-pattern-unsupported' @{ target = $Label }
+    }
+    Click-Uia $Element
+    Capture-Window ('before-keyboard-' + [guid]::NewGuid()) | Out-Null
+    if ([HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -ne $script:activeRecord.Hwnd) { throw 'The keyboard target is not the owned foreground window.' }
+    $keys = [regex]::Replace($Value, '[+^%~(){}\[\]]', { param($match) '{' + $match.Value + '}' })
+    $keys = $keys.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", '{ENTER}')
+    [System.Windows.Forms.SendKeys]::SendWait('^a' + $keys)
+    Wait-Until { (Get-UiaValue $Element) -ceq $Value } "The owned keyboard did not replace the '$Label' value."
+    Write-Action 'set-value' @{ target = $Label; length = $Value.Length; method = 'owned-keyboard' }
 }
 
 function Set-UiaToggle {
@@ -459,12 +514,18 @@ function Set-UiaRange {
     $minimum = [double]$pattern.Current.Minimum
     $maximum = [double]$pattern.Current.Maximum
     if ($Value -lt $minimum -or $Value -gt $maximum) { throw "The '$Label' range does not contain the requested value." }
-    if (-not [HeraldGpuiSettingsCaptureNative]::SetForegroundWindow($script:activeRecord.Hwnd)) { throw 'Could not focus the owned settings window.' }
-    $bounds = $Element.Current.BoundingRectangle
-    $fraction = ($Value - $minimum) / ($maximum - $minimum)
-    [HeraldGpuiSettingsCaptureNative]::SetCursorPos([int]($bounds.X + $bounds.Width * $fraction), [int]($bounds.Y + $bounds.Height / 2)) | Out-Null
-    [HeraldGpuiSettingsCaptureNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
-    [HeraldGpuiSettingsCaptureNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+    Focus-OwnedWindow
+    if ($Value -eq $minimum -or $Value -eq $maximum) {
+        Click-Uia $Element
+        [System.Windows.Forms.SendKeys]::SendWait($(if ($Value -eq $minimum) { '{HOME}' } else { '{END}' }))
+    } else {
+        $bounds = $Element.Current.BoundingRectangle
+        $fraction = ($Value - $minimum) / ($maximum - $minimum)
+        $point = [HeraldGpuiSettingsCaptureNative+Point]::new()
+        $point.X = [int]($bounds.X + $bounds.Width * $fraction)
+        $point.Y = [int]($bounds.Y + $bounds.Height / 2)
+        [HeraldGpuiSettingsCaptureNative]::ClickOwnedPoint($point, $script:activeRecord.Pid)
+    }
     Write-Action 'set-range' @{ target = $Label; value = $Value }
     Wait-Until { [math]::Abs((Get-UiaRangeValue $Element) - $Value) -lt 0.01 } "UI Automation did not reread the '$Label' range value."
 }
@@ -480,11 +541,12 @@ function Invoke-Uia {
 function Click-Uia {
     param($Element)
     Assert-ActiveProcess
-    if (-not [HeraldGpuiSettingsCaptureNative]::SetForegroundWindow($script:activeRecord.Hwnd)) { throw 'Could not focus the owned settings window.' }
+    Focus-OwnedWindow
     $bounds = $Element.Current.BoundingRectangle
-    [HeraldGpuiSettingsCaptureNative]::SetCursorPos([int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2)) | Out-Null
-    [HeraldGpuiSettingsCaptureNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
-    [HeraldGpuiSettingsCaptureNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+    $point = [HeraldGpuiSettingsCaptureNative+Point]::new()
+    $point.X = [int]($bounds.X + $bounds.Width / 2)
+    $point.Y = [int]($bounds.Y + $bounds.Height / 2)
+    [HeraldGpuiSettingsCaptureNative]::ClickOwnedPoint($point, $script:activeRecord.Pid)
 }
 
 function Select-UiaItem {
@@ -582,6 +644,42 @@ function Save-UiaSnapshot {
     $path
 }
 
+function Focus-OwnedWindow {
+    Assert-ActiveProcess
+    $hwnd = $script:activeRecord.Hwnd
+    $owner = 0u
+    [HeraldGpuiSettingsCaptureNative]::GetWindowThreadProcessId($hwnd, [ref]$owner) | Out-Null
+    if ($owner -ne [uint32]$script:activeRecord.Pid) { throw 'The activation window does not belong to the owned settings process.' }
+    if ([HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -eq $hwnd) { return }
+    [HeraldGpuiSettingsCaptureNative]::ShowWindow($hwnd, 9) | Out-Null
+    if ([HeraldGpuiSettingsCaptureNative]::SetForegroundWindow($hwnd)) { return }
+    if (-not [HeraldGpuiSettingsCaptureNative]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, 83)) { throw 'Could not expose the owned settings window for activation.' }
+    try {
+        [HeraldGpuiSettingsCaptureNative]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
+        [HeraldGpuiSettingsCaptureNative]::DwmFlush() | Out-Null
+        $rect = [HeraldGpuiSettingsCaptureNative+Rect]::new()
+        if (-not [HeraldGpuiSettingsCaptureNative]::GetWindowRect($hwnd, [ref]$rect)) { throw 'Could not read the owned settings window bounds.' }
+        $point = [HeraldGpuiSettingsCaptureNative+Point]::new()
+        $point.X = [int](($rect.Left + $rect.Right) / 2)
+        $point.Y = $rect.Top + 16
+        $owner = 0u
+        [HeraldGpuiSettingsCaptureNative]::GetWindowThreadProcessId([HeraldGpuiSettingsCaptureNative]::WindowFromPoint($point), [ref]$owner) | Out-Null
+        if ($owner -ne [uint32]$script:activeRecord.Pid) { throw 'The activation point is not inside the owned settings window.' }
+        $bitmap = [Drawing.Bitmap]::new($rect.Right - $rect.Left, $rect.Bottom - $rect.Top)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try {
+            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+            $bitmap.Save((Join-Path $script:evidencePath ('focus-preflight-' + [guid]::NewGuid() + '.png')), [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $graphics.Dispose(); $bitmap.Dispose() }
+        [HeraldGpuiSettingsCaptureNative]::ClickOwnedPoint($point, $script:activeRecord.Pid)
+        Wait-Until { [HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -eq $hwnd } 'The owned settings window did not activate after its title bar was clicked.' 5
+        Write-Action 'focus-owned-window' @{ method = 'owned-title-bar-click'; ownershipConfirmed = $true }
+    } finally {
+        [HeraldGpuiSettingsCaptureNative]::GetWindowThreadProcessId($hwnd, [ref]$owner) | Out-Null
+        if ($owner -eq [uint32]$script:activeRecord.Pid -and -not [HeraldGpuiSettingsCaptureNative]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 19)) { throw 'Could not restore the owned settings window after activation.' }
+    }
+}
+
 function Capture-Window {
     param([string]$Name)
     Assert-ActiveProcess
@@ -590,7 +688,7 @@ function Capture-Window {
     [HeraldGpuiSettingsCaptureNative]::GetWindowThreadProcessId($hwnd, [ref]$owner) | Out-Null
     if ($owner -ne [uint32]$script:activeRecord.Pid -or -not [HeraldGpuiSettingsCaptureNative]::IsWindowVisible($hwnd)) { throw "The capture target '$Name' is not the owned visible settings window." }
     [HeraldGpuiSettingsCaptureNative]::ShowWindow($hwnd, 9) | Out-Null
-    if (-not [HeraldGpuiSettingsCaptureNative]::SetForegroundWindow($hwnd)) { throw "The owned settings window could not be foregrounded for '$Name'." }
+    Focus-OwnedWindow
     Wait-Until { [HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -eq $hwnd } "The owned settings window did not become foreground for '$Name'." 5
     $rect = [HeraldGpuiSettingsCaptureNative+Rect]::new()
     [HeraldGpuiSettingsCaptureNative]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
@@ -614,6 +712,299 @@ function Capture-Window {
     }
 }
 
+function Get-ThemeControlKey {
+    param([ValidateSet('dark', 'light', 'system')][string]$Theme)
+    switch ($Theme) {
+        'dark' { 'themeDark'; break }
+        'light' { 'themeLight'; break }
+        'system' { 'themeSystem'; break }
+    }
+}
+
+function Get-ThemeElement {
+    param([ValidateSet('dark', 'light', 'system')][string]$Theme)
+    $element = Get-Control (Get-ThemeControlKey $Theme) ''
+    if ($element.Current.AutomationId -cne "theme-$Theme") { throw "The '$Theme' theme control is missing its AutomationId." }
+    $element
+}
+
+function Get-ThemeSelectionInfo {
+    param($Element)
+    $candidate = $Element
+    for ($depth = 0; $depth -lt 3 -and $candidate; $depth++) {
+        $selection = Get-UiaPattern $candidate 'SelectionItem'
+        if ($selection) {
+            return [ordered]@{ pattern = 'SelectionItem'; selected = [bool]$selection.Current.IsSelected }
+        }
+        $toggle = Get-UiaPattern $candidate 'Toggle'
+        if ($toggle) {
+            return [ordered]@{ pattern = 'Toggle'; selected = $toggle.Current.ToggleState.ToString() -eq 'On' }
+        }
+        try { $candidate = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($candidate) } catch { $candidate = $null }
+    }
+    $null
+}
+
+function Get-ThemeSelector {
+    $states = [ordered]@{}
+    foreach ($theme in @('dark', 'light', 'system')) {
+        $info = Get-ThemeSelectionInfo (Get-ThemeElement $theme)
+        if ($null -eq $info) { throw "The '$theme' theme button did not expose a selected state through UI Automation." }
+        $states[$theme] = $info
+    }
+    $states
+}
+
+function Get-SelectedTheme {
+    $states = Get-ThemeSelector
+    $selected = @($states.Keys | Where-Object { [bool]$states[$_].selected })
+    if ($selected.Count -ne 1) { return $null }
+    [string]$selected[0]
+}
+
+function Assert-ThemeSelector {
+    param([ValidateSet('dark', 'light', 'system')][string]$Expected)
+    $states = Get-ThemeSelector
+    $selected = @($states.Keys | Where-Object { [bool]$states[$_].selected })
+    if ($selected.Count -ne 1 -or $selected[0] -cne $Expected) { throw "The '$Expected' theme was not the only selected theme button." }
+    Write-Action 'theme-selector' @{ selected = $Expected; pattern = $states[$Expected].pattern }
+    $states
+}
+
+function Select-Theme {
+    param([ValidateSet('dark', 'light', 'system')][string]$Theme)
+    $element = Get-ThemeElement $Theme
+    $selection = Get-UiaPattern $element 'SelectionItem'
+    if ($selection) {
+        Select-UiaItem $element "theme $Theme"
+        return
+    }
+    $invoke = Get-UiaPattern $element 'Invoke'
+    if ($invoke) {
+        Invoke-Uia $element "theme $Theme"
+        return
+    }
+    Click-Uia $element
+    Write-Action 'select-theme' @{ theme = $Theme; pattern = 'owned-pointer-click' }
+}
+
+function Assert-ThemeControlsInSidebar {
+    $navigation = Get-Control 'navigation' '' -AllowDisabled
+    if ($navigation.Current.AutomationId -cne 'settings-sidebar') { throw 'The settings sidebar is missing its AutomationId.' }
+    $pages = Find-Semantic 'Settings pages' -Names @('Settings pages')
+    if ($pages.Current.ControlType -ne [System.Windows.Automation.ControlType]::Tab) { throw 'Settings pages are not a separate accessible tab list.' }
+    $navigationRect = $navigation.Current.BoundingRectangle
+    foreach ($theme in @('dark', 'light', 'system')) {
+        $element = Get-ThemeElement $theme
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Left -lt $navigationRect.Left -or $rect.Top -lt $navigationRect.Top -or $rect.Right -gt $navigationRect.Right -or $rect.Bottom -gt $navigationRect.Bottom) { throw "The '$theme' theme button is not inside the global settings sidebar." }
+        $parent = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($element)
+        while ($parent -and $parent.Current.NativeWindowHandle -eq 0) {
+            if ($parent.Current.Name -ceq 'Settings pages' -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Tab) { throw 'The theme selector is inside the settings page tab list.' }
+            $parent = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($parent)
+        }
+    }
+    Write-Action 'theme-sidebar' @{ verified = $true }
+    [ordered]@{ verified = $true; automationId = 'settings-sidebar' }
+}
+
+function Read-Appearance {
+    if (-not (Test-Path -LiteralPath $script:appearancePath)) { throw "Appearance preference is missing: $script:appearancePath" }
+    $value = Get-Content -LiteralPath $script:appearancePath -Raw | ConvertFrom-Json
+    $theme = [string](Get-JsonProperty $value 'theme')
+    if ($theme -notin @('dark', 'light', 'system')) { throw "Appearance preference has an invalid theme: '$theme'." }
+    [ordered]@{ theme = $theme }
+}
+
+function Save-AppearanceEvidence {
+    param([string]$Name)
+    $appearance = Read-Appearance
+    $path = Join-Path $script:evidencePath ($Name + '.json')
+    Write-JsonFile $path $appearance
+    $appearance
+}
+
+function Get-ThemeSampleRegion {
+    $rootRect = $script:activeRoot.Current.BoundingRectangle
+    $navigationRect = (Get-Control 'navigation' '' -AllowDisabled).Current.BoundingRectangle
+    $left = [int]($navigationRect.Left - $rootRect.Left + 6)
+    $top = [int]($navigationRect.Top - $rootRect.Top + 6)
+    $source = 'sidebar-padding'
+    $width = [int]$rootRect.Width
+    $height = [int]$rootRect.Height
+    $left = [math]::Max(0, [math]::Min($left, $width - 12))
+    $top = [math]::Max(0, [math]::Min($top, $height - 12))
+    [ordered]@{ left = $left; top = $top; right = $left + 10; bottom = $top + 10; source = $source }
+}
+
+function Convert-PixelColor {
+    param($Pixel)
+    $red = [int]$Pixel.R
+    $green = [int]$Pixel.G
+    $blue = [int]$Pixel.B
+    [ordered]@{ r = $red; g = $green; b = $blue; luma = [math]::Round(0.2126 * $red + 0.7152 * $green + 0.0722 * $blue, 2) }
+}
+
+function Read-ScreenshotSample {
+    param([string]$Path, $Region)
+    $bitmap = [Drawing.Bitmap]::new($Path)
+    try {
+        $left = [math]::Max(0, [int]$Region.left)
+        $top = [math]::Max(0, [int]$Region.top)
+        $right = [math]::Min($bitmap.Width, [int]$Region.right)
+        $bottom = [math]::Min($bitmap.Height, [int]$Region.bottom)
+        if ($right -le $left -or $bottom -le $top) { throw 'The theme screenshot sample region is empty.' }
+        $count = 0
+        $red = 0.0
+        $green = 0.0
+        $blue = 0.0
+        $minLuma = 999.0
+        $maxLuma = -1.0
+        for ($y = $top; $y -lt $bottom; $y++) {
+            for ($x = $left; $x -lt $right; $x++) {
+                $color = Convert-PixelColor ($bitmap.GetPixel($x, $y))
+                $count++
+                $red += $color.r
+                $green += $color.g
+                $blue += $color.b
+                $minLuma = [math]::Min($minLuma, $color.luma)
+                $maxLuma = [math]::Max($maxLuma, $color.luma)
+            }
+        }
+        $center = Convert-PixelColor ($bitmap.GetPixel([int](($left + $right - 1) / 2), [int](($top + $bottom - 1) / 2)))
+        [ordered]@{
+            region = [ordered]@{ left = $left; top = $top; right = $right; bottom = $bottom; source = $Region.source }
+            pixelCount = $count
+            mean = [ordered]@{ r = [math]::Round($red / $count, 2); g = [math]::Round($green / $count, 2); b = [math]::Round($blue / $count, 2); luma = [math]::Round((0.2126 * ($red / $count)) + (0.7152 * ($green / $count)) + (0.0722 * ($blue / $count)), 2) }
+            center = $center
+            minLuma = $minLuma
+            maxLuma = $maxLuma
+        }
+    } finally {
+        $bitmap.Dispose()
+    }
+}
+
+function Get-ColorDistance {
+    param($Left, $Right)
+    [math]::Max([math]::Abs([double]$Left.r - [double]$Right.r), [math]::Max([math]::Abs([double]$Left.g - [double]$Right.g), [math]::Abs([double]$Left.b - [double]$Right.b)))
+}
+
+function Assert-ThemePaletteChanged {
+    param($DarkSample, $LightSample)
+    $distance = Get-ColorDistance $DarkSample.mean $LightSample.mean
+    $lumaDistance = [math]::Abs([double]$DarkSample.mean.luma - [double]$LightSample.mean.luma)
+    if ([HeraldGpuiSettingsCaptureNative]::HighContrastEnabled()) {
+        if ($distance -gt 3) { throw 'Explicit themes overrode the Windows high-contrast palette.' }
+        return [ordered]@{ highContrastOverride = $true; preserved = $true }
+    }
+    if ($distance -lt 20 -or $lumaDistance -lt 20 -or [double]$DarkSample.mean.luma -ge [double]$LightSample.mean.luma) { throw 'Dark and light theme screenshots did not show a changed palette at the safe sample location.' }
+    [ordered]@{ changed = $true; channelDistance = [math]::Round($distance, 2); lumaDistance = [math]::Round($lumaDistance, 2); darkLuma = $DarkSample.mean.luma; lightLuma = $LightSample.mean.luma }
+}
+
+function Capture-ThemeState {
+    param([string]$Name)
+    $capture = Capture-Window $Name
+    $region = Get-ThemeSampleRegion
+    $sample = Read-ScreenshotSample $capture.path $region
+    Save-UiaSnapshot ('uia-' + $Name) | Out-Null
+    [ordered]@{ screenshot = $capture.path; capture = $capture; sample = $sample }
+}
+
+function Set-ThemeSummaryDraft {
+    param([string]$Value)
+    Select-Page 'Announcements'
+    $prompt = Get-Control 'summaryPrompt' 'Value'
+    Set-UiaValue $prompt $Value 'theme test summary prompt'
+    Write-Action 'theme-draft-edited' @{ length = $Value.Length }
+    $Value
+}
+
+function Verify-InputHalo {
+    Select-Page 'Speech service'
+    $field = Find-Semantic 'Default voice ID' -AutomationIds @('default-voice-id') -PatternKind Value
+    $original = Get-UiaValue $field
+    Click-Uia $field
+    [System.Windows.Forms.SendKeys]::SendWait('^afocus-proof')
+    Wait-Until { (Get-UiaValue $field) -ceq 'focus-proof' } 'The text field did not receive the typed focus proof.' 5
+    $capture = Capture-Window 'input-focused-no-halo'
+    [System.Windows.Forms.SendKeys]::SendWait('x')
+    Wait-Until { (Get-UiaValue $field) -ceq 'focus-proofx' } 'The captured text field lost keyboard focus.' 5
+    $fieldRect = $field.Current.BoundingRectangle
+    $rootRect = $script:activeRoot.Current.BoundingRectangle
+    $left = [int]($fieldRect.Left - $rootRect.Left)
+    $middle = [int]($fieldRect.Top - $rootRect.Top + $fieldRect.Height / 2)
+    $outside = Read-ScreenshotSample $capture.path @{ left = $left - 5; right = $left - 1; top = $middle - 5; bottom = $middle + 5; source = 'outside-input-border' }
+    $background = Read-ScreenshotSample $capture.path @{ left = $left - 10; right = $left - 6; top = $middle - 5; bottom = $middle + 5; source = 'adjacent-background' }
+    if ((Get-ColorDistance $outside.mean $background.mean) -gt 3) { throw 'The focused text field still has an outside halo.' }
+    Set-UiaValue $field $original 'restore default voice ID'
+    Write-Action 'input-halo-absent' @{ verified = $true; control = 'default-voice-id' }
+    [ordered]@{ verified = $true; screenshot = $capture.path; outside = $outside; background = $background }
+}
+
+function Assert-ThemeDraftDiscarded {
+    param([string]$Draft)
+    Select-Page 'Announcements'
+    $value = Get-UiaValue (Get-Control 'summaryPrompt' 'Value')
+    if ($value -ceq $Draft) { throw 'The unapplied summary prompt survived a theme-only close and reopen.' }
+    if ($value -cne 'Fixture prompt.') { throw 'Theme verification changed the unrelated saved summary prompt.' }
+    Write-Action 'theme-draft-discarded' @{ savedValueUnchanged = $true }
+    $value
+}
+
+function Verify-Theme {
+    $settingsBeforeTheme = Read-Bytes $script:settingsPath
+    Save-SettingsEvidence 'settings-before-theme' | Out-Null
+    $sidebar = Assert-ThemeControlsInSidebar
+    $draft = Set-ThemeSummaryDraft ('Unapplied theme summary ' + [guid]::NewGuid().ToString('N'))
+    $before = Capture-ThemeState 'theme-before-draft'
+    $cycles = @()
+    foreach ($theme in @('dark', 'light', 'system')) {
+        if ($cycles.Count -gt 0) { $draft = Set-ThemeSummaryDraft ('Unapplied theme summary ' + [guid]::NewGuid().ToString('N')) }
+        Select-Theme $theme
+        Wait-Until { try { (Read-Appearance).theme -ceq $theme } catch { $false } } "Selecting '$theme' did not write the appearance preference." 10
+        Wait-Until { try { (Get-SelectedTheme) -ceq $theme } catch { $false } } "Selecting '$theme' did not update the theme selector." 10
+        Assert-NoRuntimeErrors ('theme-' + $theme)
+        $capture = Capture-ThemeState ('theme-' + $theme)
+        $selector = Assert-ThemeSelector $theme
+        Select-Page 'Announcements'
+        if ((Get-UiaValue (Get-Control 'summaryPrompt' 'Value')) -cne $draft) { throw "Selecting '$theme' lost the unapplied summary prompt draft." }
+        if (-not (Bytes-Equal $settingsBeforeTheme (Read-Bytes $script:settingsPath))) { throw "Selecting '$theme' changed unrelated settings bytes before Apply." }
+        $appearance = Save-AppearanceEvidence ('appearance-theme-' + $theme)
+        Write-Action 'theme-choice' @{ theme = $theme; settingsBytesUnchanged = $true; applied = $false }
+        $cycle = [ordered]@{ theme = $theme; draft = $draft; appearance = $appearance; selector = $selector; screenshot = $capture.screenshot; capture = $capture; savedBytesUnchanged = $true }
+        Close-ActiveSettings
+        if (-not (Bytes-Equal $settingsBeforeTheme (Read-Bytes $script:settingsPath))) { throw "Closing after '$theme' changed unrelated settings bytes." }
+        if ((Read-Appearance).theme -cne $theme) { throw "Closing after '$theme' lost the appearance preference." }
+        Launch-Settings ('theme-reopen-' + $theme)
+        Wait-Until { try { (Get-SelectedTheme) -ceq $theme } catch { $false } } "Reopening after '$theme' did not restore the theme selector." 10
+        $reopenedSelector = Assert-ThemeSelector $theme
+        $reopenedAppearance = Save-AppearanceEvidence ('appearance-theme-' + $theme + '-reopen')
+        $reopenedCapture = Capture-ThemeState ('theme-' + $theme + '-reopen')
+        if ((Get-ColorDistance $capture.sample.mean $reopenedCapture.sample.mean) -gt 3) { throw "Reopening '$theme' did not restore its rendered palette." }
+        $discarded = Assert-ThemeDraftDiscarded $draft
+        $cycle['reopened'] = [ordered]@{ appearance = $reopenedAppearance; selector = $reopenedSelector; screenshot = $reopenedCapture.screenshot; capture = $reopenedCapture; summaryPrompt = $discarded; savedBytesUnchanged = (Bytes-Equal $settingsBeforeTheme (Read-Bytes $script:settingsPath)) }
+        if (-not $cycle.reopened.savedBytesUnchanged) { throw "Reopening after '$theme' changed unrelated settings bytes." }
+        $cycles += ,$cycle
+    }
+    $dark = @($cycles | Where-Object { $_.theme -ceq 'dark' })[0]
+    $light = @($cycles | Where-Object { $_.theme -ceq 'light' })[0]
+    $visual = Assert-ThemePaletteChanged $dark.capture.sample $light.capture.sample
+    $system = @($cycles | Where-Object { $_.theme -ceq 'system' })[0]
+    $systemTheme = if ([Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'AppsUseLightTheme', 1) -eq 0) { 'dark' } else { 'light' }
+    $expectedSystem = @($cycles | Where-Object { $_.theme -ceq $systemTheme })[0]
+    if ((Get-ColorDistance $system.capture.sample.mean $expectedSystem.capture.sample.mean) -gt 3) { throw 'System did not render the current Windows app theme.' }
+    $visual['systemMatches'] = $systemTheme
+    $inputHalo = Verify-InputHalo
+    $screenshots = @($before.screenshot) + @($cycles | ForEach-Object { $_.screenshot }) + @($cycles | ForEach-Object { $_.reopened.screenshot })
+    $screenshots += $inputHalo.screenshot
+    $verification = [ordered]@{ sidebar = $sidebar; before = $before; cycles = $cycles; visual = $visual; inputHalo = $inputHalo; finalTheme = 'system'; screenshots = $screenshots; settingsBytesUnchanged = $true; applyRequired = $false; reopenedThemes = @($cycles | ForEach-Object { $_.theme }) }
+    Write-JsonFile (Join-Path $script:evidencePath 'theme-verification.json') $verification
+    $script:themeVerification = $verification
+    Write-Action 'theme-verification-complete' @{ themes = 'dark,light,system'; repeatedReopen = $true }
+    $verification
+}
+
 function Get-TextMatch {
     param([string[]]$Expected)
     foreach ($element in @(Get-UiaElements)) {
@@ -622,6 +1013,7 @@ function Get-TextMatch {
             $current = $element.Current
             $valuePattern = Get-UiaPattern $element 'Value'
             $value = if ($valuePattern) { [string]$valuePattern.Current.Value } else { [string]$current.Name }
+            if ($current.AutomationId -ceq 'status' -and $value.StartsWith('Settings status: ')) { $value = $value.Substring('Settings status: '.Length) }
             if ($Expected -contains $value) { return [ordered]@{ text = $value; automationId = $current.AutomationId; name = $current.Name; valueRedacted = [bool](Get-SensitiveElement $element) } }
         } catch {}
     }
@@ -925,10 +1317,12 @@ try {
     Save-UiaSnapshot 'uia-before-actions' | Out-Null
 
     $runQuiet = $Feature -in @('All', 'Settings', 'Quiet')
+    $runTheme = $Feature -in @('All', 'Settings', 'Theme')
     $runOutput = $Feature -in @('All', 'Settings', 'Output')
     $runPreview = $Feature -in @('All', 'Settings', 'Preview')
     $runCharacters = $Feature -in @('All', 'Settings', 'Characters')
     $runAnnouncements = $Feature -in @('All', 'Settings', 'Announcements')
+    if ($runTheme) { Verify-Theme | Out-Null }
     if ($runQuiet) { Set-QuietDraft }
     if ($runAnnouncements) { Set-AnnouncementDraft }
     if ($runCharacters) { $characterCreated = Try-CharacterDraft } else { $characterCreated = $false }
@@ -939,6 +1333,11 @@ try {
         Select-Page 'Audio'
         Invoke-Apply
         Assert-SavedValues $runQuiet $runOutput $runAnnouncements ($runCharacters -and $characterCreated)
+        if ($runTheme) {
+            if ((Read-Appearance).theme -cne $themeVerification.finalTheme) { throw 'Apply changed the independently saved appearance preference.' }
+            $null = Assert-ThemeSelector $themeVerification.finalTheme
+            Write-Action 'theme-after-apply' @{ theme = $themeVerification.finalTheme; settingsApplyIndependent = $true }
+        }
     } else {
         $script:appliedBytes = Read-Bytes $settingsPath
         Save-SettingsEvidence 'settings-after-apply' | Out-Null
@@ -957,6 +1356,13 @@ try {
     Launch-Settings 'reopen'
     Assert-NoRuntimeErrors 'reopen-ready'
     Save-UiaSnapshot 'uia-reopened' | Out-Null
+    $themeAfterReopen = $null
+    if ($runTheme) {
+        $appearance = Read-Appearance
+        if ($appearance.theme -cne $themeVerification.finalTheme) { throw 'Reopening did not restore the independently saved appearance preference.' }
+        $selector = Assert-ThemeSelector $themeVerification.finalTheme
+        $themeAfterReopen = [ordered]@{ appearance = $appearance; selector = $selector; theme = $themeVerification.finalTheme }
+    }
     Verify-ReopenedValues $runQuiet $runOutput $runAnnouncements ($runCharacters -and $characterCreated)
     if ($runPreview -and -not $runOutput) { Select-Page 'Audio'; if ([math]::Abs((Get-UiaRangeValue (Get-Control 'volume' 'RangeValue')) - 0) -gt 0.01) { throw 'Reopening did not restore zero volume after preview.' } }
     $reopenedBytes = Read-Bytes $settingsPath
@@ -966,25 +1372,28 @@ try {
     Close-ActiveSettings
     Assert-NoRuntimeErrors 'complete'
     $verdict = if ($script:featureGaps.Count -eq 0) { 'VERIFIED' } else { 'INCONCLUSIVE' }
+    $screenshots = @($pageResults | ForEach-Object { $_.screenshot })
+    if ($runTheme) { $screenshots += @($themeVerification.screenshots) }
     $result = [ordered]@{
         verdict = $verdict
         feature = $Feature
         binary = $binaryPath
         sha256 = $binaryHash
-        uiAutomation = [ordered]@{ root = 'owned-window'; controlDriver = 'UIAutomationPatternsAndOwnedPointer'; internalSetters = $false; nativeControlHandles = $false }
+        uiAutomation = [ordered]@{ root = 'owned-window'; controlDriver = 'UIAutomationPatternsOwnedPointerAndKeyboard'; internalSetters = $false; nativeControlHandles = $false }
         launches = @($script:ownedRecords | ForEach-Object { [ordered]@{ role = $_.Role; pid = $_.Pid; started = $_.StartedUtc.ToString('o'); hwnd = $_.Hwnd.ToInt64() } })
         secondLaunch = $secondIdentity
         pages = $pageResults
         outputDropdown = $outputDropdown
+        theme = if ($runTheme) { [ordered]@{ verification = $themeVerification; afterMainReopen = $themeAfterReopen } } else { $null }
         systemDefaultPersisted = $runOutput
         snapshots = $script:snapshotPaths
-        screenshots = @($pageResults | ForEach-Object { $_.screenshot })
-        savedValues = [ordered]@{ quiet = $runQuiet; output = $runOutput; previewSilent = $runPreview; characters = ($runCharacters -and $characterCreated); announcements = $runAnnouncements; discardedOnClose = ($Feature -in @('All', 'Settings') -and $runAnnouncements); reopened = $true; voicesPreserved = $true }
+        screenshots = $screenshots
+        savedValues = [ordered]@{ quiet = $runQuiet; theme = $runTheme; output = $runOutput; previewSilent = $runPreview; characters = ($runCharacters -and $characterCreated); announcements = $runAnnouncements; discardedOnClose = ($Feature -in @('All', 'Settings') -and $runAnnouncements); reopened = $true; voicesPreserved = $true }
         audiblePreview = $false
         featureGaps = $script:featureGaps
         actions = $script:actionRecords.Count
         actionTranscript = (Join-Path $evidencePath 'actions.txt')
-        scope = 'Real owned GPUI settings window selected through UI Automation, with owned-pointer actions for sliders and dropdowns; preview was exercised only at zero volume.'
+        scope = 'Real owned GPUI settings driven through UI Automation, owned pointer actions, and owned keyboard input.' + $(if ($runTheme) { ' Themes were switched, saved, and reopened independently of settings drafts.' }) + $(if ($runPreview) { ' Audio preview was exercised at zero volume.' })
     }
     Write-JsonFile (Join-Path $evidencePath 'result.json') $result
     Write-Output ("${verdict}: GPUI settings UI Automation, persistence, singleton and screenshots; evidence: $evidencePath")
@@ -993,7 +1402,7 @@ catch {
     if (Test-Path -LiteralPath $evidencePath) {
         $_ | Out-String | Set-Content -LiteralPath (Join-Path $evidencePath 'failure.txt') -Encoding utf8NoBOM
         try {
-            $failureResult = [ordered]@{ verdict = 'FAILED'; feature = $Feature; binary = $binaryPath; sha256 = $binaryHash; error = $_.Exception.Message; snapshots = $script:snapshotPaths; actions = $script:actionRecords.Count; actionTranscript = (Join-Path $evidencePath 'actions.txt') }
+            $failureResult = [ordered]@{ verdict = 'FAILED'; feature = $Feature; binary = $binaryPath; sha256 = $binaryHash; error = $_.Exception.Message; theme = $script:themeVerification; snapshots = $script:snapshotPaths; actions = $script:actionRecords.Count; actionTranscript = (Join-Path $evidencePath 'actions.txt') }
             Write-JsonFile (Join-Path $evidencePath 'result.json') $failureResult
         } catch {}
     }

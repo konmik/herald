@@ -1,5 +1,7 @@
 #[path = "draft.rs"]
 mod draft;
+#[path = "appearance.rs"]
+mod appearance;
 #[path = "keyboard.rs"]
 mod keyboard;
 use keyboard::RevealFocused;
@@ -17,6 +19,7 @@ use crate::characters::{Character, CharacterVoice};
 use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
 use crate::platform::Preview;
 use crate::settings::{format_time, FontPreference, Settings, DEFAULT_SUMMARY_PROMPT, MAX_FONT_SIZE, MIN_FONT_SIZE};
+use appearance::{Appearance, AppearancePreference};
 use chrono::Timelike;
 use draft::{capture_draft_video, capture_draft_voice, character_video, new_character_id, voice_id_text, SettingsDraft};
 #[cfg(target_os = "windows")]
@@ -28,11 +31,11 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Root, WindowExt};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, IndexPath, Root, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, size, AnyElement, App, Context, Entity, FontWeight, IntoElement, ParentElement,
-    Render, SharedString, Subscription, Window, WindowBounds, WindowOptions, FocusHandle, ScrollHandle,
+    FocusHandle, Focusable, Render, SharedString, Subscription, Window, WindowBounds, WindowOptions, ScrollHandle,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -164,6 +167,7 @@ struct SettingsView {
     volume_focus: FocusHandle,
     silent_sound_focus: FocusHandle,
     page_scroll: ScrollHandle,
+    navigation_scroll: ScrollHandle,
     character_scroll: ScrollHandle,
     character_anchor: gpui_kit::ScrollAnchor,
     data: PathBuf,
@@ -212,6 +216,7 @@ impl SettingsView {
         });
 
         let draft = SettingsDraft::new(settings.clone());
+        let (appearance, appearance_warning) = Appearance::load_or_default(&data);
         let active_character = draft
             .selected_character
             .clone()
@@ -228,7 +233,7 @@ impl SettingsView {
         let body_font_choices = font_choices(&font_families, &draft.settings.announcement_body_font.family);
         let title_font_choices = font_choices(&font_families, &draft.settings.announcement_title_font.family);
         let size_choices = font_size_choices();
-        let status = "Apply saves changes. Close discards unsaved edits.".to_owned();
+        let status = appearance_warning.unwrap_or_else(|| "Apply saves changes. Close discards unsaved edits.".to_owned());
         let character_scroll = ScrollHandle::new();
         let character_anchor = gpui_kit::ScrollAnchor::for_handle(character_scroll.clone());
         let mut view = Self {
@@ -238,10 +243,11 @@ impl SettingsView {
             volume_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             silent_sound_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             page_scroll: ScrollHandle::new(),
+            navigation_scroll: ScrollHandle::new(),
             character_scroll,
             character_anchor,
             instance,
-            theme_monitor: theme::sync(Some(window), cx),
+            theme_monitor: theme::sync(Some(window), cx, appearance.theme),
             data: data.clone(),
             assets,
             saved: settings.clone(),
@@ -476,6 +482,21 @@ impl SettingsView {
                 }
             }
         }));
+    }
+
+    fn select_theme(&mut self, preference: AppearancePreference, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = (Appearance { theme: preference }).save(&self.data) {
+            self.status = format!("Could not save the theme: {error}");
+            cx.notify();
+            return;
+        }
+        self.theme_monitor.set_preference(preference, Some(window), cx);
+        self.status = "Theme saved immediately. Other settings still need Apply.".into();
+        cx.notify();
+    }
+
+    fn input_border_color(&self, state: &Entity<InputState>, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Hsla {
+        if state.read(cx).focus_handle(cx).is_focused(window) { cx.theme().ring } else { cx.theme().input }
     }
 
     fn subscribe_output_select(&mut self, cx: &mut Context<Self>) {
@@ -1044,7 +1065,7 @@ impl SettingsView {
     }
 
     fn render_sidebar(&self, layout: Layout, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sidebar = v_flex()
+        let mut navigation = v_flex()
             .id("settings-navigation")
             .role(gpui_kit::Role::TabList)
             .aria_label("Settings pages")
@@ -1055,12 +1076,9 @@ impl SettingsView {
             .on_action(cx.listener(|view, _: &keyboard::FirstItem, window, cx| view.navigate_page(0, window, cx)))
             .on_action(cx.listener(|view, _: &keyboard::LastItem, window, cx| view.navigate_page(PAGES.len() - 1, window, cx)))
             .on_action(cx.listener(|_, _: &keyboard::Activate, _, _| {}))
-            .when(layout.compact, |nav| nav.flex_row().flex_wrap().w_full().p_2().border_b_1())
-            .when(!layout.compact, |nav| nav.h_full().w(px(220.)).p_4().border_r_1())
-            .flex_shrink_0()
-            .gap_2()
-            .bg(cx.theme().sidebar)
-            .border_color(cx.theme().sidebar_border);
+            .when(layout.compact, |nav| nav.flex_row().flex_wrap().w_full())
+            .when(!layout.compact, |nav| nav.size_full().min_h_0().track_scroll(&self.navigation_scroll).overflow_y_scroll())
+            .gap_2();
         for (index, spec) in PAGES.iter().enumerate() {
             let selected = self.active_page == spec.page;
             let page = spec.page;
@@ -1083,9 +1101,65 @@ impl SettingsView {
                     view.change_page(page, window, cx);
                     view.navigation_focus[index].focus(window, cx);
                 }));
-            sidebar = sidebar.child(button);
+            let button = button.into_any_element();
+            let button = if layout.compact { button } else { button.reveal(spec.key, &self.navigation_scroll).flex_shrink_0().into_any_element() };
+            navigation = navigation.child(button);
         }
-        sidebar
+        let navigation = if layout.compact {
+            navigation.into_any_element()
+        } else {
+            div().relative().min_h_0().flex_1().w_full().child(navigation).child(Scrollbar::vertical(&self.navigation_scroll)).into_any_element()
+        };
+        let preference = self.theme_monitor.preference();
+        let themes = h_flex()
+            .id("theme-preference-buttons")
+            .flex_wrap()
+            .gap_1()
+            .child(
+                Button::new("theme-dark")
+                    .label("Dark")
+                    .accessibility_id("theme-dark")
+                    .toggled(preference == AppearancePreference::Dark)
+                    .when(preference == AppearancePreference::Dark, |button| button.primary())
+                    .on_click(cx.listener(|view, _, window, cx| view.select_theme(AppearancePreference::Dark, window, cx))),
+            )
+            .child(
+                Button::new("theme-light")
+                    .label("Light")
+                    .accessibility_id("theme-light")
+                    .toggled(preference == AppearancePreference::Light)
+                    .when(preference == AppearancePreference::Light, |button| button.primary())
+                    .on_click(cx.listener(|view, _, window, cx| view.select_theme(AppearancePreference::Light, window, cx))),
+            )
+            .child(
+                Button::new("theme-system")
+                    .label("System")
+                    .accessibility_id("theme-system")
+                    .toggled(preference == AppearancePreference::System)
+                    .when(preference == AppearancePreference::System, |button| button.primary())
+                    .on_click(cx.listener(|view, _, window, cx| view.select_theme(AppearancePreference::System, window, cx))),
+            );
+        let theme_group = v_flex()
+            .id("theme-preferences")
+            .gap_1()
+            .when(layout.compact, |group| group.w_full().pt_2().border_t_1())
+            .when(!layout.compact, |group| group.mt_4().pt_4().border_t_1())
+            .border_color(cx.theme().sidebar_border)
+            .child(div().text_sm().child("Theme"))
+            .child(themes);
+        v_flex()
+            .id("settings-sidebar")
+            .accessibility_id("settings-sidebar")
+            .role(gpui_kit::Role::Group)
+            .aria_label("Settings sidebar")
+            .when(layout.compact, |sidebar| sidebar.flex_row().flex_wrap().w_full().p_2().border_b_1())
+            .when(!layout.compact, |sidebar| sidebar.h_full().w(px(220.)).p_4().border_r_1())
+            .flex_shrink_0()
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_color(cx.theme().sidebar_border)
+            .child(navigation)
+            .child(theme_group)
     }
 
     fn render_slider(&self, id: &'static str, label: &'static str, state: &Entity<SliderState>, focus: &FocusHandle, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1154,6 +1228,7 @@ impl SettingsView {
                 Select::new(&self.output_select)
                     .id("output-device")
                     .accessibility_label("Output device")
+                    .focus_ring(false)
                     .w_full().reveal("reveal-output", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full()),
             )
             .child(
@@ -1247,11 +1322,11 @@ impl SettingsView {
                     .w_full()
                     .when(layout.compact, |row| row.flex_col())
                     .gap_4()
-                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").w_full().reveal("reveal-model", &self.page_scroll).w_full()))
-                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").aria_label("Default voice ID").w_full().reveal("reveal-default-voice", &self.page_scroll).w_full())),
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Speech model")).child(Select::new(&self.model_select).id("speech-model").accessibility_label("Speech model").focus_ring(false).w_full().reveal("reveal-model", &self.page_scroll).w_full()))
+                    .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child("Default voice ID")).child(Input::new(&self.default_voice_input).accessibility_id("default-voice-id").aria_label("Default voice ID").focus_ring(false).border_color(self.input_border_color(&self.default_voice_input, window, cx)).w_full().reveal("reveal-default-voice", &self.page_scroll).w_full())),
             )
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Characters without a custom ElevenLabs voice use this ID."))
-            .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").aria_label("ElevenLabs key").content_type(InputContentType::Password).mask_toggle().w_full().reveal("reveal-api-key", &self.page_scroll).w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
+            .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").aria_label("ElevenLabs key").content_type(InputContentType::Password).mask_toggle().focus_ring(false).border_color(self.input_border_color(&self.api_key_input, window, cx)).w_full().reveal("reveal-api-key", &self.page_scroll).w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
             .child(keyboard::textarea(&self.usage_input, "voice-usage", "Voice usage", 96., true, window, cx).reveal("reveal-voice-usage", &self.page_scroll).w_full())
             .child(
                 h_flex()
@@ -1330,11 +1405,11 @@ impl SettingsView {
                 .when(layout.compact, |editor| editor.w_full())
                 .gap_2()
                 .child(div().text_sm().child("Character name"))
-                .child(Input::new(&self.character_name_input).accessibility_id("character-name").aria_label("Character name").w_full().reveal("reveal-character-name", &self.page_scroll).w_full())
+                .child(Input::new(&self.character_name_input).accessibility_id("character-name").aria_label("Character name").focus_ring(false).border_color(self.input_border_color(&self.character_name_input, window, cx)).w_full().reveal("reveal-character-name", &self.page_scroll).w_full())
                 .child(div().text_sm().child("Character video"))
-                .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").aria_label("Character video").readonly(true).w_full().reveal("reveal-character-video", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx))).reveal("reveal-browse-video", &self.page_scroll)))
+                .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").aria_label("Character video").readonly(true).focus_ring(false).border_color(self.input_border_color(&self.character_video_input, window, cx)).w_full().reveal("reveal-character-video", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx))).reveal("reveal-browse-video", &self.page_scroll)))
                 .child(div().text_sm().child("ElevenLabs voice ID"))
-                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").aria_label("ElevenLabs voice ID").w_full().reveal("reveal-character-voice", &self.page_scroll).w_full())
+                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").aria_label("ElevenLabs voice ID").focus_ring(false).border_color(self.input_border_color(&self.character_voice_input, window, cx)).w_full().reveal("reveal-character-voice", &self.page_scroll).w_full())
                 .child(
                     h_flex()
                         .flex_wrap()
@@ -1363,8 +1438,8 @@ impl SettingsView {
                 .w_full()
                 .when(layout.compact, |row| row.flex_col())
                 .gap_2()
-                .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).w_full().reveal(font_id, &self.page_scroll).w_full()))
-                .child(v_flex().gap_1().w(px(130.)).when(layout.compact, |field| field.w_full()).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).w_full().reveal(size_id, &self.page_scroll).w_full()))
+                .child(v_flex().gap_1().min_w_0().flex_1().when(layout.compact, |field| field.w_full()).child(div().text_sm().child(label)).child(Select::new(font).id(font_id).accessibility_label(label).focus_ring(false).w_full().reveal(font_id, &self.page_scroll).w_full()))
+                .child(v_flex().gap_1().w(px(130.)).when(layout.compact, |field| field.w_full()).child(div().text_sm().child(format!("{label} size"))).child(Select::new(size_state).id(size_id).accessibility_label(format!("{label} size")).focus_ring(false).w_full().reveal(size_id, &self.page_scroll).w_full()))
         };
         v_flex()
             .w_full()
