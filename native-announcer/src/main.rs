@@ -572,7 +572,7 @@ fn run() -> Result<(), String> {
                             } else { None };
                             let image = active.video.as_ref().map(video::Video::frame);
                             let pixels = if let Some(scene) = &active.entrance {
-                                renderer.scene(scene, image, interference, entrance_time)
+                                renderer.draw_scene(scene, image, interference, entrance_time)
                             } else {
                                 let mut pixels = vec![0; viewport.width as usize * viewport.height as usize];
                                 renderer.draw(&mut pixels, viewport.width as usize, viewport.height as usize, active.placement.scale, image, interference, entrance_time);
