@@ -34,12 +34,63 @@ pub struct EntranceScene {
     pub impact: [f32; 2],
     channel: Vec<[f32; 2]>,
     forks: Vec<(usize, Vec<[f32; 2]>, f32)>,
+    style: LightningStyle,
 }
 
 #[derive(Clone, Copy)]
 pub enum LightningActivity {
     Holding(Duration, Duration, u32),
     Closing(Duration, u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LightningStyle {
+    Original,
+    Storm,
+    Electric,
+    Plasma,
+}
+
+impl LightningStyle {
+    fn parse(value: &str) -> Self {
+        match value {
+            "storm" => Self::Storm,
+            "electric" => Self::Electric,
+            "plasma" => Self::Plasma,
+            _ => Self::Original,
+        }
+    }
+
+    fn selected() -> Self {
+        static STYLE: std::sync::OnceLock<LightningStyle> = std::sync::OnceLock::new();
+        *STYLE.get_or_init(|| Self::parse(&std::env::var("HERALD_LIGHTNING_STYLE").unwrap_or_default()))
+    }
+
+    fn pulse(self, milliseconds: f32) -> f32 {
+        match self {
+            Self::Original => return_stroke(milliseconds),
+            Self::Storm => match milliseconds as u32 % 95 {
+                0..=24 => 1.35,
+                25..=43 => 0.18,
+                _ => 0.85,
+            },
+            Self::Electric => match milliseconds as u32 % 67 {
+                0..=17 => 1.25,
+                18..=34 => 0.12,
+                _ => 0.7,
+            },
+            Self::Plasma => 0.8 + 0.2 * (milliseconds * 0.035).sin(),
+        }
+    }
+
+    fn roughness(self) -> f32 {
+        match self {
+            Self::Original => 1.0,
+            Self::Storm => 1.7,
+            Self::Electric => 0.65,
+            Self::Plasma => 1.2,
+        }
+    }
 }
 
 fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u32, f32, f32)> {
@@ -96,6 +147,10 @@ fn irregular_channel(from: [f32; 2], to: [f32; 2], seed: u32, roughness: f32, st
 
 impl EntranceScene {
     pub fn new(monitor: PhysicalRect, card: CardPlacement, seed: u32) -> Self {
+        Self::with_style(monitor, card, seed, LightningStyle::selected())
+    }
+
+    fn with_style(monitor: PhysicalRect, card: CardPlacement, seed: u32, style: LightningStyle) -> Self {
         let scale = card.scale;
         let left = card.rect.x as f32;
         let bottom = card.rect.bottom() as f32;
@@ -112,7 +167,7 @@ impl EntranceScene {
         let mut channel = vec![source];
         for (index, pair) in route.windows(2).enumerate() {
             let length = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
-            irregular_channel(pair[0], pair[1], seed ^ index as u32 * 7919, (length * 0.08).min(18.0 * scale), 6.0 * scale, &mut channel);
+            irregular_channel(pair[0], pair[1], seed ^ index as u32 * 7919, (length * 0.08).min(18.0 * scale) * style.roughness(), 6.0 * scale, &mut channel);
         }
         let guard = |point: &mut [f32; 2]| {
             point[0] = point[0].clamp(monitor.x as f32, monitor.right() as f32 - 1.0);
@@ -127,9 +182,10 @@ impl EntranceScene {
             else { point[1] = point[1].max(impact[1] + 5.0 * scale).min(monitor.bottom() as f32 - 1.0); }
         };
         let mut forks = Vec::new();
+        let frequency = match style { LightningStyle::Storm => 5, LightningStyle::Electric => 17, _ => 11 };
         for index in 2..channel.len().saturating_sub(10) {
             let random = crate::state::noise_hash(seed ^ (index as u32).wrapping_mul(3571));
-            if random % 11 > 1 { continue; }
+            if random % frequency > 1 { continue; }
             let from = channel[index];
             let before = channel[index - 1];
             let dx = from[0] - before[0];
@@ -171,18 +227,18 @@ impl EntranceScene {
         bounds[2] = bounds[2].min(monitor.right());
         bounds[3] = bounds[3].min(monitor.bottom());
         let canvas = PhysicalRect { x: bounds[0], y: bounds[1], width: (bounds[2] - bounds[0]) as u32, height: (bounds[3] - bounds[1]) as u32 };
-        Self { monitor, card, canvas, source, impact, channel, forks }
+        Self { monitor, card, canvas, source, impact, channel, forks, style }
     }
 
     fn draw_incoming_bolt(&self, buffer: &mut [u32], elapsed: Duration) {
         let milliseconds = elapsed.as_secs_f32() * 1000.0;
         if milliseconds <= 0.0 || milliseconds >= 650.0 { return; }
-        let mut paint = LightningPaint::new(self.canvas.width as usize, self.canvas.height as usize);
+        let mut paint = LightningPaint::with_style(self.canvas.width as usize, self.canvas.height as usize, self.style);
         let reveal = (milliseconds / 120.0).min(1.0);
         let lengths: Vec<f32> = self.channel.windows(2).map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1])).collect();
         let reach = lengths.iter().sum::<f32>() * reveal;
         let local = |point: [f32; 2]| [point[0] - self.canvas.x as f32, point[1] - self.canvas.y as f32];
-        let intensity = if milliseconds < 120.0 { 0.65 } else { return_stroke(milliseconds) * ((370.0 - milliseconds) / 190.0).clamp(0.0, 1.0) };
+        let intensity = if milliseconds < 120.0 { 0.65 } else { paint.style.pulse(milliseconds) * ((370.0 - milliseconds) / 190.0).clamp(0.0, 1.0) };
         let mut distance = 0.0;
         for (index, pair) in self.channel.windows(2).enumerate() {
             if distance >= reach { break; }
@@ -211,21 +267,27 @@ struct LightningPaint {
     width: usize,
     height: usize,
     glow: Vec<f32>,
+    style: LightningStyle,
 }
 
 impl LightningPaint {
-    fn new(width: usize, height: usize) -> Self { Self { width, height, glow: vec![0.0; width * height] } }
+    fn new(width: usize, height: usize) -> Self { Self::with_style(width, height, LightningStyle::selected()) }
+
+    fn with_style(width: usize, height: usize, style: LightningStyle) -> Self {
+        Self { width, height, glow: vec![0.0; width * height], style }
+    }
 
     fn bolt(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, seed: u32, intensity: f32, reveal: f32) {
         let length = (to[0] - from[0]).hypot(to[1] - from[1]);
         let mut points = vec![from];
-        irregular_channel(from, to, seed, length * 0.16, 3.0 * scale, &mut points);
+        irregular_channel(from, to, seed, length * 0.16 * self.style.roughness(), 3.0 * scale, &mut points);
         let visible = ((points.len() - 1) as f32 * reveal.clamp(0.0, 1.0)).ceil() as usize;
+        let frequency = match self.style { LightningStyle::Storm => 7, LightningStyle::Electric => 29, _ => 19 };
         for (index, pair) in points.windows(2).take(visible).enumerate() {
             let taper = 0.7 - index as f32 / points.len() as f32 * 0.3;
             self.stroke(pair[0], pair[1], scale, taper, intensity);
             let random = crate::state::noise_hash(seed ^ index as u32 * 3571);
-            if index < 2 || random % 19 != 0 { continue; }
+            if index < 2 || random % frequency != 0 { continue; }
             let fraction = 0.12 + (random % 100) as f32 / 700.0;
             let dx = to[0] - pair[0][0];
             let dy = to[1] - pair[0][1];
@@ -241,7 +303,13 @@ impl LightningPaint {
 
     fn stroke(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, taper: f32, intensity: f32) {
         if intensity <= 0.0 { return; }
-        let radius = 5.0 * scale * taper.sqrt();
+        let (core, halo, halo_strength, radius) = match self.style {
+            LightningStyle::Original => (0.72, 6.0, 0.2, 5.0),
+            LightningStyle::Storm => (0.85, 8.0, 0.25, 5.0),
+            LightningStyle::Electric => (0.48, 3.5, 0.16, 5.0),
+            LightningStyle::Plasma => (1.0, 16.0, 0.38, 9.0),
+        };
+        let radius = radius * scale * taper.sqrt();
         let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(self.width);
         let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(self.width);
         let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(self.height);
@@ -253,8 +321,8 @@ impl LightningPaint {
             for x in left..right {
                 let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
                 let distance = ((x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy) - 0.4).max(0.0) / scale;
-                let strength = (1.3 * (-distance.powi(2) / (0.72 * taper).powi(2)).exp()
-                    + 0.2 * (-distance.powi(2) / (6.0 * taper)).exp()) * intensity;
+                let strength = (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp()
+                    + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity;
                 if strength > 0.015 {
                     let index = y * self.width + x;
                     self.glow[index] = self.glow[index].max(strength);
@@ -288,10 +356,16 @@ impl LightningPaint {
     }
 
     fn composite(self, buffer: &mut [u32]) {
+        let (halo, core) = match self.style {
+            LightningStyle::Original => (0x8097ef, 0xf7fbff),
+            LightningStyle::Storm => (0x607fea, 0xffffff),
+            LightningStyle::Electric => (0x36c8ed, 0xeaffff),
+            LightningStyle::Plasma => (0xb075f5, 0xfff0ff),
+        };
         for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
             if strength == 0.0 { continue; }
             let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
-            let color = blend(0x8097ef, 0xf7fbff, (strength.min(1.0).powi(3) * 255.0) as u32);
+            let color = blend(halo, core, (strength.min(1.0).powi(3) * 255.0) as u32);
             *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
         }
     }
@@ -703,6 +777,8 @@ impl PaintCoverage {
             LightningActivity::Holding(elapsed, duration, seed) => {
                 let Some((seed, intensity, buildup)) = ambient_burst(elapsed, duration, seed) else { return; };
                 let mut glow = LightningPaint::new(width, height);
+                let intensity = if glow.style == LightningStyle::Original { intensity }
+                    else { intensity * glow.style.pulse(elapsed.as_secs_f32() * 1000.0) };
                 draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);
                 for (index, strength) in glow.glow.iter_mut().enumerate() {
                     if !self.pixels[index] { *strength = 0.0; }
@@ -717,8 +793,10 @@ impl PaintCoverage {
 
     fn draw_exit(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, seed: u32) {
         let progress = (elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-        let intensity = match elapsed.as_millis() % 150 { 0..=55 => 1.45, 56..=90 => 0.0, _ => 1.1 };
         let mut glow = LightningPaint::new(width, height);
+        let intensity = if glow.style == LightningStyle::Original {
+            match elapsed.as_millis() % 150 { 0..=55 => 1.45, 56..=90 => 0.0, _ => 1.1 }
+        } else { glow.style.pulse(elapsed.as_secs_f32() * 1000.0) * 1.35 };
         for (index, contour) in self.contours(width, height).iter().enumerate() {
             for branch in 0..2 {
                 let random = crate::state::noise_hash(seed ^ (index * 17 + branch) as u32);
@@ -803,7 +881,7 @@ impl PaintCoverage {
         let milliseconds = elapsed.as_secs_f32() * 1000.0;
         if milliseconds < 120.0 { return; }
         let mut paint = LightningPaint::new(width, height);
-        let intensity = return_stroke(milliseconds) * ((650.0 - milliseconds) / 140.0).clamp(0.0, 1.0);
+        let intensity = paint.style.pulse(milliseconds) * ((650.0 - milliseconds) / 140.0).clamp(0.0, 1.0);
         if milliseconds < 180.0 {
             for direction in [[-6.0, 0.0], [4.0, -9.0], [4.0, 9.0]] {
                 paint.stroke(impact, [impact[0] + direction[0] * scale, impact[1] + direction[1] * scale], scale, 1.5, intensity);
@@ -834,6 +912,7 @@ impl PaintCoverage {
                 }
                 let reach = progress * length as f32 * 0.5;
                 let step = (2.0 * scale).round().max(1.0) as usize;
+                let frequency = match paint.style { LightningStyle::Storm => 11, LightningStyle::Electric => 43, _ => 29 };
                 for distance in (0..length).step_by(step) {
                     let arc = distance.min(length - distance) as f32;
                     if arc > reach { continue; }
@@ -848,10 +927,10 @@ impl PaintCoverage {
                     let dy = after[1] - before[1];
                     let magnitude = dx.hypot(dy).max(1.0);
                     let outward = [dy / magnitude, -dx / magnitude];
-                    let offset = ((random >> 8) & 255) as f32 / 255.0 * 1.4 * scale;
+                    let offset = ((random >> 8) & 255) as f32 / 255.0 * 1.4 * scale * paint.style.roughness();
                     let point = [contour[index][0] + outward[0] * offset, contour[index][1] + outward[1] * offset];
                     paint.stroke(point, contour[next], scale, width, intensity * front);
-                    if random.is_multiple_of(29) {
+                    if random.is_multiple_of(frequency) {
                         let reach = (3.0 + ((random >> 16) % 6) as f32) * scale;
                         let fork = [point[0] + outward[0] * reach + dx / magnitude * reach * 0.4,
                             point[1] + outward[1] * reach + dy / magnitude * reach * 0.4];
@@ -1033,6 +1112,90 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lightning_style_selection_preserves_the_default() {
+        assert_eq!(LightningStyle::parse(""), LightningStyle::Original);
+        assert_eq!(LightningStyle::parse("original"), LightningStyle::Original);
+        assert_eq!(LightningStyle::parse("unknown"), LightningStyle::Original);
+        assert_eq!(LightningStyle::parse("storm"), LightningStyle::Storm);
+        assert_eq!(LightningStyle::parse("electric"), LightningStyle::Electric);
+        assert_eq!(LightningStyle::parse("plasma"), LightningStyle::Plasma);
+    }
+
+    #[test]
+    fn incoming_bolt_uses_the_scene_style_for_leader_and_return_stroke() {
+        let monitor = PhysicalRect { x: -800, y: -200, width: 800, height: 1100 };
+        for style in [LightningStyle::Original, LightningStyle::Storm, LightningStyle::Electric, LightningStyle::Plasma] {
+            for scale in [1.0, 1.5] {
+                let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 250, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+                for seed in [1234, 1235] {
+                    let mut scene = EntranceScene::with_style(monitor, card, seed, style);
+                    scene.channel = vec![scene.source, scene.impact];
+                    scene.forks.clear();
+                    let width = scene.canvas.width as usize;
+                    let height = scene.canvas.height as usize;
+                    let from = [scene.source[0] - scene.canvas.x as f32, scene.source[1] - scene.canvas.y as f32];
+                    let impact = [scene.impact[0] - scene.canvas.x as f32, scene.impact[1] - scene.canvas.y as f32];
+                    for (time, reveal, intensity) in [(60, 0.5, 0.65), (160, 1.0, style.pulse(160.0))] {
+                        let to = [from[0] + (impact[0] - from[0]) * reveal, from[1] + (impact[1] - from[1]) * reveal];
+                        let mut paint = LightningPaint::with_style(width, height, style);
+                        paint.stroke(from, to, scale, 0.9, intensity);
+                        let mut expected = vec![0xff00ff; width * height];
+                        paint.composite(&mut expected);
+                        let mut pixels = vec![0xff00ff; width * height];
+                        scene.draw_incoming_bolt(&mut pixels, Duration::from_millis(time));
+                        assert_eq!(pixels, expected, "Wrong incoming paint for {style:?} at {time}ms");
+                        assert_ne!(pixels, vec![0xff00ff; width * height]);
+                    }
+                    for time in [0, 650] {
+                        let mut pixels = vec![0xff00ff; width * height];
+                        scene.draw_incoming_bolt(&mut pixels, Duration::from_millis(time));
+                        assert!(pixels.iter().all(|pixel| *pixel == 0xff00ff));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lightning_variations_are_distinct_and_repeatable() {
+        let render = |style| {
+            let mut paint = LightningPaint::with_style(160, 100, style);
+            paint.bolt([15.0, 85.0], [145.0, 15.0], 1.0, 1234, style.pulse(160.0), 1.0);
+            let mut pixels = vec![0xff00ff; 160 * 100];
+            paint.composite(&mut pixels);
+            pixels
+        };
+        let styles = [LightningStyle::Original, LightningStyle::Storm, LightningStyle::Electric, LightningStyle::Plasma];
+        for (index, style) in styles.into_iter().enumerate() {
+            let pixels = render(style);
+            assert_eq!(pixels, render(style));
+            assert!(pixels.iter().any(|pixel| *pixel != 0xff00ff));
+            assert_eq!(pixels[0], 0xff00ff);
+            for other in &styles[..index] { assert_ne!(pixels, render(*other)); }
+        }
+    }
+
+    #[test]
+    fn lightning_variations_keep_screen_edge_sources_and_video_impacts() {
+        let monitor = PhysicalRect { x: -1920, y: -200, width: 1920, height: 1400 };
+        for style in [LightningStyle::Storm, LightningStyle::Electric, LightningStyle::Plasma] {
+            for scale in [1.0, 1.5, 2.0] {
+                let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 300, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+                for seed in 0..40 {
+                    let scene = EntranceScene::with_style(monitor, card, seed, style);
+                    assert!(scene.source[0] == -1.0 || scene.source[1] == 1199.0);
+                    assert_eq!(scene.channel.last(), Some(&scene.impact));
+                    assert!(scene.canvas.contains(card.rect.x, card.rect.y));
+                    assert!(scene.canvas.contains(card.rect.right() - 1, card.rect.bottom() - 1));
+                    for point in scene.channel.iter().chain(scene.forks.iter().flat_map(|(_, points, _)| points)) {
+                        assert!(monitor.contains(point[0] as i32, point[1] as i32));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn sources_use_only_bottom_and_right_edges_across_seeds_and_scales() {
@@ -1217,7 +1380,7 @@ mod tests {
         assert!(early.iter().filter(|color| **color != 0xff00ff).count() > 1000);
         assert!(early.iter().zip(&later).filter(|(a, b)| **a != 0xff00ff && a == b).count() > 1000, "Leader regenerated instead of revealing a planted channel");
         assert!(scene.forks.iter().all(|(_, _, width)| *width < 0.9));
-        let mut paint = LightningPaint::new(100, 40);
+        let mut paint = LightningPaint::with_style(100, 40, LightningStyle::Original);
         paint.stroke([10.0, 20.0], [90.0, 20.0], 1.0, 1.0, 1.0);
         let mut pixels = vec![0xff00ff; 4000];
         paint.composite(&mut pixels);
