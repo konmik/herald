@@ -1068,7 +1068,7 @@ impl SettingsView {
             .on_action(cx.listener(|view, _: &keyboard::LastItem, window, cx| view.navigate_page(PAGES.len() - 1, window, cx)))
             .on_action(cx.listener(|_, _: &keyboard::Activate, _, _| {}))
             .when(layout.compact, |nav| nav.flex_row().flex_wrap().w_full())
-            .when(!layout.compact, |nav| nav.size_full().min_h_0().track_scroll(&self.navigation_scroll).overflow_y_scroll())
+            .when(!layout.compact, |nav| nav.size_full().min_h_0().pr_4().track_scroll(&self.navigation_scroll).overflow_y_scroll())
             .gap_2();
         for (index, spec) in PAGES.iter().enumerate() {
             let selected = self.active_page == spec.page;
@@ -1379,7 +1379,7 @@ impl SettingsView {
         }
         let list = v_flex().w(px(230.)).when(layout.compact, |list| list.w_full()).flex_shrink_0().min_w_0().gap_2()
             .child(div().relative().w_full().h(px(layout.character_list_height)).overflow_hidden()
-                .child(list.size_full().track_scroll(&self.character_scroll).overflow_y_scroll())
+                .child(list.size_full().pr_4().track_scroll(&self.character_scroll).overflow_y_scroll())
                 .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.character_scroll).viewport_from_layout()))
                 .reveal("reveal-character-list", &self.page_scroll).w_full())
             .child(Button::new("new-character").label("New").accessibility_id("new-character").secondary().on_click(cx.listener(|view, _, window, cx| view.add_character(window, cx))).reveal("reveal-new-character", &self.page_scroll));
@@ -1465,8 +1465,13 @@ impl Render for SettingsView {
         let page = self.active_page.spec();
         let page_content = self.render_page(layout, window, cx);
         let footer = h_flex()
+            .id("settings-footer")
+            .accessibility_id("settings-footer")
+            .role(gpui_kit::Role::Group)
+            .aria_label("Settings actions")
             .w_full()
             .flex_shrink_0()
+            .items_end()
             .gap_2()
             .border_t_1()
             .border_color(cx.theme().border)
@@ -1474,13 +1479,13 @@ impl Render for SettingsView {
             .child(div().id("status").role(gpui_kit::Role::Status).accessibility_id("status")
                 .aria_label(format!("Settings status: {}", self.status))
                 .a11y_synthetic_children(|builder| builder.parent_node().set_live(gpui_kit::accesskit::Live::Polite))
-                .min_h(px(if layout.compact { 48. } else { 72. })).min_w_0().flex_1().text_sm().child(self.status.clone()))
+                .min_h(px(48.)).min_w_0().flex_1().text_sm().child(self.status.clone()))
             .child(
                 h_flex()
                     .flex_shrink_0()
                     .gap_2()
-                    .child(Button::new("apply").label("Apply").accessibility_id("apply").primary().on_click(cx.listener(|view, _, _, cx| view.apply(cx))))
-                    .child(Button::new("close").label("Close").accessibility_id("close").disabled(self.offline_installing).secondary().on_click(cx.listener(|view, _, window, cx| {
+                    .child(Button::new("apply").label("Apply").accessibility_id("apply").h_12().min_w(px(88.)).text_base().primary().on_click(cx.listener(|view, _, _, cx| view.apply(cx))))
+                    .child(Button::new("close").label("Close").accessibility_id("close").h_12().min_w(px(88.)).text_base().disabled(self.offline_installing).secondary().on_click(cx.listener(|view, _, window, cx| {
                         if view.should_close(window, cx) {
                             window.remove_window();
                         }
@@ -1509,10 +1514,10 @@ impl Render for SettingsView {
                     .min_w_0()
                     .flex_1()
                     .when(layout.compact, |body| body.w_full().p_3())
-                    .when(!layout.compact, |body| body.h_full().p_8())
+                    .when(!layout.compact, |body| body.h_full().px_8().pt_8().pb_3())
                     .gap_3()
                     .child(div().id("page-scroll-wrapper").relative().min_h_0().flex_1().w_full().overflow_hidden()
-                        .child(v_flex().id("page-scroll").size_full().track_scroll(&self.page_scroll).overflow_y_scroll().child(
+                        .child(v_flex().id("page-scroll").size_full().pr_4().track_scroll(&self.page_scroll).overflow_y_scroll().child(
                          v_flex().w_full().min_w_0().gap_3().flex_none()
                             .child(div().id("page-title").role(gpui_kit::Role::Heading).accessibility_id("page-title").aria_label(page.label).text_2xl().font_weight(FontWeight::SEMIBOLD).child(page.label))
                             .child(div().text_sm().text_color(cx.theme().muted_foreground).child(page.description))
