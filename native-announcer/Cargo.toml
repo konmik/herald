@@ -48,7 +48,6 @@ debug = 0
 
 [profile.release]
 debug = 0
-lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
