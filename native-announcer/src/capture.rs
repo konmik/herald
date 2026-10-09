@@ -113,7 +113,7 @@ mod tests {
         let entries: Vec<serde_json::Value> = timeline.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(entries[0]["geometry"]["phase"], "impact");
         assert_eq!(entries[0]["geometry"]["monitor"]["y"], -200);
-        assert_eq!(entries[0]["geometry"]["source"][1], -200.0);
+        assert_eq!(entries[0]["geometry"]["source"][1], 879.0);
         assert_eq!(entries[0]["geometry"]["card"]["x"], -504);
         assert_eq!(entries[0]["geometry"]["scale"], 1.5);
         assert_eq!(entries[1]["geometry"]["phase"], "holding");

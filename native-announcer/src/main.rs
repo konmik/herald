@@ -454,7 +454,6 @@ fn run() -> Result<(), String> {
                             let bounds = monitor.bounds();
                             bounds.contains(placement.rect.x, placement.rect.y)
                                 && bounds.contains(placement.rect.right() - 1, placement.rect.bottom() - 1)
-                                && placement.rect.x - bounds.x >= (25.0 * placement.scale) as i32
                         }).map(|monitor| {
                             let seed = notification.id.bytes().fold(notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)));
                             EntranceScene::new(monitor.bounds(), placement, seed)
@@ -537,8 +536,8 @@ fn run() -> Result<(), String> {
                 let interval = match &current {
                     Presentation::Preparing(_) => 42,
                     Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION => 16,
-                    Presentation::Playing(active) if active.end.is_some() => 42,
-                    Presentation::Playing(active) => (1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64,
+                    Presentation::Playing(active) if active.end.is_some() => 16,
+                    Presentation::Playing(active) => ((1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33),
                     Presentation::Idle => 250,
                 };
                 next_frame = now + Duration::from_millis(interval);
@@ -565,6 +564,12 @@ fn run() -> Result<(), String> {
                                 video_loops += video.loops - previous_loops;
                             }
                             renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
+                            let seed = active.notification.id.bytes().fold(active.notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)));
+                            renderer.lightning_activity = if active.end.is_some() {
+                                Some(render::LightningActivity::Closing(transition_time, seed))
+                            } else if entrance_time.is_none() {
+                                Some(render::LightningActivity::Holding(elapsed, active.expires.duration_since(active.started), seed))
+                            } else { None };
                             let image = active.video.as_ref().map(video::Video::frame);
                             let pixels = if let Some(scene) = &active.entrance {
                                 renderer.scene(scene, image, interference, entrance_time)
@@ -685,7 +690,7 @@ mod tests {
         assert_eq!(active.entrance_strike(started + Duration::from_millis(650)), None);
         assert_eq!(active.entrance_strike(started + Duration::from_secs(5)), None);
         active.entrance = Some(EntranceScene::new(PhysicalRect { x: -500, y: -200, width: 1500, height: 1200 }, active.placement, 1234));
-        assert_eq!(active.viewport(started + Duration::from_millis(140)).y, -200);
+        assert_eq!(active.viewport(started + Duration::from_millis(140)).bottom(), 1000);
         assert_eq!(active.viewport(started + Duration::from_millis(650)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
         active.end = Some(started + Duration::from_millis(80));
         assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), None);

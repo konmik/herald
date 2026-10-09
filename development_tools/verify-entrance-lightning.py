@@ -13,7 +13,7 @@ def light_mask(image):
 
 
 def count(mask):
-    return sum(value > 0 for value in mask.getdata())
+    return sum(mask.histogram()[1:])
 
 
 def card_image(directory, entry):
@@ -50,8 +50,10 @@ def verify(directory):
     ix, iy = impact[0] - card['x'], impact[1] - card['y']
     ImageDraw.Draw(near).ellipse((ix - 22 * scale, iy - 22 * scale, ix + 22 * scale, iy + 22 * scale), fill=255)
     baseline_light = light_mask(baseline)
+    interior = silhouette.filter(ImageFilter.MinFilter(2 * round(12 * scale) + 1))
     records = []
     source_seen = False
+    previous_exit = None
     for entry in entries:
         geometry = entry['geometry']
         assert geometry['card'] == card and geometry['scale'] == scale, 'Global card placement or scale changed'
@@ -65,25 +67,38 @@ def verify(directory):
             assert viewport == card, 'Normal window bounds were not restored'
         else:
             source = geometry['source']
-            assert source[1] == monitor['y'], 'Lightning does not start on the actual top screen edge'
+            assert source[0] == monitor['x'] + monitor['width'] - 1 or source[1] == monitor['y'] + monitor['height'] - 1, 'Lightning does not start on the bottom or right screen edge'
             assert monitor['x'] <= source[0] < monitor['x'] + monitor['width'], 'Source is outside the selected monitor'
-            assert viewport['y'] == monitor['y'] and viewport['x'] < card['x'], 'Entrance scene is cropped to the card'
+            assert viewport['x'] <= source[0] < viewport['x'] + viewport['width'] and viewport['y'] <= source[1] < viewport['y'] + viewport['height'], 'Entrance scene is cropped to the card'
             assert viewport['x'] >= monitor['x'] and viewport['x'] + viewport['width'] <= monitor['x'] + monitor['width'], 'Scene exceeds the monitor'
             if phase == 'leader' and elapsed > 0:
                 with Image.open(directory / entry['file']) as frame:
                     sx = round(source[0] - viewport['x'])
-                    patch = frame.crop((max(0, sx - round(5 * scale)), 0, sx + round(5 * scale) + 1, max(1, round(3 * scale))))
+                    sy = round(source[1] - viewport['y'])
+                    radius = round(5 * scale)
+                    patch = frame.crop((max(0, sx - radius), max(0, sy - radius), min(frame.width, sx + radius + 1), min(frame.height, sy + radius + 1)))
                     source_seen |= count(light_mask(patch)) >= 3
-        mask = light_mask(card_image(directory, entry))
+        image = card_image(directory, entry)
+        if phase == 'exit':
+            visible = Image.new('L', image.size)
+            visible.putdata([0 if pixel == (32, 32, 32) else 255 for pixel in image.getdata()])
+            if previous_exit is not None:
+                assert count(ImageChops.subtract(visible, previous_exit)) <= 20 * scale * scale, 'Exit lightning reappeared over erased geometry'
+            previous_exit = visible
+        mask = light_mask(image)
         fresh = ImageChops.subtract(mask, baseline_light)
         coverage = count(ImageChops.multiply(edge, fresh.filter(ImageFilter.MaxFilter(2 * round(3 * scale) + 1)))) / max(1, count(edge))
         records.append({'phase': phase, 'elapsed': elapsed, 'outline': count(ImageChops.multiply(band, fresh)),
-                        'near': count(ImageChops.multiply(near, fresh)), 'far': count(ImageChops.multiply(far, fresh)), 'coverage': coverage})
+                        'near': count(ImageChops.multiply(near, fresh)), 'far': count(ImageChops.multiply(far, fresh)), 'coverage': coverage,
+                        'interior': count(ImageChops.multiply(interior, fresh)),
+                        'visible': sum(pixel != (32, 32, 32) for pixel in image.getdata()),
+                        'closing': None if entry['closingStart'] is None else elapsed - entry['closingStart']})
     leaders = [record for record in records if record['phase'] == 'leader' and record['elapsed'] > 0]
     impacts = [record for record in records if record['phase'] == 'impact']
     early = [record for record in records if record['phase'] == 'propagation' and record['elapsed'] < 0.28]
     late = [record for record in records if 0.38 <= record['elapsed'] < 0.56 and record['phase'] != 'exit']
-    after = [record for record in records if record['phase'] in ('holding', 'exit')]
+    idle = [record for record in records if record['phase'] == 'holding']
+    exits = [record for record in records if record['phase'] == 'exit']
     assert leaders and source_seen, 'No visible screen-edge leader captured'
     assert impacts and early and late, 'Impact or charge propagation frames missing'
     assert any(record['phase'] == 'exit' for record in records), 'Exit frames missing'
@@ -95,9 +110,16 @@ def verify(directory):
     assert max(record['far'] for record in late) >= 80 * scale * scale, 'Charge never reached the far bubble edge'
     full = max(record['coverage'] for record in late)
     assert full >= 0.85, f'Entire painted outline did not energize: {full:.1%}'
-    assert max(record['outline'] for record in after) <= 50 * scale * scale, 'Lightning persists during holding or exit'
+    bursts = [record for record in idle if record['outline'] + record['interior'] > 30 * scale * scale]
+    assert bursts and len(bursts) < len(idle) * 0.95, 'Holding lightning must be sporadic with quiet gaps'
+    assert max(record['outline'] for record in idle) > 50 * scale * scale, 'Holding lightning never reaches the outlines'
+    assert max(record['interior'] for record in exits) > 100 * scale * scale, 'Exit lightning never crosses the interiors'
+    initial = [record for record in idle if record['elapsed'] < (idle[0]['elapsed'] + idle[-1]['elapsed']) / 2]
+    assert max(record['outline'] + record['interior'] for record in exits) > max(record['outline'] + record['interior'] for record in initial), 'Exit lightning is not more intense than the initial holding effect'
+    late_exit = [record for record in exits if record['closing'] >= 0.5]
+    assert late_exit and min(record['visible'] for record in late_exit) < count(silhouette) * 0.3, 'Exit did not swallow the announcement'
     return {'result': 'PASS', 'screenEdgeLeader': True, 'videoFirst': True, 'fullOutlineCoverage': round(full, 3),
-            'fixedCardPlacement': True, 'restoredBounds': True, 'frames': len(entries)}
+            'fixedCardPlacement': True, 'restoredBounds': True, 'sporadicArcs': True, 'swallowingExit': True, 'frames': len(entries)}
 
 
 if __name__ == '__main__':
