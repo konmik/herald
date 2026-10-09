@@ -48,7 +48,7 @@ impl Frames {
     pub fn save_scene(&mut self, pixels: &[u32], width: u32, height: u32, elapsed: Duration, closing_start: Option<Duration>, card: crate::render::CardPlacement, scene: Option<&crate::render::EntranceScene>, viewport: crate::render::PhysicalRect) -> Result<(), String> {
         let geometry = serde_json::json!({"monitor": scene.map(|scene| scene.monitor), "viewport": viewport,
             "card": card.rect, "scale": card.scale, "source": scene.map(|scene| scene.source), "impact": scene.map(|scene| scene.impact),
-            "phase": crate::render::entrance_phase(elapsed, closing_start.is_some())});
+            "phase": crate::render::announcement_phase(elapsed, closing_start.is_some())});
         self.write(pixels, width, height, elapsed, closing_start, Some(geometry))
     }
 

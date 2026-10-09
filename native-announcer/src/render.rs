@@ -42,7 +42,7 @@ pub enum LightningActivity {
     Closing(Duration, u32),
 }
 
-fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u32, f32, f32, f32)> {
+fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u32, f32, f32)> {
     let time = elapsed.saturating_sub(crate::state::TRANSITION_DURATION).as_secs_f32();
     let duration = duration.saturating_sub(crate::state::TRANSITION_DURATION).as_secs_f32().max(1.0);
     let mut start = 0.1 + (crate::state::noise_hash(seed) % 500) as f32 / 1000.0;
@@ -53,7 +53,7 @@ fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u3
         let length = 0.09 + ((random >> 8) % 140) as f32 / 1000.0 + buildup * 0.05;
         if time < start + length {
             let age = (time - start) / length;
-            return Some((random, (std::f32::consts::PI * age).sin(), buildup, 1.0));
+            return Some((random, (std::f32::consts::PI * age).sin(), buildup));
         }
         let gap = if random % 4 == 0 { 0.04 + ((random >> 16) % 110) as f32 / 1000.0 }
             else { 0.22 + ((random >> 16) % 900) as f32 / 1000.0 };
@@ -65,16 +65,16 @@ fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u3
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum EntrancePhase { Leader, Impact, Propagation, Decay, Holding, Exit }
+pub enum AnnouncementPhase { Leader, Impact, Propagation, Decay, Holding, Exit }
 
-pub fn entrance_phase(elapsed: Duration, closing: bool) -> EntrancePhase {
-    if closing { return EntrancePhase::Exit; }
+pub fn announcement_phase(elapsed: Duration, closing: bool) -> AnnouncementPhase {
+    if closing { return AnnouncementPhase::Exit; }
     match elapsed.as_millis() {
-        0..=119 => EntrancePhase::Leader,
-        120..=179 => EntrancePhase::Impact,
-        180..=449 => EntrancePhase::Propagation,
-        450..=649 => EntrancePhase::Decay,
-        _ => EntrancePhase::Holding,
+        0..=119 => AnnouncementPhase::Leader,
+        120..=179 => AnnouncementPhase::Impact,
+        180..=449 => AnnouncementPhase::Propagation,
+        450..=649 => AnnouncementPhase::Decay,
+        _ => AnnouncementPhase::Holding,
     }
 }
 
@@ -174,7 +174,7 @@ impl EntranceScene {
         Self { monitor, card, canvas, source, impact, channel, forks }
     }
 
-    fn incoming(&self, buffer: &mut [u32], elapsed: Duration) {
+    fn draw_incoming_bolt(&self, buffer: &mut [u32], elapsed: Duration) {
         let milliseconds = elapsed.as_secs_f32() * 1000.0;
         if milliseconds <= 0.0 || milliseconds >= 650.0 { return; }
         let mut paint = LightningPaint::new(self.canvas.width as usize, self.canvas.height as usize);
@@ -261,6 +261,30 @@ impl LightningPaint {
                 }
             }
         }
+    }
+
+    fn distance_field(&self) -> Vec<f32> {
+        let (width, height) = (self.width, self.height);
+        let mut distance: Vec<f32> = self.glow.iter().map(|strength| if *strength > 0.25 { 0.0 } else { 10000.0 }).collect();
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                if x > 0 { distance[index] = distance[index].min(distance[index - 1] + 1.0); }
+                if y > 0 { distance[index] = distance[index].min(distance[index - width] + 1.0); }
+                if x > 0 && y > 0 { distance[index] = distance[index].min(distance[index - width - 1] + 1.414); }
+                if x + 1 < width && y > 0 { distance[index] = distance[index].min(distance[index - width + 1] + 1.414); }
+            }
+        }
+        for y in (0..height).rev() {
+            for x in (0..width).rev() {
+                let index = y * width + x;
+                if x + 1 < width { distance[index] = distance[index].min(distance[index + 1] + 1.0); }
+                if y + 1 < height { distance[index] = distance[index].min(distance[index + width] + 1.0); }
+                if x + 1 < width && y + 1 < height { distance[index] = distance[index].min(distance[index + width + 1] + 1.414); }
+                if x > 0 && y + 1 < height { distance[index] = distance[index].min(distance[index + width - 1] + 1.414); }
+            }
+        }
+        distance
     }
 
     fn composite(self, buffer: &mut [u32]) {
@@ -604,14 +628,14 @@ impl Renderer {
         }
         if let Some(coverage) = coverage {
             if let Some(elapsed) = strike {
-                coverage.lightning_at(buffer, width, height, scale, elapsed, self.impact.unwrap_or([187.5 * scale, height as f32 - 90.5 * scale]));
+                coverage.draw_entrance_lightning(buffer, width, height, scale, elapsed, self.impact.unwrap_or([187.5 * scale, height as f32 - 90.5 * scale]));
             } else if let Some(activity) = self.lightning_activity {
-                coverage.activity(buffer, width, height, scale, activity);
+                coverage.draw_activity(buffer, width, height, scale, activity);
             }
         }
     }
 
-    pub fn scene(&mut self, scene: &EntranceScene, image: Option<&RgbaImage>, interference: f32, entrance: Option<Duration>) -> Vec<u32> {
+    pub fn draw_scene(&mut self, scene: &EntranceScene, image: Option<&RgbaImage>, interference: f32, entrance: Option<Duration>) -> Vec<u32> {
         let card = scene.card;
         let width = card.rect.width as usize;
         let height = card.rect.height as usize;
@@ -629,7 +653,7 @@ impl Renderer {
             buffer[(y + row) * canvas_width + x..(y + row) * canvas_width + x + width]
                 .copy_from_slice(&pixels[row * width..(row + 1) * width]);
         }
-        if let Some(elapsed) = entrance { scene.incoming(&mut buffer, elapsed); }
+        if let Some(elapsed) = entrance { scene.draw_incoming_bolt(&mut buffer, elapsed); }
         buffer
     }
 
@@ -645,7 +669,7 @@ struct PaintCoverage {
     pixels: Vec<bool>,
 }
 
-fn ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale: f32, seed: u32, intensity: f32, buildup: f32, reveal: f32) {
+fn draw_ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale: f32, seed: u32, intensity: f32, buildup: f32) {
     for (surface, contour) in coverage.contours(glow.width, glow.height).iter().enumerate() {
         for arc in 0..(1 + (buildup * 2.5) as usize) {
             let random = crate::state::noise_hash(seed ^ (surface * 17 + arc) as u32);
@@ -662,7 +686,7 @@ fn ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale: f32
                 [contour[index][0] - dy / length * 3.0 * scale, contour[index][1] + dx / length * 3.0 * scale]
             };
             for offset in (0..length).step_by(step) {
-                glow.bolt(point(offset), point((offset + step).min(length)), scale, random ^ offset as u32, intensity * 1.5, reveal);
+                glow.bolt(point(offset), point((offset + step).min(length)), scale, random ^ offset as u32, intensity * 1.5, 1.0);
             }
         }
     }
@@ -674,84 +698,65 @@ fn paint(buffer: &mut [u32], coverage: &mut Option<&mut PaintCoverage>, index: u
 }
 
 impl PaintCoverage {
-    fn activity(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, activity: LightningActivity) {
-        let (seed, intensity, closing, buildup, reveal) = match activity {
+    fn draw_activity(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, activity: LightningActivity) {
+        match activity {
             LightningActivity::Holding(elapsed, duration, seed) => {
-                let Some((seed, intensity, progress, reveal)) = ambient_burst(elapsed, duration, seed) else { return; };
-                (seed, intensity, None, progress, reveal)
+                let Some((seed, intensity, buildup)) = ambient_burst(elapsed, duration, seed) else { return; };
+                let mut glow = LightningPaint::new(width, height);
+                draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);
+                for (index, strength) in glow.glow.iter_mut().enumerate() {
+                    if !self.pixels[index] { *strength = 0.0; }
+                }
+                glow.composite(buffer);
             }
             LightningActivity::Closing(elapsed, seed) => {
-                let progress = (elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-                let flash = match elapsed.as_millis() % 150 { 0..=55 => 1.45, 56..=90 => 0.0, _ => 1.1 };
-                (seed, flash, Some(progress), 0.0, 1.0)
+                self.draw_exit(buffer, width, height, scale, elapsed, seed);
             }
-        };
+        }
+    }
+
+    fn draw_exit(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, seed: u32) {
+        let progress = (elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        let intensity = match elapsed.as_millis() % 150 { 0..=55 => 1.45, 56..=90 => 0.0, _ => 1.1 };
         let mut glow = LightningPaint::new(width, height);
-        if let Some(progress) = closing {
-            for (index, contour) in self.contours(width, height).iter().enumerate() {
-                for branch in 0..2 {
-                    let random = crate::state::noise_hash(seed ^ (index * 17 + branch) as u32);
-                    let start = random as usize % contour.len();
-                    let end = (start + (85.0 * scale) as usize) % contour.len();
-                    glow.bolt(contour[start], contour[end], scale, random, 0.8, (progress / 0.16).min(1.0));
-                }
+        for (index, contour) in self.contours(width, height).iter().enumerate() {
+            for branch in 0..2 {
+                let random = crate::state::noise_hash(seed ^ (index * 17 + branch) as u32);
+                let start = random as usize % contour.len();
+                let end = (start + (85.0 * scale) as usize) % contour.len();
+                glow.bolt(contour[start], contour[end], scale, random, 0.8, (progress / 0.16).min(1.0));
             }
-            let bottom = height as f32;
-            let routes = [
-                ([312.0 * scale, bottom - 28.0 * scale], [201.0 * scale, bottom - 129.0 * scale]),
-                ([202.0 * scale, bottom - 130.0 * scale], [300.0 * scale, bottom - 30.0 * scale]),
-                ([260.0 * scale, bottom - 151.0 * scale], [25.0 * scale, 20.0 * scale]),
-                ([18.0 * scale, bottom - 163.0 * scale], [288.0 * scale, 20.0 * scale]),
-                ([308.0 * scale, 40.0 * scale], [18.0 * scale, bottom - 175.0 * scale]),
-                ([310.0 * scale, bottom - 100.0 * scale], [195.0 * scale, bottom - 40.0 * scale]),
-            ];
-            for (index, (from, to)) in routes.into_iter().enumerate() {
-                glow.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
+        }
+        let bottom = height as f32;
+        let routes = [
+            ([312.0 * scale, bottom - 28.0 * scale], [201.0 * scale, bottom - 129.0 * scale]),
+            ([202.0 * scale, bottom - 130.0 * scale], [300.0 * scale, bottom - 30.0 * scale]),
+            ([260.0 * scale, bottom - 151.0 * scale], [25.0 * scale, 20.0 * scale]),
+            ([18.0 * scale, bottom - 163.0 * scale], [288.0 * scale, 20.0 * scale]),
+            ([308.0 * scale, 40.0 * scale], [18.0 * scale, bottom - 175.0 * scale]),
+            ([310.0 * scale, bottom - 100.0 * scale], [195.0 * scale, bottom - 40.0 * scale]),
+        ];
+        for (index, (from, to)) in routes.into_iter().enumerate() {
+            glow.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
+        }
+        let distance = glow.distance_field();
+        let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
+        let reach = consumption.powi(2) * width.max(height) as f32;
+        for (index, pixel) in buffer.iter_mut().enumerate() {
+            if !self.pixels[index] { glow.glow[index] = 0.0; continue; }
+            if consumption > 0.0 && distance[index] < reach {
+                *pixel = 0xff00ff;
+                glow.glow[index] = 0.0;
+                continue;
             }
-            let mut distance: Vec<f32> = glow.glow.iter().map(|strength| if *strength > 0.25 { 0.0 } else { 10000.0 }).collect();
-            for y in 0..height {
-                for x in 0..width {
-                    let index = y * width + x;
-                    if x > 0 { distance[index] = distance[index].min(distance[index - 1] + 1.0); }
-                    if y > 0 { distance[index] = distance[index].min(distance[index - width] + 1.0); }
-                    if x > 0 && y > 0 { distance[index] = distance[index].min(distance[index - width - 1] + 1.414); }
-                    if x + 1 < width && y > 0 { distance[index] = distance[index].min(distance[index - width + 1] + 1.414); }
-                }
+            let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
+            *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
+            if consumption > 0.0 {
+                let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
+                let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
+                glow.glow[index] = glow.glow[index].max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
             }
-            for y in (0..height).rev() {
-                for x in (0..width).rev() {
-                    let index = y * width + x;
-                    if x + 1 < width { distance[index] = distance[index].min(distance[index + 1] + 1.0); }
-                    if y + 1 < height { distance[index] = distance[index].min(distance[index + width] + 1.0); }
-                    if x + 1 < width && y + 1 < height { distance[index] = distance[index].min(distance[index + width + 1] + 1.414); }
-                    if x > 0 && y + 1 < height { distance[index] = distance[index].min(distance[index + width - 1] + 1.414); }
-                }
-            }
-            let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
-            let reach = consumption.powi(2) * width.max(height) as f32;
-            for (index, pixel) in buffer.iter_mut().enumerate() {
-                if !self.pixels[index] { glow.glow[index] = 0.0; continue; }
-                if consumption > 0.0 && distance[index] < reach {
-                    *pixel = 0xff00ff;
-                    glow.glow[index] = 0.0;
-                    continue;
-                }
-                else {
-                    let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
-                    *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
-                }
-                if consumption > 0.0 {
-                    let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
-                    let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
-                    glow.glow[index] = glow.glow[index].max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
-                }
-                glow.glow[index] *= if progress < 0.88 { intensity } else { 0.0 };
-            }
-        } else {
-            ambient_edges(self, &mut glow, scale, seed, intensity, buildup, reveal);
-            for (index, strength) in glow.glow.iter_mut().enumerate() {
-                if !self.pixels[index] { *strength = 0.0; }
-            }
+            glow.glow[index] *= if progress < 0.88 { intensity } else { 0.0 };
         }
         glow.composite(buffer);
     }
@@ -794,12 +799,7 @@ impl PaintCoverage {
         contours
     }
 
-    #[cfg(test)]
-    fn lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration) {
-        self.lightning_at(buffer, width, height, scale, elapsed, [187.5 * scale, height as f32 - 90.5 * scale]);
-    }
-
-    fn lightning_at(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, impact: [f32; 2]) {
+    fn draw_entrance_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, impact: [f32; 2]) {
         let milliseconds = elapsed.as_secs_f32() * 1000.0;
         if milliseconds < 120.0 { return; }
         let mut paint = LightningPaint::new(width, height);
@@ -1077,19 +1077,16 @@ mod tests {
         let coverage = PaintCoverage { pixels: plain.iter().map(|pixel| *pixel != 0xff00ff).collect() };
         let mut early = LightningPaint::new(320, 260);
         let mut late = LightningPaint::new(320, 260);
-        let mut tip = LightningPaint::new(320, 260);
-        ambient_edges(&coverage, &mut early, 1.0, 1234, 1.0, 0.0, 1.0);
-        ambient_edges(&coverage, &mut late, 1.0, 1234, 1.0, 1.0, 1.0);
-        ambient_edges(&coverage, &mut tip, 1.0, 1234, 1.0, 1.0, 0.2);
+        draw_ambient_edges(&coverage, &mut early, 1.0, 1234, 1.0, 0.0);
+        draw_ambient_edges(&coverage, &mut late, 1.0, 1234, 1.0, 1.0);
         let lit = |paint: &LightningPaint| paint.glow.iter().filter(|strength| **strength > 0.2).count();
         assert!(lit(&late) > lit(&early) * 3);
-        assert!(lit(&late) > lit(&tip) * 2);
         let card = CardPlacement { rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
         let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1234);
-        let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234).is_some_and(|(_, intensity, _, reveal)| intensity > 0.8 && reveal == 1.0)).unwrap();
+        let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
         renderer.seed = 567891;
         renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(time), Duration::from_secs(5), 1234));
-        let frame = renderer.scene(&scene, None, 0.0, None);
+        let frame = renderer.draw_scene(&scene, None, 0.0, None);
         for (index, pixel) in plain.iter().enumerate() {
             if *pixel != 0xff00ff { continue; }
             assert_eq!(frame[index], *pixel, "Lightning projected outside the surface");
@@ -1106,8 +1103,7 @@ mod tests {
         let duration = Duration::from_secs(5);
         let mut previous = None;
         for milliseconds in 650..5000 {
-            if let Some((seed, _, buildup, reveal)) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234) {
-                assert_eq!(reveal, 1.0);
+            if let Some((seed, _, buildup)) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234) {
                 if let Some((last_seed, last_buildup)) = previous {
                     if seed == last_seed { assert_eq!(buildup, last_buildup); }
                 }
@@ -1122,7 +1118,7 @@ mod tests {
         let mut starts = Vec::new();
         let mut last_seed = None;
         for time in (650..30000).step_by(5) {
-            if let Some((seed, _, _, _)) = ambient_burst(Duration::from_millis(time), duration, 1234) {
+            if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, 1234) {
                 if last_seed != Some(seed) { starts.push(time); }
                 last_seed = Some(seed);
             }
@@ -1144,7 +1140,7 @@ mod tests {
                 for (region, start) in [650, 650 + total * 2 / 3].into_iter().enumerate() {
                     let mut previous_seed = None;
                     for time in (start..start + total / 3).step_by(5) {
-                        if let Some((seed, _, _, _)) = ambient_burst(Duration::from_millis(time), duration, notification) {
+                        if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, notification) {
                             samples[region] += 1;
                             if previous_seed != Some(seed) { bursts[region] += 1; }
                             previous_seed = Some(seed);
@@ -1215,9 +1211,9 @@ mod tests {
             }
         }
         let mut early = vec![0xff00ff; scene.canvas.width as usize * scene.canvas.height as usize];
-        scene.incoming(&mut early, Duration::from_millis(60));
+        scene.draw_incoming_bolt(&mut early, Duration::from_millis(60));
         let mut later = vec![0xff00ff; early.len()];
-        scene.incoming(&mut later, Duration::from_millis(100));
+        scene.draw_incoming_bolt(&mut later, Duration::from_millis(100));
         assert!(early.iter().filter(|color| **color != 0xff00ff).count() > 1000);
         assert!(early.iter().zip(&later).filter(|(a, b)| **a != 0xff00ff && a == b).count() > 1000, "Leader regenerated instead of revealing a planted channel");
         assert!(scene.forks.iter().all(|(_, _, width)| *width < 0.9));
@@ -1239,14 +1235,14 @@ mod tests {
             for x in 188..316 { coverage.pixels[y * 320 + x] = true; pixels[y * 320 + x] = 0x191f2a; }
         }
         let plain = pixels.clone();
-        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(200));
+        coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(200), [187.5, 169.5]);
         assert_eq!(&pixels[..110 * 320], &plain[..110 * 320]);
         assert!(pixels[170 * 320 + 188] & 255 > 200);
         pixels.copy_from_slice(&plain);
-        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(260));
+        coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(260), [187.5, 169.5]);
         assert!(pixels[110 * 320 + 252] & 255 > 100, "No visible transfer to the bubble tail");
         pixels.copy_from_slice(&plain);
-        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(480));
+        coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(480), [187.5, 169.5]);
         let bright_top = (3..10).flat_map(|y| (40..280).map(move |x| y * 320 + x))
             .filter(|index| pixels[*index] & 255 > 220).count();
         assert!(bright_top >= 100, "Charge never reached the full far bubble edge");
@@ -1260,7 +1256,7 @@ mod tests {
         let mut normal = vec![0; 320 * 260];
         renderer.draw(&mut normal, 320, 260, 1.0, None, 0.0, None);
         renderer.seed = 567891;
-        assert_eq!(renderer.scene(&scene, None, 0.0, None), normal);
+        assert_eq!(renderer.draw_scene(&scene, None, 0.0, None), normal);
     }
 
     #[test]
@@ -1283,7 +1279,7 @@ mod tests {
                     let mut plain = vec![0; width * height];
                     renderer.draw(&mut plain, width, height, scale, Some(&image), 0.0, None);
                     renderer.seed = 567891;
-                    let struck = renderer.scene(&scene, Some(&image), 0.0, Some(Duration::from_millis(milliseconds)));
+                    let struck = renderer.draw_scene(&scene, Some(&image), 0.0, Some(Duration::from_millis(milliseconds)));
                     let offset_x = (card.rect.x - scene.canvas.x) as usize;
                     let offset_y = (card.rect.y - scene.canvas.y) as usize;
                     let scene_width = scene.canvas.width as usize;
