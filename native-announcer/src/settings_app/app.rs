@@ -831,7 +831,7 @@ impl SettingsView {
     }
 
     fn start_lightning_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match lightning_preview::Preview::start(self.assets.clone(), self.draft.settings.clone(), window.is_window_active()) {
+        match lightning_preview::Preview::start(self.assets.clone(), self.draft.settings.clone(), window.is_window_active(), window.scale_factor()) {
             Ok(preview) => self.lightning_preview = Some(preview),
             Err(error) => { self.status = format!("Could not start lightning preview: {error}"); cx.notify(); return; }
         }
@@ -1555,16 +1555,17 @@ impl SettingsView {
                 .child(self.render_slider(spec.id, spec.label, &self.lightning_sliders[index], &self.lightning_focus[index], cx)
                     .reveal(spec.id, &self.page_scroll)));
         }
+        let (width, height) = self.lightning_preview.as_ref().map_or((352., 336.), |preview| preview.size);
         let mut panel = div().id("lightning-preview").accessibility_id("lightning-preview").role(gpui_kit::Role::Image)
-            .aria_label("Silent lightning preview").w_full().h(px(286.)).overflow_hidden().rounded_md().border_1().border_color(cx.theme().border)
+            .aria_label("Silent lightning preview").w(px(width)).max_w(gpui_kit::relative(1.0)).h(px(height)).overflow_x_scroll().rounded_md()
             .bg(gpui_kit::rgb(0x101827));
         let description = if let Some(preview) = &self.lightning_preview {
-            if let Some(image) = &preview.image { panel = panel.child(gpui_kit::img(image.clone()).size_full().object_fit(gpui_kit::ObjectFit::Contain)); }
+            if let Some(image) = &preview.image { panel = panel.child(gpui_kit::img(image.clone()).w(px(width)).h(px(height)).flex_shrink_0()); }
             if let Some(error) = &preview.error { error.clone() }
             else if preview.character_id.is_empty() { "Loading bundled character…".into() }
             else { format!("{} · {:?}", preview.character_name, preview.phase) }
         } else { "Preview stopped.".into() };
-        let preview = v_flex().w(px(320.)).flex_shrink_0().gap_2().when(layout.compact, |column| column.w_full())
+        let preview = v_flex().w(px(width)).min_w_0().flex_shrink_0().gap_2().when(layout.compact, |column| column.w_full())
             .child(panel)
             .child(div().id("lightning-preview-info").accessibility_id("lightning-preview-info").role(gpui_kit::Role::Label)
                 .aria_value(description.clone()).text_sm().child(description))

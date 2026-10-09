@@ -11,8 +11,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-const STAGE: PhysicalRect = PhysicalRect { x: 0, y: 0, width: 352, height: 336 };
-const SCALE: f32 = 0.8;
 const MESSAGE: &str = "This is an announcement.";
 
 #[derive(Clone, Copy)]
@@ -46,10 +44,12 @@ pub(super) struct Preview {
     pub(super) character_name: String,
     pub(super) phase: AnnouncementPhase,
     pub(super) error: Option<String>,
+    pub(super) size: (f32, f32),
+    scale: f32,
 }
 
 impl Preview {
-    pub(super) fn start(assets: PathBuf, settings: Settings, active: bool) -> Result<Self, String> {
+    pub(super) fn start(assets: PathBuf, settings: Settings, active: bool, scale: f32) -> Result<Self, String> {
         let shared = Arc::new((Mutex::new(Shared {
             intent: Intent { lightning: settings.lightning, replay: 0, revision: 0, active },
             frame: None,
@@ -57,9 +57,10 @@ impl Preview {
         }), Condvar::new()));
         let worker_shared = shared.clone();
         let worker = std::thread::Builder::new().name("herald-lightning-preview".into())
-            .spawn(move || run(worker_shared, assets, settings)).map_err(|error| error.to_string())?;
+            .spawn(move || run(worker_shared, assets, settings, scale)).map_err(|error| error.to_string())?;
         Ok(Self { shared, worker: Some(worker), driver: None, image: None, retired: None,
-            character_id: String::new(), character_name: String::new(), phase: AnnouncementPhase::Leader, error: None })
+            character_id: String::new(), character_name: String::new(), phase: AnnouncementPhase::Leader, error: None,
+            size: (352.0, 336.0), scale })
     }
 
     pub(super) fn update(&self, lightning: LightningSettings) {
@@ -98,6 +99,7 @@ impl Preview {
         let Some((_, result)) = result else { return false; };
         match result {
             Ok(frame) => {
+                self.size = (frame.image.width() as f32 / self.scale, frame.image.height() as f32 / self.scale);
                 let image = Arc::new(RenderImage::new(vec![ImageFrame::new(frame.image)]));
                 self.retired = self.image.replace(image);
                 self.character_id = frame.character_id;
@@ -145,6 +147,7 @@ impl Drop for Preview {
 struct Playback {
     renderer: Renderer,
     scene: EntranceScene,
+    stage: PhysicalRect,
     video: Video,
     character_id: String,
     character_name: String,
@@ -165,25 +168,26 @@ fn bundled_video(assets: &Path, previous: &str) -> Result<(String, String, PathB
 }
 
 impl Playback {
-    fn new(assets: &Path, settings: &Settings, previous: &str) -> Result<Self, String> {
+    fn new(assets: &Path, settings: &Settings, previous: &str, scale: f32) -> Result<Self, String> {
         let (character_id, character_name, path) = bundled_video(assets, previous)?;
         let mut video = Video::open(&path)?;
         video.advance(Duration::ZERO)?;
         let mut renderer = Renderer::with_settings(settings)?;
         renderer.text = MESSAGE.into();
         renderer.title = "Lightning preview".into();
-        let height = (renderer.message_height(SCALE) + 238).max(240);
-        let card = CardPlacement { rect: PhysicalRect { x: 24, y: 24, width: (320.0 * SCALE) as u32,
-            height: (height as f32 * SCALE) as u32 }, scale: SCALE };
+        let height = renderer.announcement_height(scale, 700);
+        let stage = PhysicalRect { x: 0, y: 0, width: (352.0 * scale) as u32, height: ((height + 80) as f32 * scale) as u32 };
+        let card = CardPlacement { rect: PhysicalRect { x: (16.0 * scale) as i32, y: (16.0 * scale) as i32,
+            width: (320.0 * scale) as u32, height: (height as f32 * scale) as u32 }, scale };
         let seed = rand::thread_rng().gen();
-        let scene = EntranceScene::new(STAGE, card, seed, settings.lightning);
-        Ok(Self { renderer, scene, video, character_id, character_name, seed,
+        let scene = EntranceScene::new(stage, card, seed, settings.lightning);
+        Ok(Self { renderer, scene, stage, video, character_id, character_name, seed,
             effect_elapsed: Duration::ZERO, video_elapsed: Duration::ZERO, duration: crate::state::display_duration(MESSAGE) })
     }
 
     fn update(&mut self, lightning: LightningSettings) {
         self.renderer.set_lightning(lightning);
-        self.scene = EntranceScene::new(STAGE, self.scene.card, self.seed, lightning);
+        self.scene = EntranceScene::new(self.stage, self.scene.card, self.seed, lightning);
         self.effect_elapsed = Duration::ZERO;
     }
 
@@ -203,7 +207,7 @@ impl Playback {
             else { None };
         let pixels = self.renderer.draw_scene(&self.scene, Some(self.video.frame()), interference, entrance);
         let origin = if entrance.is_some() { self.scene.canvas } else { self.scene.card.rect };
-        Frame { image: compose(&pixels, origin, STAGE), character_id: self.character_id.clone(),
+        Frame { image: compose(&pixels, origin, self.stage), character_id: self.character_id.clone(),
             character_name: self.character_name.clone(), phase: announcement_phase(transition, closing) }
     }
 }
@@ -223,7 +227,7 @@ fn delta_after_intent_change(delta: Duration, replay_changed: bool) -> Duration 
     if replay_changed { Duration::ZERO } else { delta }
 }
 
-fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Settings) {
+fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Settings, scale: f32) {
     let mut playback: Option<Playback> = None;
     let mut current: Option<Intent> = None;
     let mut failure = "Preview video is unavailable. Try Replay.".to_owned();
@@ -248,7 +252,7 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Set
             let replay_changed = current.is_none_or(|current| current.replay != intent.replay);
             let result = if replay_changed {
                 let previous = playback.as_ref().map(|playback| playback.character_id.as_str()).unwrap_or("");
-                match Playback::new(&assets, &settings, previous) {
+                match Playback::new(&assets, &settings, previous, scale) {
                     Ok(next) => { playback = Some(next); Ok(()) }
                     Err(error) => { playback = None; failure = error.clone(); Err(error) }
                 }
@@ -292,6 +296,37 @@ mod tests {
     }
 
     #[test]
+    fn preview_matches_announcement_dimensions_padding_and_pixels_at_display_scales() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+        for scale in [1.0, 1.5, 2.0] {
+            let settings = Settings::default();
+            let mut playback = Playback::new(&assets, &settings, "", scale).unwrap();
+            let card = playback.scene.card;
+            assert_eq!(card.scale, scale);
+            assert_eq!(card.rect.width, (320.0 * scale) as u32);
+            assert_eq!(card.rect.height, (playback.renderer.announcement_height(scale, 700) as f32 * scale) as u32);
+            assert_eq!(playback.stage.right() - card.rect.right(), (16.0 * scale) as i32);
+            assert_eq!(playback.stage.bottom() - card.rect.bottom(), (64.0 * scale) as i32);
+            let mut renderer = Renderer::with_settings(&settings).unwrap();
+            renderer.text = MESSAGE.into();
+            renderer.title = "Lightning preview".into();
+            let mut expected = vec![0; card.rect.width as usize * card.rect.height as usize];
+            renderer.draw(&mut expected, card.rect.width as usize, card.rect.height as usize, scale, Some(playback.video.frame()), 0.0, None);
+            let pixels = playback.renderer.draw_scene(&playback.scene, Some(playback.video.frame()), 0.0, None);
+            assert_eq!(pixels, expected);
+            let image = compose(&pixels, card.rect, playback.stage);
+            for y in 0..card.rect.height {
+                for x in 0..card.rect.width {
+                    let color = expected[(y * card.rect.width + x) as usize];
+                    let expected = if color == 0xff00ff { [0, 0, 0, 0] }
+                        else { [color as u8, (color >> 8) as u8, (color >> 16) as u8, 255] };
+                    assert_eq!(image.get_pixel(x + card.rect.x as u32, y + card.rect.y as u32).0, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bundled_selection_excludes_custom_files_and_replay_avoids_the_previous_character() {
         let root = std::env::temp_dir().join("opencode").join(format!("herald-lightning-pool-{}-{}", std::process::id(), crate::state::timestamp()));
         std::fs::create_dir_all(root.join("videos")).unwrap();
@@ -307,7 +342,7 @@ mod tests {
     #[test]
     fn edits_rebuild_geometry_without_resetting_video_identity_elapsed_or_seed() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        let mut playback = Playback::new(&assets, &Settings::default(), "").unwrap();
+        let mut playback = Playback::new(&assets, &Settings::default(), "", 1.0).unwrap();
         playback.frame(Duration::from_millis(900));
         let identity = playback.character_id.clone();
         let elapsed = playback.video_elapsed;
@@ -337,7 +372,7 @@ mod tests {
     #[test]
     fn worker_coalesces_edits_in_one_slot_and_joins_on_drop_even_while_inactive() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        let preview = Preview::start(assets, Settings::default(), false).unwrap();
+        let preview = Preview::start(assets, Settings::default(), false, 1.0).unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert!(preview.shared.0.lock().unwrap().frame.is_none());
         for index in 0..20 {
@@ -350,7 +385,8 @@ mod tests {
                 let shared = preview.shared.0.lock().unwrap();
                 shared.frame.as_ref().is_some_and(|(revision, frame)| {
                     assert_eq!(*revision, shared.intent.revision);
-                    assert_eq!(frame.as_ref().unwrap().image.dimensions(), (STAGE.width, STAGE.height));
+                    assert_eq!(frame.as_ref().unwrap().image.width(), 352);
+                    assert!(frame.as_ref().unwrap().image.height() >= 320);
                     true
                 })
             };
