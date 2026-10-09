@@ -32,6 +32,7 @@
     "install:linux-menu": "node development_tools/install-linux-menu.mjs",
     "test:settings:linux": "python3 development_tools/verify-linux-settings.py",
     "test:settings:layout:linux": "python3 development_tools/verify-linux-settings.py --layout",
+    "test:settings:keyboard:linux": "python3 development_tools/verify-linux-settings.py --keyboard",
     "profile:plugin": "bun development_tools/profile-plugin.ts"
   },
   "devDependencies": {

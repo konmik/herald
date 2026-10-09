@@ -17,6 +17,7 @@ Use `pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1` for 
 ## Features
 
 - [Settings persistence](settings.md): Apply, Close without saving, reopen, speech-model selection.
+- [Keyboard navigation](keyboard.md): focus traversal, page shortcuts, control activation, popup dismissal, accessible labels, and focus across resizing. Includes Linux-specific preconditions and separate Windows/macOS checks.
 - [Quiet mode and schedule](quiet.md): immediate mute, daily times, persisted controls, meeting suppression.
 - [Audio output](output.md): missing device uses system default, refresh, persisted selection.
 - [Audio preview](preview.md): silent preview, unsaved audio settings, start/stop, completion.
