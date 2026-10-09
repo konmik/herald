@@ -1,4 +1,4 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture, [switch]$CaptureFrames)
 $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -80,6 +80,10 @@ try {
     if ($AppDirectory) { $info.Environment.Remove('HERALD_TTS') | Out-Null }
     else { $info.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
+    if ($CaptureFrames) {
+        $info.ArgumentList.Add('--capture-frames')
+        $info.ArgumentList.Add((Join-Path $evidencePath 'frames'))
+    }
     Write-Output "Launch: $binary --isolated; data=$scratch; speech=$Speech; meeting=$Meeting; quiet=$Quiet"
     $process = [Diagnostics.Process]::Start($info)
     $hash = (Get-FileHash $binary).Hash

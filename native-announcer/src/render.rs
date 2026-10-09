@@ -1,6 +1,7 @@
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 use fontdue::Font;
 use image::RgbaImage;
+use std::time::Duration;
 use crate::settings::{FontPreference, Settings};
 
 pub fn display_text(text: &str) -> String {
@@ -147,6 +148,7 @@ impl Renderer {
         scale: f32,
         image: Option<&RgbaImage>,
         interference: f32,
+        entrance: Option<Duration>,
     ) {
         let resized = image.filter(|frame| frame.dimensions() != (128, 128)).map(|frame| {
             image::imageops::resize(frame, 128, 128, image::imageops::FilterType::Triangle)
@@ -158,6 +160,9 @@ impl Renderer {
             0x1c1b16
         });
         let logical_height = height as f32 / scale;
+        let strike = entrance.map(|elapsed| (elapsed, crate::state::interference_amount(elapsed, crate::state::SIGNAL_SEED)))
+            .filter(|(_, amount)| *amount > 0.0);
+        let mut coverage = strike.map(|_| PaintCoverage { pixels: vec![false; width * height] });
         draw_bubble(
             buffer,
             width,
@@ -165,6 +170,7 @@ impl Renderer {
             scale,
             logical_height - 152.0,
             video_background(image),
+            coverage.as_mut(),
         );
         let title_y = logical_height - 188.0;
         self.text(
@@ -255,6 +261,7 @@ impl Renderer {
                 }
                 let index = (face_y + y) * width + face_x + x;
                 buffer[index] = 0x0b0b09;
+                if let Some(coverage) = &mut coverage { coverage.pixels[index] = true; }
                 let horizontal = (x as f32 / face_size as f32 - 0.5) * 2.0;
                 let vertical = (y as f32 / face_size as f32 - 0.5) * 2.0;
                 let radius = horizontal * horizontal + vertical * vertical;
@@ -318,6 +325,9 @@ impl Renderer {
                 }
             }
         }
+        if let (Some(coverage), Some((elapsed, amount))) = (coverage, strike) {
+            coverage.lightning(buffer, width, height, scale, elapsed, amount);
+        }
     }
 
     fn random(&mut self) -> u32 {
@@ -325,6 +335,124 @@ impl Renderer {
         self.seed ^= self.seed >> 17;
         self.seed ^= self.seed << 5;
         self.seed
+    }
+}
+
+struct PaintCoverage {
+    pixels: Vec<bool>,
+}
+
+fn paint(buffer: &mut [u32], coverage: &mut Option<&mut PaintCoverage>, index: usize, color: u32) {
+    buffer[index] = color;
+    if let Some(coverage) = coverage { coverage.pixels[index] = true; }
+}
+
+impl PaintCoverage {
+    fn contours(&self, width: usize, height: usize) -> Vec<Vec<[f32; 2]>> {
+        let stride = width + 1;
+        let mut edges = vec![0_u8; stride * (height + 1)];
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                if !self.pixels[index] { continue; }
+                if y == 0 || !self.pixels[index - width] { edges[y * stride + x] |= 1; }
+                if x + 1 == width || !self.pixels[index + 1] { edges[y * stride + x + 1] |= 2; }
+                if y + 1 == height || !self.pixels[index + width] { edges[(y + 1) * stride + x + 1] |= 4; }
+                if x == 0 || !self.pixels[index - 1] { edges[(y + 1) * stride + x] |= 8; }
+            }
+        }
+        let mut contours = Vec::new();
+        for start in 0..edges.len() {
+            while edges[start] != 0 {
+                let mut contour = Vec::new();
+                let mut vertex = start;
+                let mut direction = edges[start].trailing_zeros() as usize;
+                loop {
+                    contour.push([(vertex % stride) as f32 - 0.5, (vertex / stride) as f32 - 0.5]);
+                    edges[vertex] &= !(1 << direction);
+                    vertex = match direction {
+                        0 => vertex + 1,
+                        1 => vertex + stride,
+                        2 => vertex - 1,
+                        _ => vertex - stride,
+                    };
+                    if vertex == start { break; }
+                    direction = [(direction + 1) % 4, direction, (direction + 3) % 4, (direction + 2) % 4]
+                        .into_iter().find(|direction| edges[vertex] & (1 << direction) != 0).unwrap();
+                }
+                contours.push(contour);
+            }
+        }
+        contours
+    }
+
+    fn lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, amount: f32) {
+        let mut glow = vec![0_u8; buffer.len()];
+        let tick = (elapsed.as_millis() / 30) as u32;
+        for contour in self.contours(width, height) {
+            let length = contour.len();
+            let step = (5.0 * scale).round().max(1.0) as usize;
+            for run in 0..4 {
+                let seed = crate::state::noise_hash(tick ^ (run + 1) * 9187);
+                let start = (length * run as usize / 4 + tick as usize * step * 3 + seed as usize % (length / 8).max(1)) % length;
+                let reach = ((80 + seed % 65) as f32 * scale) as usize;
+                let mut previous = None;
+                for distance in (0..reach.min(length)).step_by(step) {
+                    let index = (start + distance) % length;
+                    let before = contour[(index + length - step.min(length - 1)) % length];
+                    let after = contour[(index + step) % length];
+                    let dx = after[0] - before[0];
+                    let dy = after[1] - before[1];
+                    let magnitude = dx.hypot(dy).max(1.0);
+                    let normal = [-dy / magnitude, dx / magnitude];
+                    let random = crate::state::noise_hash(seed ^ distance as u32);
+                    let inset = (1.0 + (random & 255) as f32 / 255.0 * 4.0) * scale;
+                    let point = [contour[index][0] + normal[0] * inset, contour[index][1] + normal[1] * inset];
+                    if let Some(previous) = previous {
+                        self.stroke(&mut glow, width, height, scale, previous, point, 8.0);
+                    }
+                    if distance > 0 && (distance / step) % 7 == 3 {
+                        let branch = [point[0] + normal[0] * 7.0 * scale + dx / magnitude * 3.0 * scale,
+                            point[1] + normal[1] * 7.0 * scale + dy / magnitude * 3.0 * scale];
+                        let tip = [branch[0] + normal[0] * 4.0 * scale - dx / magnitude * 4.0 * scale,
+                            branch[1] + normal[1] * 4.0 * scale - dy / magnitude * 4.0 * scale];
+                        self.stroke(&mut glow, width, height, scale, point, branch, 4.0);
+                        self.stroke(&mut glow, width, height, scale, branch, tip, 2.0);
+                    }
+                    previous = Some(point);
+                }
+            }
+        }
+        for (index, strength) in glow.into_iter().enumerate() {
+            if strength == 0 { continue; }
+            let background = if self.pixels[index] { buffer[index] } else { 0x001020 };
+            let color = if strength > 220 { 0xffffff } else if strength > 150 { 0x00dfff } else { 0x007dff };
+            let alpha = (strength as f32 * (amount * 1.8).min(1.0)) as u32;
+            buffer[index] = blend(background, color, alpha);
+        }
+    }
+
+    fn stroke(&self, glow: &mut [u8], width: usize, height: usize, scale: f32, from: [f32; 2], to: [f32; 2], radius: f32) {
+        let radius = radius * scale;
+        let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(width);
+        let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(width);
+        let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(height);
+        let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(height);
+        let dx = to[0] - from[0];
+        let dy = to[1] - from[1];
+        let squared = (dx * dx + dy * dy).max(0.001);
+        for y in top..bottom {
+            for x in left..right {
+                let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
+                let distance = (x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy);
+                let index = y * width + x;
+                if distance >= radius || (!self.pixels[index] && distance > 2.5 * scale) { continue; }
+                let distance = distance / scale;
+                let strength = if distance < 0.65 { 255 } else if distance < 1.5 { 200 }
+                    else { (120.0 * (1.0 - distance / (radius / scale))) as u8 };
+                glow[index] = glow[index].max(strength);
+            }
+        }
     }
 }
 
@@ -390,6 +518,7 @@ fn draw_bubble(
     scale: f32,
     bottom: f32,
     fill: u32,
+    mut coverage: Option<&mut PaintCoverage>,
 ) {
     for y in 0..height {
         for x in 0..width {
@@ -401,7 +530,7 @@ fn draw_bubble(
                 [7.0, 8.0, 315.0, bottom + 2.0],
                 20.0,
             ) {
-                buffer[y * width + x] = 0x080908;
+                paint(buffer, &mut coverage, y * width + x, 0x080908);
             }
             let outer_tail = triangle_contains(
                 x_position,
@@ -413,13 +542,13 @@ fn draw_bubble(
                 ],
             );
             if outer_tail {
-                buffer[y * width + x] = 0x080908;
+                paint(buffer, &mut coverage, y * width + x, 0x080908);
             }
             if rounded_contains(x_position, y_position, [6.0, 6.0, 314.0, bottom], 20.0) {
-                buffer[y * width + x] = 0x080908;
+                paint(buffer, &mut coverage, y * width + x, 0x080908);
             }
             if rounded_contains(x_position, y_position, [8.0, 8.0, 312.0, bottom - 2.0], 18.0) {
-                buffer[y * width + x] = fill;
+                paint(buffer, &mut coverage, y * width + x, fill);
                 if (26.0..294.0).contains(&x_position)
                     && (bottom - 46.0..bottom - 45.0).contains(&y_position)
                 {
@@ -435,7 +564,7 @@ fn draw_bubble(
                     [252.0, bottom + 14.0],
                 ],
             ) {
-                buffer[y * width + x] = fill;
+                paint(buffer, &mut coverage, y * width + x, fill);
             }
         }
     }
@@ -498,6 +627,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn entrance_lightning_tracks_the_painted_union_at_different_scales_and_heights() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.text = "The task passed.".into();
+        renderer.title = "Checks passed".into();
+        let image = RgbaImage::from_pixel(128, 128, image::Rgba([70, 40, 20, 255]));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for logical_height in [260, 340] {
+                let width = (320.0 * scale) as usize;
+                let height = (logical_height as f32 * scale) as usize;
+                let bottom = logical_height as f32 - 152.0;
+                let zones = [(14.0, 14.0), (6.0, 50.0), (100.0, bottom), (244.0, bottom + 8.0),
+                    (294.0, bottom + 12.0), (188.0, bottom + 76.0), (315.0, bottom + 76.0), (252.0, bottom + 139.0)];
+                let mut reached = [false; 8];
+                let mut cyan = 0;
+                let mut white = 0;
+                let mut wide_glow = 0;
+                for milliseconds in (30..630).step_by(30) {
+                    renderer.seed = 567891;
+                    let mut plain = vec![0; width * height];
+                    renderer.draw(&mut plain, width, height, scale, Some(&image), 0.0, None);
+                    renderer.seed = 567891;
+                    let mut struck = vec![0; width * height];
+                    renderer.draw(&mut struck, width, height, scale, Some(&image), 0.0, Some(Duration::from_millis(milliseconds)));
+                    for (index, (&before, &after)) in plain.iter().zip(&struck).enumerate() {
+                        if before == after { continue; }
+                        let x = (index % width) as f32 / scale;
+                        let y = (index / width) as f32 / scale;
+                        let red = (after >> 16) & 255;
+                        let green = (after >> 8) & 255;
+                        let blue = after & 255;
+                        cyan += usize::from(red < 90 && green > 110 && blue > 190);
+                        white += usize::from(red > 200 && green > 200 && blue > 200);
+                        wide_glow += usize::from((10.0..18.0).contains(&y) && (40.0..280.0).contains(&x) && blue > red + 20);
+                        if before == 0xff00ff { assert!(red <= green && green <= blue, "Clear pixel acquired a magenta halo"); }
+                        assert!(!(40.0..290.0).contains(&x) || !(26.0..bottom - 22.0).contains(&y), "Text interior changed at {x},{y}");
+                        assert!(!(214.0..290.0).contains(&x) || !(bottom + 38.0..bottom + 114.0).contains(&y), "Portrait center changed at {x},{y}");
+                        assert!(x > 0.0 && y > 0.0 && y < logical_height as f32 - 1.0);
+                        for (zone, &(zx, zy)) in zones.iter().enumerate() {
+                            if (x - zx).abs() < 9.0 && (y - zy).abs() < 9.0 && blue > red + 30 {
+                                reached[zone] = true;
+                            }
+                        }
+                    }
+                }
+                assert_eq!(reached, [true; 8], "Missing outline strike at scale {scale}, height {logical_height}");
+                assert!(cyan >= 200 && white >= 30 && wide_glow >= 200, "Not a bright, wide lightning strike: cyan={cyan}, white={white}, glow={wide_glow}");
+            }
+        }
+    }
+
+    #[test]
+    fn entrance_lightning_is_animated_deterministic_and_leaves_the_portrait_random_stream_alone() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut plain = vec![0; 320 * 260];
+        renderer.draw(&mut plain, 320, 260, 1.0, None, 0.62, None);
+        let mut next_plain = vec![0; plain.len()];
+        renderer.draw(&mut next_plain, 320, 260, 1.0, None, 0.0, None);
+        let mut struck = vec![0; plain.len()];
+        renderer.seed = 567891;
+        renderer.draw(&mut struck, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(120)));
+        assert!(struck.iter().filter(|pixel| **pixel == 0xffffff).count() >= 10);
+        let mut next_struck = vec![0; plain.len()];
+        renderer.draw(&mut next_struck, 320, 260, 1.0, None, 0.0, None);
+        assert_eq!(next_plain, next_struck);
+        let mut repeated = vec![0; plain.len()];
+        renderer.seed = 567891;
+        renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(120)));
+        assert_eq!(struck, repeated);
+        renderer.seed = 567891;
+        renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(240)));
+        assert!(struck.iter().zip(&repeated).filter(|(a, b)| a != b).count() >= 300);
+        for milliseconds in [0, 650, 900, 5000] {
+            renderer.seed = 567891;
+            renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(milliseconds)));
+            assert_eq!(plain, repeated, "Lightning outside its envelope at {milliseconds}ms");
+        }
+    }
+
+    #[test]
     fn announcement_height_fits_the_last_word_at_windows_display_scales() {
         let mut renderer = Renderer::new().unwrap();
         renderer.text = display_text("[excited] Committed and deployed announcement cleanup and text-editing improvements! Checks passed!");
@@ -549,7 +757,7 @@ mod tests {
     #[test]
     fn bubble_has_a_frame_and_keeps_the_footer_and_tail() {
         let mut buffer = vec![0xff00ff; 320 * 260];
-        draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x191f2a);
+        draw_bubble(&mut buffer, 320, 260, 1.0, 108.0, 0x191f2a, None);
         assert_eq!(buffer[6 * 320 + 150], 0x080908);
         assert_eq!(buffer[8 * 320 + 150], 0x191f2a);
         assert_eq!(buffer[30 * 320 + 314], 0x080908);
@@ -570,8 +778,8 @@ mod tests {
     fn bubble_scales_without_changing_its_layout() {
         let mut normal = vec![0xff00ff; 320 * 260];
         let mut doubled = vec![0xff00ff; 640 * 520];
-        draw_bubble(&mut normal, 320, 260, 1.0, 108.0, 0x191f2a);
-        draw_bubble(&mut doubled, 640, 520, 2.0, 108.0, 0x191f2a);
+        draw_bubble(&mut normal, 320, 260, 1.0, 108.0, 0x191f2a, None);
+        draw_bubble(&mut doubled, 640, 520, 2.0, 108.0, 0x191f2a, None);
         for y in 0..260 {
             for x in 0..320 {
                 assert_eq!(normal[y * 320 + x], doubled[y * 2 * 640 + x * 2]);
@@ -593,7 +801,7 @@ mod tests {
         assert_eq!(video_background(Some(&frame)), 0x1e2832);
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 260];
-        renderer.draw(&mut buffer, 320, 260, 1.0, Some(&frame), 0.0);
+        renderer.draw(&mut buffer, 320, 260, 1.0, Some(&frame), 0.0, None);
         assert_eq!(buffer[30 * 320 + 150], 0x182029);
     }
 
@@ -617,7 +825,7 @@ mod tests {
         renderer.text = "Done.".into();
         renderer.title = "Session".into();
         let mut buffer = vec![0; 320 * 260];
-        renderer.draw(&mut buffer, 320, 260, 1.0, None, 0.0);
+        renderer.draw(&mut buffer, 320, 260, 1.0, None, 0.0, None);
         assert_eq!(buffer[30 * 320 + 150], 0x141922);
         assert_eq!(buffer[31 * 320 + 150], 0x191f2a);
         assert_eq!(buffer[110 * 320 + 252], 0x141922);
@@ -636,7 +844,7 @@ mod tests {
             (&renderer.title_font, renderer.title.as_str(), 72.0, renderer.title_preference.size, 0x9daabd, 72.0 + f32::from(renderer.title_preference.size) + 8.0),
         ] {
             let mut unshaded = vec![0; 320 * 260];
-            draw_bubble(&mut unshaded, 320, 260, 1.0, 108.0, 0x191f2a);
+            draw_bubble(&mut unshaded, 320, 260, 1.0, 108.0, 0x191f2a, None);
             let background = unshaded.clone();
             renderer.text(&mut unshaded, 320, 260, 1.0, font, TextBlock {
                 text, y, size: f32::from(size), color, max_height: cutoff,
@@ -668,7 +876,7 @@ mod tests {
             (2.0, 640, 480, 60, 63),
         ] {
             let mut buffer = vec![0; width * height];
-            renderer.draw(&mut buffer, width, height, scale, None, 0.0);
+            renderer.draw(&mut buffer, width, height, scale, None, 0.0, None);
             let x = (150.0 * scale) as usize;
             assert_eq!(buffer[even_row * width + x], 0x141922);
             assert_eq!(buffer[odd_row * width + x], 0x191f2a);
@@ -681,11 +889,11 @@ mod tests {
         renderer.text = "The task is complete.".into();
         renderer.title = "My session".into();
         let mut clean = vec![0; 320 * 240];
-        renderer.draw(&mut clean, 320, 240, 1.0, None, 0.0);
+        renderer.draw(&mut clean, 320, 240, 1.0, None, 0.0, None);
         renderer.seed = 567891;
         renderer.text_interference = 0.62;
         let mut distorted = vec![0; 320 * 240];
-        renderer.draw(&mut distorted, 320, 240, 1.0, None, 0.0);
+        renderer.draw(&mut distorted, 320, 240, 1.0, None, 0.0, None);
         assert_ne!(clean, distorted);
         for y in 0..240 {
             for x in 0..320 {
@@ -707,7 +915,7 @@ mod tests {
         });
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 240];
-        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0);
+        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0, None);
         let bottom_right = buffer[196 * 320 + 284];
         assert!(bottom_right & 255 > (bottom_right >> 16) & 255);
     }
@@ -718,7 +926,7 @@ mod tests {
         let mut buffer = vec![0; 320 * 240];
         for _ in 0..15 {
             let frame = RgbaImage::from_pixel(128, 128, image::Rgba([20, 40, 80, 255]));
-            renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0);
+            renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.0, None);
         }
         let center = buffer[164 * 320 + 252];
         assert!(center & 255 > (center >> 16) & 255);
@@ -730,7 +938,7 @@ mod tests {
         renderer.text = "Done.".into();
         renderer.title = "My session".into();
         let mut buffer = vec![0; 320 * 240];
-        renderer.draw(&mut buffer, 320, 240, 1.0, None, 1.0);
+        renderer.draw(&mut buffer, 320, 240, 1.0, None, 1.0, None);
         let face: Vec<_> = (100..228)
             .flat_map(|y| (188..316).map(move |x| y * 320 + x))
             .map(|i| buffer[i])
@@ -754,7 +962,7 @@ mod tests {
         let frame = RgbaImage::from_pixel(128, 128, image::Rgba([220, 60, 20, 255]));
         let mut renderer = Renderer::new().unwrap();
         let mut buffer = vec![0; 320 * 240];
-        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.82);
+        renderer.draw(&mut buffer, 320, 240, 1.0, Some(&frame), 0.82, None);
         let center = buffer[164 * 320 + 252];
         assert!((center >> 16) & 255 > center & 255);
         assert_eq!(buffer[100 * 320 + 188], 0x080908);
@@ -769,10 +977,10 @@ mod tests {
         let mut distorted = vec![0; 320 * 240];
         Renderer::new()
             .unwrap()
-            .draw(&mut clean, 320, 240, 1.0, Some(&frame), 0.0);
+            .draw(&mut clean, 320, 240, 1.0, Some(&frame), 0.0, None);
         Renderer::new()
             .unwrap()
-            .draw(&mut distorted, 320, 240, 1.0, Some(&frame), 0.62);
+            .draw(&mut distorted, 320, 240, 1.0, Some(&frame), 0.62, None);
         let peak = |buffer: &[u32], y: usize| {
             (210..290)
                 .max_by_key(|x| (buffer[y * 320 + x] >> 16) & 255)
@@ -805,12 +1013,12 @@ mod tests {
         let mut small = vec![0; 320 * 240];
         renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 8));
         let height = renderer.message_height(1.0);
-        renderer.draw(&mut small, 320, 240, 1.0, None, 0.0);
+        renderer.draw(&mut small, 320, 240, 1.0, None, 0.0, None);
         let mut large = vec![0; 320 * 240];
         renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 32));
         assert_eq!(renderer.message_height(1.0), height);
         renderer.seed = 567891;
-        renderer.draw(&mut large, 320, 240, 1.0, None, 0.0);
+        renderer.draw(&mut large, 320, 240, 1.0, None, 0.0, None);
         assert_eq!(&small[..320 * 52], &large[..320 * 52]);
         assert_ne!(&small[320 * 52..320 * 92], &large[320 * 52..320 * 92]);
     }

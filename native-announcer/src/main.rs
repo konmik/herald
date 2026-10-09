@@ -119,6 +119,11 @@ fn speech_readiness_timeout(settings: &settings::Settings) -> Duration {
 }
 
 impl Active {
+    fn entrance_strike(&self, now: Instant) -> Option<Duration> {
+        let elapsed = now.duration_since(self.started);
+        (self.end.is_none() && elapsed < state::TRANSITION_DURATION).then_some(elapsed)
+    }
+
     fn ready_to_end(&self, now: Instant) -> bool {
         now >= self.expires && (self.silent || self.speech_finished)
     }
@@ -521,7 +526,7 @@ fn run() -> Result<(), String> {
                                 video_loops += video.loops - previous_loops;
                             }
                             renderer.text_interference = if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
-                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, active.video.as_ref().map(video::Video::frame), interference);
+                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, active.video.as_ref().map(video::Video::frame), interference, active.entrance_strike(Instant::now()));
                             if let Some(frames) = &mut frames {
                                 frames.save(&buffer, size.width, size.height, active.started.elapsed(), active.end.map(|end| end.duration_since(active.started)))?;
                             }
@@ -605,6 +610,13 @@ mod tests {
         active.silent = true;
         active.speech_finished = false;
         assert!(active.ready_to_end(started + Duration::from_secs(10)));
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), Some(Duration::from_millis(120)));
+        active.silent = false;
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), Some(Duration::from_millis(120)));
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(650)), None);
+        assert_eq!(active.entrance_strike(started + Duration::from_secs(5)), None);
+        active.end = Some(started + Duration::from_millis(80));
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), None);
     }
 
     #[test]
