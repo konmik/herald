@@ -485,8 +485,8 @@ function Set-UiaValue {
     } catch {
         Write-Action 'value-pattern-unsupported' @{ target = $Label }
     }
-    Click-Uia $Element
     Capture-Window ('before-keyboard-' + [guid]::NewGuid()) | Out-Null
+    Click-Uia $Element
     if ([HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -ne $script:activeRecord.Hwnd) { throw 'The keyboard target is not the owned foreground window.' }
     $keys = [regex]::Replace($Value, '[+^%~(){}\[\]]', { param($match) '{' + $match.Value + '}' })
     $keys = $keys.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", '{ENTER}')
@@ -519,12 +519,12 @@ function Set-UiaRange {
         Click-Uia $Element
         [System.Windows.Forms.SendKeys]::SendWait($(if ($Value -eq $minimum) { '{HOME}' } else { '{END}' }))
     } else {
-        $bounds = $Element.Current.BoundingRectangle
-        $fraction = ($Value - $minimum) / ($maximum - $minimum)
-        $point = [HeraldGpuiSettingsCaptureNative+Point]::new()
-        $point.X = [int]($bounds.X + $bounds.Width * $fraction)
-        $point.Y = [int]($bounds.Y + $bounds.Height / 2)
-        [HeraldGpuiSettingsCaptureNative]::ClickOwnedPoint($point, $script:activeRecord.Pid)
+        $step = [double]$pattern.Current.SmallChange
+        if ($step -le 0) { throw "The '$Label' range does not expose a positive keyboard step." }
+        $steps = [int][math]::Round(($Value - $minimum) / $step)
+        if ([math]::Abs($minimum + $steps * $step - $Value) -gt 0.01) { throw "The '$Label' value is not reachable using its keyboard step." }
+        Click-Uia $Element
+        [System.Windows.Forms.SendKeys]::SendWait("{HOME}{RIGHT $steps}")
     }
     Write-Action 'set-range' @{ target = $Label; value = $Value }
     Wait-Until { [math]::Abs((Get-UiaRangeValue $Element) - $Value) -lt 0.01 } "UI Automation did not reread the '$Label' range value."
@@ -545,7 +545,7 @@ function Click-Uia {
     $bounds = $Element.Current.BoundingRectangle
     $point = [HeraldGpuiSettingsCaptureNative+Point]::new()
     $point.X = [int]($bounds.X + $bounds.Width / 2)
-    $point.Y = [int]($bounds.Y + $bounds.Height / 2)
+    $point.Y = [int]($bounds.Y + $(if ($Element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit) { [math]::Min(16, $bounds.Height / 2) } else { $bounds.Height / 2 }))
     [HeraldGpuiSettingsCaptureNative]::ClickOwnedPoint($point, $script:activeRecord.Pid)
 }
 
@@ -719,6 +719,19 @@ function Get-ThemeControlKey {
         'light' { 'themeLight'; break }
         'system' { 'themeSystem'; break }
     }
+}
+
+function Assert-FooterLayout {
+    param([string]$Page)
+    $apply = (Get-Control 'apply' '').Current.BoundingRectangle
+    $close = (Get-Control 'close' '').Current.BoundingRectangle
+    $footer = (Find-Semantic 'Settings actions' -AutomationIds @('settings-footer')).Current.BoundingRectangle
+    $root = $script:activeRoot.Current.BoundingRectangle
+    $pageBounds = (Find-Semantic 'current settings page' -AutomationIds @($script:pageSpecs[$Page].ids)).Current.BoundingRectangle
+    if ($apply.Height -lt $pageBounds.Height -or $close.Height -lt $pageBounds.Height) { throw 'Footer buttons are smaller than the settings page buttons.' }
+    if ([math]::Abs($apply.Bottom - $footer.Bottom) -gt 2 -or [math]::Abs($close.Bottom - $footer.Bottom) -gt 2) { throw 'Footer buttons are not aligned with the bottom of the footer.' }
+    if ($root.Bottom - $footer.Bottom -gt $apply.Height / 2) { throw 'Settings actions are not anchored near the bottom of the window.' }
+    Write-Action 'footer-layout' @{ verified = $true; buttonHeight = $apply.Height; bottomGap = $root.Bottom - $footer.Bottom }
 }
 
 function Get-ThemeElement {
@@ -1304,6 +1317,7 @@ try {
     $pageResults = @()
     foreach ($page in $script:pageNames) {
         Select-Page $page
+        Assert-FooterLayout $page
         $slug = $page.ToLowerInvariant().Replace(' ', '-')
         $snapshot = Save-UiaSnapshot ('uia-page-' + $slug)
         $capture = Capture-Window ('page-' + $slug)
