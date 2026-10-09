@@ -4,6 +4,218 @@ use image::RgbaImage;
 use std::time::Duration;
 use crate::settings::{FontPreference, Settings};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PhysicalRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PhysicalRect {
+    pub fn right(self) -> i32 { self.x + self.width as i32 }
+    pub fn bottom(self) -> i32 { self.y + self.height as i32 }
+    pub fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && x < self.right() && y < self.bottom()
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct CardPlacement {
+    pub rect: PhysicalRect,
+    pub scale: f32,
+}
+
+pub struct EntranceScene {
+    pub monitor: PhysicalRect,
+    pub card: CardPlacement,
+    pub canvas: PhysicalRect,
+    pub source: [f32; 2],
+    pub impact: [f32; 2],
+    channel: Vec<[f32; 2]>,
+    forks: Vec<(usize, Vec<[f32; 2]>, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EntrancePhase { Leader, Impact, Propagation, Decay, Holding, Exit }
+
+pub fn entrance_phase(elapsed: Duration, closing: bool) -> EntrancePhase {
+    if closing { return EntrancePhase::Exit; }
+    match elapsed.as_millis() {
+        0..=119 => EntrancePhase::Leader,
+        120..=179 => EntrancePhase::Impact,
+        180..=449 => EntrancePhase::Propagation,
+        450..=649 => EntrancePhase::Decay,
+        _ => EntrancePhase::Holding,
+    }
+}
+
+fn irregular_channel(from: [f32; 2], to: [f32; 2], seed: u32, roughness: f32, step: f32, points: &mut Vec<[f32; 2]>) {
+    let dx = to[0] - from[0];
+    let dy = to[1] - from[1];
+    let length = dx.hypot(dy);
+    if length <= step {
+        points.push(to);
+        return;
+    }
+    let random = crate::state::noise_hash(seed);
+    let fraction = 0.38 + (random & 255) as f32 / 255.0 * 0.24;
+    let offset = (((random >> 8) & 65535) as f32 / 65535.0 * 2.0 - 1.0) * roughness;
+    let middle = [from[0] + dx * fraction - dy / length * offset, from[1] + dy * fraction + dx / length * offset];
+    irregular_channel(from, middle, random.wrapping_add(1), roughness * 0.57, step, points);
+    irregular_channel(middle, to, random.wrapping_add(2), roughness * 0.57, step, points);
+}
+
+impl EntranceScene {
+    pub fn new(monitor: PhysicalRect, card: CardPlacement, seed: u32) -> Self {
+        let scale = card.scale;
+        let left = card.rect.x as f32;
+        let bottom = card.rect.bottom() as f32;
+        let source = [(left - (120.0 + (seed % 41) as f32) * scale).max(monitor.x as f32 + 12.0 * scale), monitor.y as f32];
+        let impact = [left + 187.5 * scale, bottom - 90.5 * scale];
+        let route = [source, [left - 65.0 * scale, bottom - 132.0 * scale],
+            [left + 115.0 * scale, bottom - 115.0 * scale], impact];
+        let mut channel = vec![source];
+        for (index, pair) in route.windows(2).enumerate() {
+            let length = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+            irregular_channel(pair[0], pair[1], seed ^ index as u32 * 7919, (length * 0.08).min(18.0 * scale), 6.0 * scale, &mut channel);
+        }
+        let guard = |point: &mut [f32; 2]| {
+            point[0] = point[0].clamp(monitor.x as f32 + 2.0 * scale, impact[0]);
+            point[1] = point[1].clamp(monitor.y as f32, monitor.bottom() as f32 - 2.0 * scale);
+            if point[0] > left - 20.0 * scale && point[0] < left + 175.0 * scale {
+                point[1] = point[1].max(bottom - 132.0 * scale);
+            }
+        };
+        for point in channel.iter_mut().skip(1) { guard(point); }
+        let guard_branch = |point: &mut [f32; 2]| {
+            guard(point);
+            if point[1] < bottom - 132.0 * scale { point[0] = point[0].min(left - 22.0 * scale); }
+            point[0] = point[0].min(impact[0] - 20.0 * scale);
+        };
+        let mut forks = Vec::new();
+        for index in 2..channel.len().saturating_sub(10) {
+            let random = crate::state::noise_hash(seed ^ (index as u32).wrapping_mul(3571));
+            if random % 11 > 1 { continue; }
+            let from = channel[index];
+            let before = channel[index - 1];
+            let dx = from[0] - before[0];
+            let dy = from[1] - before[1];
+            let length = dx.hypot(dy).max(0.1);
+            let side = if random & 128 == 0 { -1.0 } else { 1.0 };
+            let reach = (15.0 + ((random >> 8) % 76) as f32) * scale;
+            let along = 0.25 + ((random >> 20) % 70) as f32 / 100.0;
+            let across = (1.0 - along * along).sqrt() * side;
+            let mut tip = [from[0] + (dx * along - dy * across) / length * reach,
+                from[1] + (dy * along + dx * across) / length * reach];
+            guard_branch(&mut tip);
+            let mut branch = vec![from];
+            irregular_channel(from, tip, random, reach * 0.13, 4.0 * scale, &mut branch);
+            for point in &mut branch { guard_branch(point); }
+            let taper = 0.35 + ((random >> 16) % 30) as f32 / 100.0;
+            if random & 3 == 0 && branch.len() > 4 {
+                let junction = branch[branch.len() / 3];
+                let mut tip = [junction[0] - dy / length * side * reach * 0.3,
+                    junction[1] + dx / length * side * reach * 0.3];
+                guard_branch(&mut tip);
+                let mut child = vec![junction];
+                irregular_channel(junction, tip, random ^ 9137, reach * 0.07, 3.0 * scale, &mut child);
+                for point in &mut child { guard_branch(point); }
+                forks.push((index, child, taper * 0.45));
+            }
+            forks.push((index, branch, taper));
+        }
+        let padding = (12.0 * scale).ceil() as i32;
+        let mut bounds = [card.rect.x, monitor.y, card.rect.right(), card.rect.bottom()];
+        for point in channel.iter().chain(forks.iter().flat_map(|(_, points, _)| points)) {
+            bounds[0] = bounds[0].min(point[0].floor() as i32 - padding);
+            bounds[2] = bounds[2].max(point[0].ceil() as i32 + padding);
+            bounds[3] = bounds[3].max(point[1].ceil() as i32 + padding);
+        }
+        bounds[0] = bounds[0].max(monitor.x);
+        bounds[2] = bounds[2].min(monitor.right());
+        bounds[3] = bounds[3].min(monitor.bottom());
+        let canvas = PhysicalRect { x: bounds[0], y: bounds[1], width: (bounds[2] - bounds[0]) as u32, height: (bounds[3] - bounds[1]) as u32 };
+        Self { monitor, card, canvas, source, impact, channel, forks }
+    }
+
+    fn incoming(&self, buffer: &mut [u32], elapsed: Duration) {
+        let milliseconds = elapsed.as_secs_f32() * 1000.0;
+        if milliseconds <= 0.0 || milliseconds >= 650.0 { return; }
+        let mut paint = LightningPaint::new(self.canvas.width as usize, self.canvas.height as usize);
+        let reveal = (milliseconds / 120.0).min(1.0);
+        let lengths: Vec<f32> = self.channel.windows(2).map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1])).collect();
+        let reach = lengths.iter().sum::<f32>() * reveal;
+        let local = |point: [f32; 2]| [point[0] - self.canvas.x as f32, point[1] - self.canvas.y as f32];
+        let intensity = if milliseconds < 120.0 { 0.65 } else { return_stroke(milliseconds) * ((370.0 - milliseconds) / 190.0).clamp(0.0, 1.0) };
+        let mut distance = 0.0;
+        for (index, pair) in self.channel.windows(2).enumerate() {
+            if distance >= reach { break; }
+            let fraction = ((reach - distance) / lengths[index]).min(1.0);
+            let to = [pair[0][0] + (pair[1][0] - pair[0][0]) * fraction, pair[0][1] + (pair[1][1] - pair[0][1]) * fraction];
+            paint.stroke(local(pair[0]), local(to), self.card.scale, 0.9, intensity);
+            for (_, points, taper) in self.forks.iter().filter(|(parent, _, _)| *parent == index) {
+                for (branch_index, branch) in points.windows(2).enumerate() {
+                    let width = taper * (1.0 - branch_index as f32 / points.len() as f32 * 0.8);
+                    paint.stroke(local(branch[0]), local(branch[1]), self.card.scale, width, intensity * 0.7);
+                }
+            }
+            distance += lengths[index];
+        }
+        paint.composite(buffer);
+    }
+}
+
+fn return_stroke(milliseconds: f32) -> f32 {
+    if (120.0..142.0).contains(&milliseconds) || (155.0..174.0).contains(&milliseconds) { 1.0 }
+    else if milliseconds < 180.0 { 0.5 }
+    else { 0.72 + 0.28 * (milliseconds * 0.15).sin().abs() }
+}
+
+struct LightningPaint {
+    width: usize,
+    height: usize,
+    glow: Vec<f32>,
+}
+
+impl LightningPaint {
+    fn new(width: usize, height: usize) -> Self { Self { width, height, glow: vec![0.0; width * height] } }
+
+    fn stroke(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, taper: f32, intensity: f32) {
+        if intensity <= 0.0 { return; }
+        let radius = 9.0 * scale * taper.sqrt();
+        let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(self.width);
+        let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(self.width);
+        let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(self.height);
+        let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(self.height);
+        let dx = to[0] - from[0];
+        let dy = to[1] - from[1];
+        let squared = (dx * dx + dy * dy).max(0.001);
+        for y in top..bottom {
+            for x in left..right {
+                let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
+                let distance = (x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy) / scale;
+                let strength = ((-distance.powi(2) / (1.05 * taper).powi(2)).exp()
+                    + 0.38 * (-distance.powi(2) / (18.0 * taper)).exp()) * intensity;
+                if strength > 0.015 {
+                    let index = y * self.width + x;
+                    self.glow[index] = self.glow[index].max(strength);
+                }
+            }
+        }
+    }
+
+    fn composite(self, buffer: &mut [u32]) {
+        for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
+            if strength == 0.0 { continue; }
+            let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
+            let color = blend(0x8097ef, 0xf7fbff, (strength.min(1.0).powi(3) * 255.0) as u32);
+            *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
+        }
+    }
+}
+
 pub fn display_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut remaining = text;
@@ -160,8 +372,7 @@ impl Renderer {
             0x1c1b16
         });
         let logical_height = height as f32 / scale;
-        let strike = entrance.map(|elapsed| (elapsed, crate::state::interference_amount(elapsed, crate::state::SIGNAL_SEED)))
-            .filter(|(_, amount)| *amount > 0.0);
+        let strike = entrance.filter(|elapsed| !elapsed.is_zero() && *elapsed < crate::state::TRANSITION_DURATION);
         let mut coverage = strike.map(|_| PaintCoverage { pixels: vec![false; width * height] });
         draw_bubble(
             buffer,
@@ -325,9 +536,28 @@ impl Renderer {
                 }
             }
         }
-        if let (Some(coverage), Some((elapsed, amount))) = (coverage, strike) {
-            coverage.lightning(buffer, width, height, scale, elapsed, amount);
+        if let (Some(coverage), Some(elapsed)) = (coverage, strike) {
+            coverage.lightning(buffer, width, height, scale, elapsed);
         }
+    }
+
+    pub fn scene(&mut self, scene: &EntranceScene, image: Option<&RgbaImage>, interference: f32, entrance: Option<Duration>) -> Vec<u32> {
+        let card = scene.card;
+        let width = card.rect.width as usize;
+        let height = card.rect.height as usize;
+        let mut pixels = vec![0; width * height];
+        self.draw(&mut pixels, width, height, card.scale, image, interference, entrance);
+        if entrance.is_none() { return pixels; }
+        let canvas_width = scene.canvas.width as usize;
+        let mut buffer = vec![0xff00ff; canvas_width * scene.canvas.height as usize];
+        let x = (card.rect.x - scene.canvas.x) as usize;
+        let y = (card.rect.y - scene.canvas.y) as usize;
+        for row in 0..height {
+            buffer[(y + row) * canvas_width + x..(y + row) * canvas_width + x + width]
+                .copy_from_slice(&pixels[row * width..(row + 1) * width]);
+        }
+        if let Some(elapsed) = entrance { scene.incoming(&mut buffer, elapsed); }
+        buffer
     }
 
     fn random(&mut self) -> u32 {
@@ -386,73 +616,69 @@ impl PaintCoverage {
         contours
     }
 
-    fn lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, amount: f32) {
-        let mut glow = vec![0_u8; buffer.len()];
-        let tick = (elapsed.as_millis() / 30) as u32;
-        for contour in self.contours(width, height) {
-            let length = contour.len();
-            let step = (5.0 * scale).round().max(1.0) as usize;
-            for run in 0..4 {
-                let seed = crate::state::noise_hash(tick ^ (run + 1) * 9187);
-                let start = (length * run as usize / 4 + tick as usize * step * 3 + seed as usize % (length / 8).max(1)) % length;
-                let reach = ((80 + seed % 65) as f32 * scale) as usize;
-                let mut previous = None;
-                for distance in (0..reach.min(length)).step_by(step) {
+    fn lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration) {
+        let milliseconds = elapsed.as_secs_f32() * 1000.0;
+        if milliseconds < 120.0 { return; }
+        let impact = [187.5 * scale, height as f32 - 90.5 * scale];
+        let mut paint = LightningPaint::new(width, height);
+        let intensity = return_stroke(milliseconds) * ((650.0 - milliseconds) / 140.0).clamp(0.0, 1.0);
+        if milliseconds < 180.0 {
+            for direction in [[-6.0, 0.0], [4.0, -9.0], [4.0, 9.0]] {
+                paint.stroke(impact, [impact[0] + direction[0] * scale, impact[1] + direction[1] * scale], scale, 1.5, intensity);
+            }
+        } else {
+            let contours = self.contours(width, height);
+            let closest = |contour: &Vec<[f32; 2]>, point: [f32; 2]| {
+                contour.iter().enumerate().min_by(|(_, a), (_, b)| {
+                    (a[0] - point[0]).hypot(a[1] - point[1]).total_cmp(&(b[0] - point[0]).hypot(b[1] - point[1]))
+                }).map(|(index, _)| index).unwrap()
+            };
+            let video = contours.iter().enumerate().min_by(|(_, a), (_, b)| {
+                let a = a[closest(a, impact)];
+                let b = b[closest(b, impact)];
+                (a[0] - impact[0]).hypot(a[1] - impact[1]).total_cmp(&(b[0] - impact[0]).hypot(b[1] - impact[1]))
+            }).map(|(index, _)| index).unwrap();
+            for (contour_index, contour) in contours.iter().enumerate() {
+                let length = contour.len();
+                let connected = contour_index == video;
+                let start = closest(contour, if connected { impact } else { [252.0 * scale, height as f32 - 134.0 * scale] });
+                let delay = if connected { 0.0 } else { 55.0 };
+                if milliseconds < 180.0 + delay { continue; }
+                let progress = ((milliseconds - 180.0 - delay) / (270.0 - delay)).clamp(0.0, 1.0);
+                if !connected && progress > 0.0 {
+                    let tail = contour[start];
+                    let transfer = contours[video][closest(&contours[video], tail)];
+                    paint.stroke(transfer, tail, scale, 0.7, intensity);
+                }
+                let reach = progress * length as f32 * 0.5;
+                let step = (2.0 * scale).round().max(1.0) as usize;
+                for distance in (0..length).step_by(step) {
+                    let arc = distance.min(length - distance) as f32;
+                    if arc > reach { continue; }
                     let index = (start + distance) % length;
-                    let before = contour[(index + length - step.min(length - 1)) % length];
-                    let after = contour[(index + step) % length];
+                    let next = (index + step) % length;
+                    let random = crate::state::noise_hash(index as u32 ^ 31973);
+                    let width = 0.7 + (random & 255) as f32 / 255.0 * 0.35;
+                    let front = if reach - arc < 12.0 * scale { 1.15 } else { 0.95 };
+                    let before = contour[(index + length - step) % length];
+                    let after = contour[next];
                     let dx = after[0] - before[0];
                     let dy = after[1] - before[1];
                     let magnitude = dx.hypot(dy).max(1.0);
-                    let normal = [-dy / magnitude, dx / magnitude];
-                    let random = crate::state::noise_hash(seed ^ distance as u32);
-                    let inset = (1.0 + (random & 255) as f32 / 255.0 * 4.0) * scale;
-                    let point = [contour[index][0] + normal[0] * inset, contour[index][1] + normal[1] * inset];
-                    if let Some(previous) = previous {
-                        self.stroke(&mut glow, width, height, scale, previous, point, 8.0);
+                    let outward = [dy / magnitude, -dx / magnitude];
+                    let offset = ((random >> 8) & 255) as f32 / 255.0 * 1.4 * scale;
+                    let point = [contour[index][0] + outward[0] * offset, contour[index][1] + outward[1] * offset];
+                    paint.stroke(point, contour[next], scale, width, intensity * front);
+                    if random.is_multiple_of(29) {
+                        let reach = (3.0 + ((random >> 16) % 6) as f32) * scale;
+                        let fork = [point[0] + outward[0] * reach + dx / magnitude * reach * 0.4,
+                            point[1] + outward[1] * reach + dy / magnitude * reach * 0.4];
+                        paint.stroke(point, fork, scale, 0.35, intensity * 0.65);
                     }
-                    if distance > 0 && (distance / step) % 7 == 3 {
-                        let branch = [point[0] + normal[0] * 7.0 * scale + dx / magnitude * 3.0 * scale,
-                            point[1] + normal[1] * 7.0 * scale + dy / magnitude * 3.0 * scale];
-                        let tip = [branch[0] + normal[0] * 4.0 * scale - dx / magnitude * 4.0 * scale,
-                            branch[1] + normal[1] * 4.0 * scale - dy / magnitude * 4.0 * scale];
-                        self.stroke(&mut glow, width, height, scale, point, branch, 4.0);
-                        self.stroke(&mut glow, width, height, scale, branch, tip, 2.0);
-                    }
-                    previous = Some(point);
                 }
             }
         }
-        for (index, strength) in glow.into_iter().enumerate() {
-            if strength == 0 { continue; }
-            let background = if self.pixels[index] { buffer[index] } else { 0x001020 };
-            let color = if strength > 220 { 0xffffff } else if strength > 150 { 0x00dfff } else { 0x007dff };
-            let alpha = (strength as f32 * (amount * 1.8).min(1.0)) as u32;
-            buffer[index] = blend(background, color, alpha);
-        }
-    }
-
-    fn stroke(&self, glow: &mut [u8], width: usize, height: usize, scale: f32, from: [f32; 2], to: [f32; 2], radius: f32) {
-        let radius = radius * scale;
-        let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(width);
-        let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(width);
-        let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(height);
-        let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(height);
-        let dx = to[0] - from[0];
-        let dy = to[1] - from[1];
-        let squared = (dx * dx + dy * dy).max(0.001);
-        for y in top..bottom {
-            for x in left..right {
-                let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
-                let distance = (x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy);
-                let index = y * width + x;
-                if distance >= radius || (!self.pixels[index] && distance > 2.5 * scale) { continue; }
-                let distance = distance / scale;
-                let strength = if distance < 0.65 { 255 } else if distance < 1.5 { 200 }
-                    else { (120.0 * (1.0 - distance / (radius / scale))) as u8 };
-                glow[index] = glow[index].max(strength);
-            }
-        }
+        paint.composite(buffer);
     }
 }
 
@@ -627,7 +853,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entrance_lightning_tracks_the_painted_union_at_different_scales_and_heights() {
+    fn seeded_screen_edge_channel_is_stable_forked_tapered_and_outside_the_card_until_video_hit() {
+        let card = CardPlacement { rect: PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
+        let monitor = PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 };
+        let scene = EntranceScene::new(monitor, card, 7345);
+        let repeated = EntranceScene::new(monitor, card, 7345);
+        assert_eq!(scene.channel, repeated.channel);
+        assert_eq!(scene.forks, repeated.forks);
+        assert!(scene.channel.len() > 100 && scene.forks.len() > 10);
+        assert_eq!(scene.channel[0][1], -200.0);
+        assert_eq!(*scene.channel.last().unwrap(), [-222.75, 504.25]);
+        for points in std::iter::once(&scene.channel).chain(scene.forks.iter().map(|(_, points, _)| points)) {
+            for pair in points.windows(2) {
+                for fraction in [0.0, 0.25, 0.5, 0.75] {
+                    let x = (pair[0][0] + (pair[1][0] - pair[0][0]) * fraction - card.rect.x as f32) / card.scale;
+                    let y = (pair[0][1] + (pair[1][1] - pair[0][1]) * fraction - card.rect.y as f32) / card.scale;
+                    assert!(!bubble_contains(x, y, 108.0), "A premature fork hit the bubble at {x},{y}");
+                    assert!(!(188.0..316.0).contains(&x) || !(120.0..248.0).contains(&y), "A fork hit the video before the main channel");
+                }
+            }
+        }
+        let mut early = vec![0xff00ff; scene.canvas.width as usize * scene.canvas.height as usize];
+        scene.incoming(&mut early, Duration::from_millis(60));
+        let mut later = vec![0xff00ff; early.len()];
+        scene.incoming(&mut later, Duration::from_millis(100));
+        assert!(early.iter().filter(|color| **color != 0xff00ff).count() > 1000);
+        assert!(early.iter().zip(&later).filter(|(a, b)| **a != 0xff00ff && a == b).count() > 1000, "Leader regenerated instead of revealing a planted channel");
+        assert!(scene.forks.iter().all(|(_, _, width)| *width < 0.9));
+        let mut paint = LightningPaint::new(100, 40);
+        paint.stroke([10.0, 20.0], [90.0, 20.0], 1.0, 1.0, 1.0);
+        let mut pixels = vec![0xff00ff; 4000];
+        paint.composite(&mut pixels);
+        assert_eq!(pixels[20 * 100 + 50], 0xf7fbff);
+        assert!(pixels[24 * 100 + 50] & 255 > (pixels[24 * 100 + 50] >> 16) & 255);
+        assert_eq!(pixels[30 * 100 + 50], 0xff00ff);
+    }
+
+    #[test]
+    fn disconnected_bubble_receives_charge_through_its_tail_after_the_video() {
+        let mut pixels = vec![0xff00ff; 320 * 260];
+        let mut coverage = PaintCoverage { pixels: vec![false; pixels.len()] };
+        draw_bubble(&mut pixels, 320, 260, 1.0, 88.0, 0x191f2a, Some(&mut coverage));
+        for y in 120..248 {
+            for x in 188..316 { coverage.pixels[y * 320 + x] = true; pixels[y * 320 + x] = 0x191f2a; }
+        }
+        let plain = pixels.clone();
+        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(200));
+        assert_eq!(&pixels[..110 * 320], &plain[..110 * 320]);
+        assert!(pixels[170 * 320 + 188] & 255 > 200);
+        pixels.copy_from_slice(&plain);
+        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(260));
+        assert!(pixels[110 * 320 + 252] & 255 > 100, "No visible transfer to the bubble tail");
+        pixels.copy_from_slice(&plain);
+        coverage.lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(480));
+        let bright_top = (3..10).flat_map(|y| (40..280).map(move |x| y * 320 + x))
+            .filter(|index| pixels[*index] & 255 > 220).count();
+        assert!(bright_top >= 100, "Charge never reached the full far bubble edge");
+    }
+
+    #[test]
+    fn restored_scene_is_identical_to_the_normal_card_without_changing_the_portrait_stream() {
+        let card = CardPlacement { rect: PhysicalRect { x: 700, y: 500, width: 320, height: 260 }, scale: 1.0 };
+        let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1);
+        let mut renderer = Renderer::new().unwrap();
+        let mut normal = vec![0; 320 * 260];
+        renderer.draw(&mut normal, 320, 260, 1.0, None, 0.0, None);
+        renderer.seed = 567891;
+        assert_eq!(renderer.scene(&scene, None, 0.0, None), normal);
+    }
+
+    #[test]
+    fn screen_edge_leader_hits_video_before_bidirectional_full_outline_charge() {
         let mut renderer = Renderer::new().unwrap();
         renderer.text = "The task passed.".into();
         renderer.title = "Checks passed".into();
@@ -637,42 +933,77 @@ mod tests {
                 let width = (320.0 * scale) as usize;
                 let height = (logical_height as f32 * scale) as usize;
                 let bottom = logical_height as f32 - 152.0;
-                let zones = [(14.0, 14.0), (6.0, 50.0), (100.0, bottom), (244.0, bottom + 8.0),
+                let card = CardPlacement { rect: PhysicalRect { x: 1400, y: 600, width: width as u32, height: height as u32 }, scale };
+                let scene = EntranceScene::new(PhysicalRect { x: -200, y: -100, width: 2600, height: 1700 }, card, 1234);
+                let zones = [(150.0, 6.0), (6.0, 50.0), (100.0, bottom), (244.0, bottom + 8.0),
                     (294.0, bottom + 12.0), (188.0, bottom + 76.0), (315.0, bottom + 76.0), (252.0, bottom + 139.0)];
-                let mut reached = [false; 8];
-                let mut cyan = 0;
-                let mut white = 0;
-                let mut wide_glow = 0;
-                for milliseconds in (30..630).step_by(30) {
+                for milliseconds in [60, 140, 200, 480] {
                     renderer.seed = 567891;
                     let mut plain = vec![0; width * height];
                     renderer.draw(&mut plain, width, height, scale, Some(&image), 0.0, None);
                     renderer.seed = 567891;
-                    let mut struck = vec![0; width * height];
-                    renderer.draw(&mut struck, width, height, scale, Some(&image), 0.0, Some(Duration::from_millis(milliseconds)));
-                    for (index, (&before, &after)) in plain.iter().zip(&struck).enumerate() {
+                    let struck = renderer.scene(&scene, Some(&image), 0.0, Some(Duration::from_millis(milliseconds)));
+                    let offset_x = (card.rect.x - scene.canvas.x) as usize;
+                    let offset_y = (card.rect.y - scene.canvas.y) as usize;
+                    let scene_width = scene.canvas.width as usize;
+                    let mut reached = [false; 8];
+                    let mut white = 0;
+                    for (index, &before) in plain.iter().enumerate() {
+                        let after = struck[(offset_y + index / width) * scene_width + offset_x + index % width];
                         if before == after { continue; }
                         let x = (index % width) as f32 / scale;
                         let y = (index / width) as f32 / scale;
                         let red = (after >> 16) & 255;
                         let green = (after >> 8) & 255;
                         let blue = after & 255;
-                        cyan += usize::from(red < 90 && green > 110 && blue > 190);
                         white += usize::from(red > 200 && green > 200 && blue > 200);
-                        wide_glow += usize::from((10.0..18.0).contains(&y) && (40.0..280.0).contains(&x) && blue > red + 20);
-                        if before == 0xff00ff { assert!(red <= green && green <= blue, "Clear pixel acquired a magenta halo"); }
+                        if before == 0xff00ff { assert!(blue >= red && blue >= green, "Clear pixel acquired a magenta halo"); }
                         assert!(!(40.0..290.0).contains(&x) || !(26.0..bottom - 22.0).contains(&y), "Text interior changed at {x},{y}");
                         assert!(!(214.0..290.0).contains(&x) || !(bottom + 38.0..bottom + 114.0).contains(&y), "Portrait center changed at {x},{y}");
-                        assert!(x > 0.0 && y > 0.0 && y < logical_height as f32 - 1.0);
                         for (zone, &(zx, zy)) in zones.iter().enumerate() {
-                            if (x - zx).abs() < 9.0 && (y - zy).abs() < 9.0 && blue > red + 30 {
+                            if (x - zx).abs() < 6.0 && (y - zy).abs() < 6.0 && blue > red + 10 {
                                 reached[zone] = true;
                             }
                         }
                     }
+                    if milliseconds == 60 {
+                        assert_eq!(reached, [false; 8]);
+                        assert!(struck[..scene_width].iter().any(|color| color & 255 > 100), "Leader is not planted on the screen edge");
+                    } else if milliseconds == 140 {
+                        assert!(!reached[0] && !reached[1] && !reached[2]);
+                        assert!(white > 5, "No video impact flare");
+                    } else if milliseconds == 200 {
+                        assert!(reached[5], "Charge did not leave the hit along the video");
+                        assert!(!reached[0], "Bubble lit before the charge reached it");
+                        for direction in [-25.0, 25.0] {
+                            let y = ((logical_height as f32 - 90.5 + direction) * scale).round() as usize;
+                            let x = (188.0 * scale) as usize;
+                            assert!(struck[(offset_y + y) * scene_width + offset_x + x] & 255 > 150, "Charge did not propagate in both directions");
+                        }
+                    } else {
+                        assert_eq!(reached, [true; 8], "Missing complete outline at scale {scale}, height {logical_height}");
+                        assert!(white > 200);
+                        let mut coverage = PaintCoverage { pixels: vec![false; width * height] };
+                        let mut mask = vec![0; width * height];
+                        draw_bubble(&mut mask, width, height, scale, bottom, 0, Some(&mut coverage));
+                        for y in ((logical_height as f32 - 140.0) * scale) as usize..((logical_height as f32 - 12.0) * scale) as usize {
+                            for x in (188.0 * scale) as usize..(316.0 * scale) as usize { coverage.pixels[y * width + x] = true; }
+                        }
+                        for contour in coverage.contours(width, height) {
+                            let lit = contour.iter().filter(|point| {
+                                let radius = (3.0 * scale).ceil() as i32;
+                                (-radius..=radius).any(|dy| (-radius..=radius).any(|dx| {
+                                    let x = point[0].round() as i32 + dx;
+                                    let y = point[1].round() as i32 + dy;
+                                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 { return false; }
+                                    let color = struck[(offset_y + y as usize) * scene_width + offset_x + x as usize];
+                                    color & 255 >= 180 && (color >> 8) & 255 >= 130 && (color >> 16) & 255 >= 100
+                                }))
+                            }).count();
+                            assert!(lit * 100 >= contour.len() * 95, "Only {lit}/{} painted perimeter points energized", contour.len());
+                        }
+                    }
                 }
-                assert_eq!(reached, [true; 8], "Missing outline strike at scale {scale}, height {logical_height}");
-                assert!(cyan >= 200 && white >= 30 && wide_glow >= 200, "Not a bright, wide lightning strike: cyan={cyan}, white={white}, glow={wide_glow}");
             }
         }
     }
@@ -686,14 +1017,14 @@ mod tests {
         renderer.draw(&mut next_plain, 320, 260, 1.0, None, 0.0, None);
         let mut struck = vec![0; plain.len()];
         renderer.seed = 567891;
-        renderer.draw(&mut struck, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(120)));
-        assert!(struck.iter().filter(|pixel| **pixel == 0xffffff).count() >= 10);
+        renderer.draw(&mut struck, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(140)));
+        assert!(struck.iter().filter(|pixel| (**pixel & 255) > 220 && ((**pixel >> 16) & 255) > 220).count() >= 10);
         let mut next_struck = vec![0; plain.len()];
         renderer.draw(&mut next_struck, 320, 260, 1.0, None, 0.0, None);
         assert_eq!(next_plain, next_struck);
         let mut repeated = vec![0; plain.len()];
         renderer.seed = 567891;
-        renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(120)));
+        renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(140)));
         assert_eq!(struck, repeated);
         renderer.seed = 567891;
         renderer.draw(&mut repeated, 320, 260, 1.0, None, 0.62, Some(Duration::from_millis(240)));

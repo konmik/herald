@@ -23,7 +23,7 @@ mod window;
 
 use chrono::Timelike;
 use platform::{Signal, Speech, SpeechEvent};
-use render::Renderer;
+use render::{CardPlacement, EntranceScene, PhysicalRect, Renderer};
 use state::{Inbox, MeetingStatus, Notification};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -48,6 +48,9 @@ struct Active {
     video: Option<video::Video>,
     video_path: PathBuf,
     history_recorded: bool,
+    placement: CardPlacement,
+    entrance: Option<EntranceScene>,
+    presented_bounds: Option<PhysicalRect>,
 }
 
 struct Pending {
@@ -58,6 +61,8 @@ struct Pending {
     duration: Duration,
     video: Option<video::Video>,
     video_path: PathBuf,
+    placement: CardPlacement,
+    entrance: Option<EntranceScene>,
 }
 
 enum Presentation {
@@ -67,6 +72,16 @@ enum Presentation {
 }
 
 impl Presentation {
+    fn restore(&self, window: &window::Window) -> Result<(), String> {
+        platform::hide(window);
+        let placement = match self {
+            Self::Playing(active) => active.placement,
+            Self::Preparing(pending) => pending.placement,
+            Self::Idle => return Ok(()),
+        };
+        platform::physical_bounds(window, placement.rect, placement.scale)
+    }
+
     fn notification(&self) -> Option<&Notification> {
         match self {
             Self::Idle => None,
@@ -108,6 +123,9 @@ impl Pending {
             video: self.video,
             video_path: self.video_path,
             history_recorded: false,
+            placement: self.placement,
+            entrance: self.entrance,
+            presented_bounds: None,
         }
     }
 }
@@ -120,12 +138,18 @@ fn speech_readiness_timeout(settings: &settings::Settings) -> Duration {
 
 impl Active {
     fn entrance_strike(&self, now: Instant) -> Option<Duration> {
-        let elapsed = now.duration_since(self.started);
+        let elapsed = now.saturating_duration_since(self.started);
         (self.end.is_none() && elapsed < state::TRANSITION_DURATION).then_some(elapsed)
     }
 
     fn ready_to_end(&self, now: Instant) -> bool {
         now >= self.expires && (self.silent || self.speech_finished)
+    }
+
+    fn viewport(&self, now: Instant) -> PhysicalRect {
+        if self.entrance_strike(now).is_some() {
+            self.entrance.as_ref().map(|scene| scene.canvas).unwrap_or(self.placement.rect)
+        } else { self.placement.rect }
     }
 }
 
@@ -328,9 +352,12 @@ fn run() -> Result<(), String> {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
             | Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. }, .. } => *control_flow = ControlFlow::Exit,
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-                speech.cancel(); signal.stop(); current = Presentation::Idle; platform::hide(&window); inbox.save(None);
+                speech.cancel(); signal.stop();
+                if let Err(error) = current.restore(&window) { state::log(&data, error); *control_flow = ControlFlow::Exit; }
+                current = Presentation::Idle; inbox.save(None);
             }
             Event::MainEventsCleared => {
+                platform::refresh_card_input(&window);
                 let now = Instant::now();
                 if now < next_frame { return; }
                 if test_seconds.is_some_and(|seconds| launched.elapsed() >= Duration::from_secs(seconds)) {
@@ -356,7 +383,9 @@ fn run() -> Result<(), String> {
                         inbox.read(notification)
                     };
                     if invalidated {
-                        speech.cancel(); signal.stop(); current = Presentation::Idle; platform::hide(&window); inbox.save(None);
+                        speech.cancel(); signal.stop();
+                        if let Err(error) = current.restore(&window) { state::log(&data, error); *control_flow = ControlFlow::Exit; return; }
+                        current = Presentation::Idle; inbox.save(None);
                     }
                     last_inbox = now;
                 }
@@ -411,18 +440,27 @@ fn run() -> Result<(), String> {
                         let scale = monitor.as_ref().map_or_else(|| window.scale_factor(), |monitor| monitor.scale_factor());
                         let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
                         let height = (renderer.message_height(scale as f32) + 238).min(max_height).max(240);
-                        #[cfg(target_os = "linux")]
-                        {
-                            use gtk::prelude::WidgetExt;
-                            use tao::platform::unix::WindowExtUnix;
-                            window.gtk_window().set_size_request(320, height as i32);
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        window.set_inner_size(LogicalSize::new(320.0, height as f64));
-                        if let Some(monitor) = monitor {
+                        let position = monitor.as_ref().map(|monitor| {
                             let position = monitor.position();
-                            window.set_outer_position(PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32));
+                            PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32)
+                        }).unwrap_or_else(|| PhysicalPosition::new(0, 0));
+                        let placement = CardPlacement { rect: PhysicalRect { x: position.x, y: position.y,
+                            width: (320.0 * scale) as u32, height: (height as f64 * scale) as u32 }, scale: scale as f32 };
+                        if let Err(error) = platform::physical_bounds(&window, placement.rect, placement.scale) {
+                            state::log(&data, error); *control_flow = ControlFlow::Exit; return;
                         }
+                        #[cfg(target_os = "windows")]
+                        let entrance = monitor.as_ref().filter(|monitor| {
+                            let bounds = monitor.bounds();
+                            bounds.contains(placement.rect.x, placement.rect.y)
+                                && bounds.contains(placement.rect.right() - 1, placement.rect.bottom() - 1)
+                                && placement.rect.x - bounds.x >= (25.0 * placement.scale) as i32
+                        }).map(|monitor| {
+                            let seed = notification.id.bytes().fold(notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)));
+                            EntranceScene::new(monitor.bounds(), placement, seed)
+                        });
+                        #[cfg(not(target_os = "windows"))]
+                        let entrance = None;
                         let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
                         let mut path = character.video_path.clone();
@@ -445,7 +483,7 @@ fn run() -> Result<(), String> {
                         };
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
                         let readiness_timeout = speech_readiness_timeout(settings);
-                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path };
+                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path, placement, entrance };
                         if muted {
                             activation = Some((pending, true));
                         } else {
@@ -459,10 +497,8 @@ fn run() -> Result<(), String> {
                     let active = pending.activate(silent);
                     abrupt_window_ok &= platform::opacity(&window, 1.0);
                     window_opacity_updates += 1;
-                    let previous_focus = platform::foreground();
+                    #[cfg(not(target_os = "windows"))]
                     platform::show(&window);
-                    if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
-                    passive_window_ok &= platform::passive_window(&window, true);
                     window.request_redraw();
                     shown += 1;
                     titles.push(renderer.title.clone());
@@ -478,7 +514,7 @@ fn run() -> Result<(), String> {
                 let mut dismiss = false;
                 if let Presentation::Playing(active) = &mut current {
                     if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
-                    if now.duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
+                    if now.saturating_duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
                         signal.stop();
                         if !active.silent { speech.release(&active.notification.id); }
@@ -494,12 +530,14 @@ fn run() -> Result<(), String> {
                     } else { window.request_redraw(); }
                 }
                 if dismiss {
-                    current = Presentation::Idle; signal.stop(); platform::hide(&window); finished += 1; inbox.save(None);
+                    if let Err(error) = current.restore(&window) { state::log(&data, error); *control_flow = ControlFlow::Exit; return; }
+                    current = Presentation::Idle; signal.stop(); finished += 1; inbox.save(None);
                     passive_window_ok &= platform::passive_window(&window, false);
                 }
                 let interval = match &current {
                     Presentation::Preparing(_) => 42,
-                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() => 42,
+                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION => 16,
+                    Presentation::Playing(active) if active.end.is_some() => 42,
                     Presentation::Playing(active) => (1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64,
                     Presentation::Idle => 250,
                 };
@@ -508,38 +546,62 @@ fn run() -> Result<(), String> {
             }
             Event::RedrawRequested(_) => {
                 if let Presentation::Playing(active) = &mut current {
-                    let size = window.inner_size();
-                    if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+                    let frame_now = Instant::now();
+                    let elapsed = frame_now.saturating_duration_since(active.started);
+                    let entrance_time = active.entrance_strike(frame_now);
+                    let viewport = active.viewport(frame_now);
+                    if let (Some(width), Some(height)) = (NonZeroU32::new(viewport.width), NonZeroU32::new(viewport.height)) {
                         let result = (|| -> Result<(), String> {
-                            surface.resize(width, height).map_err(|e| e.to_string())?;
-                            let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
-                            let transition_time = active.end.map(|end| end.elapsed()).unwrap_or_else(|| active.started.elapsed());
+                            let transition_time = active.end.map(|end| frame_now.saturating_duration_since(end)).unwrap_or(elapsed);
                             let interference = state::visual_interference_amount(transition_time, active.notification.completed as u32);
                             if interference > 0.0 { static_frames += 1; } else { animation_frames += 1; }
                             if let Some(video) = &mut active.video {
                                 let previous_frames = video.decoded_frames;
                                 let previous_loops = video.loops;
-                                if let Err(error) = video.advance(active.started.elapsed()) {
+                                if let Err(error) = video.advance(elapsed) {
                                     state::log(&data, format!("Video playback: {error}"));
                                 }
                                 decoded_video_frames += video.decoded_frames - previous_frames;
                                 video_loops += video.loops - previous_loops;
                             }
-                            renderer.text_interference = if active.started.elapsed() < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
-                            renderer.draw(&mut buffer, size.width as usize, size.height as usize, window.scale_factor() as f32, active.video.as_ref().map(video::Video::frame), interference, active.entrance_strike(Instant::now()));
-                            if let Some(frames) = &mut frames {
-                                frames.save(&buffer, size.width, size.height, active.started.elapsed(), active.end.map(|end| end.duration_since(active.started)))?;
+                            renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
+                            let image = active.video.as_ref().map(video::Video::frame);
+                            let pixels = if let Some(scene) = &active.entrance {
+                                renderer.scene(scene, image, interference, entrance_time)
+                            } else {
+                                let mut pixels = vec![0; viewport.width as usize * viewport.height as usize];
+                                renderer.draw(&mut pixels, viewport.width as usize, viewport.height as usize, active.placement.scale, image, interference, entrance_time);
+                                pixels
+                            };
+                            let changed_bounds = active.presented_bounds != Some(viewport);
+                            if changed_bounds {
+                                platform::hide(&window);
+                                platform::physical_bounds(&window, viewport, active.placement.scale)?;
+                                platform::card_region(&window, active.placement.rect);
                             }
-                            if active.started.elapsed() > state::TRANSITION_DURATION && active.end.is_none() {
+                            surface.resize(width, height).map_err(|e| e.to_string())?;
+                            let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
+                            buffer.copy_from_slice(&pixels);
+                            buffer.present().map_err(|e| e.to_string())?;
+                            if changed_bounds {
+                                let previous_focus = platform::foreground();
+                                platform::show(&window);
+                                if previous_focus != 0 && platform::foreground() != previous_focus { focus_unchanged = false; }
+                                passive_window_ok &= platform::passive_window(&window, true);
+                                active.presented_bounds = Some(viewport);
+                            }
+                            if let Some(frames) = &mut frames {
+                                frames.save_scene(&pixels, viewport.width, viewport.height, elapsed, active.end.map(|end| end.duration_since(active.started)), active.placement, active.entrance.as_ref(), viewport)?;
+                            }
+                            if elapsed >= state::TRANSITION_DURATION && active.end.is_none() {
                                 if let Some(path) = snapshot.take() {
-                                    let preview = image::RgbaImage::from_fn(size.width, size.height, |x, y| {
-                                        let color = buffer[(y * size.width + x) as usize];
+                                    let preview = image::RgbaImage::from_fn(viewport.width, viewport.height, |x, y| {
+                                        let color = pixels[(y * viewport.width + x) as usize];
                                         image::Rgba([(color >> 16) as u8, (color >> 8) as u8, color as u8, if color == 0xff00ff { 0 } else { 255 }])
                                     });
                                     preview.save(path).map_err(|e| e.to_string())?;
                                 }
                             }
-                            buffer.present().map_err(|e| e.to_string())?;
                             if !active.history_recorded {
                                 let result = if active.character.id.is_some() {
                                     history::record_with_identity(&data, &active.notification, active.character.history_identity(), &active.video_path, chrono::Utc::now())
@@ -558,10 +620,14 @@ fn run() -> Result<(), String> {
                 }
             }
             Event::LoopDestroyed => {
-                #[cfg(target_os = "linux")]
-                if let Some(timer) = wake_timer.take() { timer.remove(); }
+                if let Err(error) = current.restore(&window) { state::log(&data, error); }
                 stop.store(true, Ordering::Relaxed); speech.cancel(); signal.stop();
                 if let Presentation::Playing(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
+                if let Some(frames) = &mut frames {
+                    if let Err(error) = frames.finish() { state::log(&data, error); }
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(timer) = wake_timer.take() { timer.remove(); }
                 inbox.save(current.notification());
                 if let Some(path) = &report {
                     let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": video_frame_rates.first().copied().unwrap_or(state::VIDEO_FPS as f64), "selectedVideos": selected_videos, "videoFrameRates": video_frame_rates, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
@@ -602,6 +668,9 @@ mod tests {
             video: None,
             video_path: PathBuf::new(),
             history_recorded: false,
+            placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
+            entrance: None,
+            presented_bounds: None,
         };
         assert!(!active.ready_to_end(started + Duration::from_secs(20)));
         active.speech_finished = true;
@@ -615,8 +684,12 @@ mod tests {
         assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), Some(Duration::from_millis(120)));
         assert_eq!(active.entrance_strike(started + Duration::from_millis(650)), None);
         assert_eq!(active.entrance_strike(started + Duration::from_secs(5)), None);
+        active.entrance = Some(EntranceScene::new(PhysicalRect { x: -500, y: -200, width: 1500, height: 1200 }, active.placement, 1234));
+        assert_eq!(active.viewport(started + Duration::from_millis(140)).y, -200);
+        assert_eq!(active.viewport(started + Duration::from_millis(650)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
         active.end = Some(started + Duration::from_millis(80));
         assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), None);
+        assert_eq!(active.viewport(started + Duration::from_millis(120)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
     }
 
     #[test]
@@ -642,6 +715,8 @@ mod tests {
             duration: Duration::from_secs(10),
             video: None,
             video_path: PathBuf::new(),
+            placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
+            entrance: None,
         });
         assert!(matches!(&presentation, Presentation::Preparing(_)));
         assert!(presentation.take_preparing(Some("other")).is_none());

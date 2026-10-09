@@ -122,6 +122,42 @@ pub fn hide(window: &Window) {
     window.set_visible(false);
 }
 
+pub fn physical_bounds(window: &Window, bounds: crate::render::PhysicalRect, scale: f32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = scale;
+        window.set_physical_bounds(bounds).map_err(|error| error.to_string())?;
+        window.set_card_region(bounds);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::WidgetExt;
+            use tao::platform::unix::WindowExtUnix;
+            window.gtk_window().set_size_request((bounds.width as f32 / scale).round() as i32, (bounds.height as f32 / scale).round() as i32);
+        }
+        #[cfg(not(target_os = "linux"))]
+        window.set_inner_size(tao::dpi::PhysicalSize::new(bounds.width, bounds.height));
+        window.set_outer_position(crate::window::PhysicalPosition::new(bounds.x, bounds.y));
+    }
+    Ok(())
+}
+
+pub fn card_region(window: &Window, bounds: crate::render::PhysicalRect) {
+    #[cfg(target_os = "windows")]
+    window.set_card_region(bounds);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, bounds);
+}
+
+pub fn refresh_card_input(window: &Window) {
+    #[cfg(target_os = "windows")]
+    window.refresh_card_input();
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+}
+
 pub fn passive_window(window: &Window, visible: bool) -> bool {
     #[cfg(target_os = "windows")]
     unsafe {
