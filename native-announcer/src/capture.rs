@@ -103,7 +103,7 @@ mod tests {
     fn expanded_and_restored_captures_keep_physical_geometry_and_the_sampled_phase() {
         let directory = std::env::temp_dir().join("opencode").join(format!("herald-scene-{}", std::process::id()));
         let card = crate::render::CardPlacement { rect: crate::render::PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
-        let scene = crate::render::EntranceScene::new(crate::render::PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 }, card, 1234);
+        let scene = crate::render::EntranceScene::new(crate::render::PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 }, card, 1234, crate::lightning::LightningSettings::default());
         let mut frames = Frames::new(&directory).unwrap();
         let pixels = vec![0x123456; scene.canvas.width as usize * scene.canvas.height as usize];
         frames.save_scene(&pixels, scene.canvas.width, scene.canvas.height, Duration::from_millis(140), None, card, Some(&scene), scene.canvas).unwrap();

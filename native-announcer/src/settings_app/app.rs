@@ -4,6 +4,8 @@ mod draft;
 mod appearance;
 #[path = "keyboard.rs"]
 mod keyboard;
+#[path = "lightning_preview.rs"]
+mod lightning_preview;
 use keyboard::RevealFocused;
 #[cfg_attr(target_os = "windows", path = "instance.rs")]
 #[cfg_attr(target_os = "linux", path = "instance_linux.rs")]
@@ -17,6 +19,7 @@ mod dialogs;
 
 use crate::characters::{Character, CharacterVoice};
 use crate::elevenlabs::{Client, SpeechModel, VoiceUsage};
+use crate::lightning::{PARAMETERS, PRESETS};
 use crate::platform::Preview;
 use crate::settings::{format_time, FontPreference, Settings, DEFAULT_SUMMARY_PROMPT, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use appearance::{Appearance, AppearancePreference};
@@ -51,6 +54,7 @@ enum Page {
     SpeechService,
     OfflineVoice,
     Announcements,
+    Lightning,
 }
 
 #[derive(Clone, Copy)]
@@ -77,7 +81,7 @@ struct PageSpec {
     description: &'static str,
 }
 
-const PAGES: [PageSpec; 6] = [
+const PAGES: [PageSpec; 7] = [
     PageSpec {
         page: Page::Characters,
         key: "characters",
@@ -113,6 +117,12 @@ const PAGES: [PageSpec; 6] = [
         key: "announcements",
         label: "Announcements",
         description: "Choose announcement fonts, sizes, and summary options.",
+    },
+    PageSpec {
+        page: Page::Lightning,
+        key: "lightning",
+        label: "Lightning",
+        description: "Preview the announcement effect silently. Apply saves it for the next announcement.",
     },
 ];
 
@@ -162,10 +172,11 @@ type ChoiceSelect = SelectState<Vec<Choice>>;
 
 struct SettingsView {
     initial_focus_pending: bool,
-    navigation_focus: [FocusHandle; 6],
+    navigation_focus: [FocusHandle; PAGES.len()],
     character_list_focus: FocusHandle,
     volume_focus: FocusHandle,
     silent_sound_focus: FocusHandle,
+    lightning_focus: [FocusHandle; PARAMETERS.len()],
     page_scroll: ScrollHandle,
     navigation_scroll: ScrollHandle,
     character_scroll: ScrollHandle,
@@ -194,6 +205,9 @@ struct SettingsView {
     body_size_select: Entity<ChoiceSelect>,
     title_font_select: Entity<ChoiceSelect>,
     title_size_select: Entity<ChoiceSelect>,
+    lightning_select: Entity<ChoiceSelect>,
+    lightning_sliders: [Entity<SliderState>; PARAMETERS.len()],
+    lightning_preview: Option<lightning_preview::Preview>,
     devices: Vec<crate::audio::OutputDevice>,
     voice_usage: VoiceUsageState,
     usage_generation: u64,
@@ -232,6 +246,7 @@ impl SettingsView {
         let body_font_choices = font_choices(&font_families, &draft.settings.announcement_body_font.family);
         let title_font_choices = font_choices(&font_families, &draft.settings.announcement_title_font.family);
         let size_choices = font_size_choices();
+        let lightning_choices = PRESETS.iter().map(|preset| Choice::new(preset.id, preset.label)).collect::<Vec<_>>();
         let status = appearance_warning.unwrap_or_else(|| "Apply saves changes. Close discards unsaved edits.".to_owned());
         let character_scroll = ScrollHandle::new();
         let character_anchor = gpui_kit::ScrollAnchor::for_handle(character_scroll.clone());
@@ -241,6 +256,7 @@ impl SettingsView {
             character_list_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             volume_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             silent_sound_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            lightning_focus: std::array::from_fn(|_| cx.focus_handle().tab_index(0).tab_stop(true)),
             page_scroll: ScrollHandle::new(),
             navigation_scroll: ScrollHandle::new(),
             character_scroll,
@@ -313,6 +329,13 @@ impl SettingsView {
                     cx,
                 )
             }),
+            lightning_select: cx.new(|cx| SelectState::new(lightning_choices,
+                settings.lightning.preset().map(|preset| IndexPath::new(PRESETS.iter().position(|value| value.id == preset.id).unwrap())), window, cx)),
+            lightning_sliders: std::array::from_fn(|index| {
+                let spec = &PARAMETERS[index];
+                cx.new(|_| SliderState::new().min(spec.min).max(spec.max).step(spec.step).default_value(spec.parameter.get(settings.lightning)))
+            }),
+            lightning_preview: None,
             devices,
             voice_usage: initial_voice_usage_state(settings.elevenlabs_api_key.as_deref()),
             usage_generation: 0,
@@ -325,6 +348,38 @@ impl SettingsView {
         };
         view.sync_character_inputs(window, cx);
         view.install_subscriptions(cx);
+        view.subscriptions.push(cx.subscribe_in(&view.lightning_select, window, |view, _, event: &SelectEvent<Vec<Choice>>, window, cx| {
+            if let SelectEvent::Confirm(Some(value)) = event {
+                if let Some(preset) = PRESETS.iter().find(|preset| preset.id == value) {
+                    view.draft.settings.lightning = preset.settings;
+                    for (spec, slider) in PARAMETERS.iter().zip(&view.lightning_sliders) {
+                        slider.update(cx, |state, cx| state.set_value(spec.parameter.get(preset.settings), window, cx));
+                    }
+                    view.update_lightning_preview();
+                    cx.notify();
+                }
+            }
+        }));
+        for (index, state) in view.lightning_sliders.iter().enumerate() {
+            view.subscriptions.push(cx.subscribe_in(state, window, move |view, _, event: &SliderEvent, window, cx| {
+                let spec = PARAMETERS[index];
+                let value = match event { SliderEvent::Change(value) | SliderEvent::Release(value) => value.start() };
+                spec.parameter.set(&mut view.draft.settings.lightning, spec.clamp(value));
+                let selected = view.draft.settings.lightning.preset().map(|preset| preset.id.to_owned());
+                view.lightning_select.update(cx, |state, cx| {
+                    if let Some(selected) = selected { state.set_selected_value(&selected, window, cx); }
+                    else { state.set_selected_index(None, window, cx); }
+                });
+                view.update_lightning_preview();
+                cx.notify();
+            }));
+        }
+        view.subscriptions.push(cx.observe_window_activation(window, |view, window, _| {
+            if let Some(preview) = &view.lightning_preview { preview.set_active(window.is_window_active()); }
+        }));
+        view.subscriptions.push(cx.on_release_in(window, |view, window, _| {
+            if let Some(mut preview) = view.lightning_preview.take() { preview.clear_images(window); }
+        }));
         let handle = window.window_handle();
         let weak = cx.weak_entity();
         cx.spawn(async move |_, cx| {
@@ -514,7 +569,7 @@ impl SettingsView {
             return false;
         }
         self.stop_previews();
-        let _ = window;
+        if let Some(mut preview) = self.lightning_preview.take() { preview.clear_images(window); }
         true
     }
 
@@ -564,13 +619,14 @@ impl SettingsView {
         }
         self.capture_inputs(cx);
         self.stop_previews();
+        if let Some(preview) = self.lightning_preview.take() { preview.leave(window); }
         self.active_page = page;
         self.page_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
         if page == Page::SpeechService && matches!(self.voice_usage, VoiceUsageState::NotLoaded) {
             self.refresh_usage(cx);
         }
+        if page == Page::Lightning { self.start_lightning_preview(window, cx); }
         cx.notify();
-        let _ = window;
     }
 
     fn navigate_page(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -599,7 +655,7 @@ impl SettingsView {
 
     fn choice_boundary(&self, last: bool, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::Focusable;
-        for state in [&self.output_select, &self.model_select, &self.body_font_select, &self.body_size_select, &self.title_font_select, &self.title_size_select] {
+        for state in [&self.output_select, &self.model_select, &self.body_font_select, &self.body_size_select, &self.title_font_select, &self.title_size_select, &self.lightning_select] {
             let focus = state.read(cx).focus_handle(cx);
             if focus.contains_focused(window, cx) {
                 let row = state.read(cx).selected_index(cx).map(|index| index.row).unwrap_or(0);
@@ -768,6 +824,40 @@ impl SettingsView {
     fn stop_previews(&mut self) {
         self.preview = None;
         self.voice_preview = None;
+    }
+
+    fn update_lightning_preview(&self) {
+        if let Some(preview) = &self.lightning_preview { preview.update(self.draft.settings.lightning); }
+    }
+
+    fn start_lightning_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match lightning_preview::Preview::start(self.assets.clone(), self.draft.settings.clone(), window.is_window_active()) {
+            Ok(preview) => self.lightning_preview = Some(preview),
+            Err(error) => { self.status = format!("Could not start lightning preview: {error}"); cx.notify(); return; }
+        }
+        let driver = cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+                let done = view.update_in(cx, |view, window, cx| {
+                    let Some(preview) = &mut view.lightning_preview else { return true; };
+                    if preview.receive() {
+                        let image_id = preview.image.as_ref().map(|image| image.id);
+                        cx.notify();
+                        let view = cx.weak_entity();
+                        window.on_next_frame(move |window, cx| {
+                            let _ = view.update(cx, |view, _| {
+                                if let Some(preview) = &mut view.lightning_preview {
+                                    if preview.image.as_ref().map(|image| image.id) == image_id { preview.retire_painted(window); }
+                                }
+                            });
+                        });
+                    }
+                    false
+                }).unwrap_or(true);
+                if done { break; }
+            }
+        });
+        self.lightning_preview.as_mut().unwrap().driver = Some(driver);
     }
 
     fn poll_previews(&mut self, cx: &mut Context<Self>) {
@@ -1450,7 +1540,41 @@ impl SettingsView {
             Page::SpeechService => self.render_speech_service(layout, window, cx),
             Page::OfflineVoice => self.render_offline_voice(cx),
             Page::Announcements => self.render_announcements(layout, window, cx),
+            Page::Lightning => self.render_lightning(layout, cx),
         }
+    }
+
+    fn render_lightning(&self, layout: Layout, cx: &mut Context<Self>) -> AnyElement {
+        let mut controls = v_flex().min_w_0().flex_1().gap_2().when(layout.compact, |column| column.w_full())
+            .child(div().text_sm().child("Preset"))
+            .child(Select::new(&self.lightning_select).id("lightning-preset").accessibility_label("Lightning preset")
+                .placeholder("Custom").focus_ring(false).w_full().reveal("reveal-lightning-preset", &self.page_scroll));
+        for (index, spec) in PARAMETERS.iter().enumerate() {
+            controls = controls.child(v_flex().gap_1()
+                .child(div().text_sm().child(format!("{}: {:.2}", spec.label, spec.parameter.get(self.draft.settings.lightning))))
+                .child(self.render_slider(spec.id, spec.label, &self.lightning_sliders[index], &self.lightning_focus[index], cx)
+                    .reveal(spec.id, &self.page_scroll)));
+        }
+        let mut panel = div().id("lightning-preview").accessibility_id("lightning-preview").role(gpui_kit::Role::Image)
+            .aria_label("Silent lightning preview").w_full().h(px(286.)).overflow_hidden().rounded_md().border_1().border_color(cx.theme().border)
+            .bg(gpui_kit::rgb(0x101827));
+        let description = if let Some(preview) = &self.lightning_preview {
+            if let Some(image) = &preview.image { panel = panel.child(gpui_kit::img(image.clone()).size_full().object_fit(gpui_kit::ObjectFit::Contain)); }
+            if let Some(error) = &preview.error { error.clone() }
+            else if preview.character_id.is_empty() { "Loading bundled character…".into() }
+            else { format!("{} · {:?}", preview.character_name, preview.phase) }
+        } else { "Preview stopped.".into() };
+        let preview = v_flex().w(px(320.)).flex_shrink_0().gap_2().when(layout.compact, |column| column.w_full())
+            .child(panel)
+            .child(div().id("lightning-preview-info").accessibility_id("lightning-preview-info").role(gpui_kit::Role::Label)
+                .aria_value(description.clone()).text_sm().child(description))
+            .child(Button::new("lightning-replay").label("Replay with another character").accessibility_id("lightning-replay")
+                .on_click(cx.listener(|view, _, _, cx| {
+                    if let Some(preview) = &view.lightning_preview { preview.replay(); }
+                    cx.notify();
+                })).reveal("reveal-lightning-replay", &self.page_scroll));
+        h_flex().w_full().min_w_0().items_start().gap_4().when(layout.compact, |row| row.flex_col())
+            .child(controls).child(preview).into_any_element()
     }
 }
 
