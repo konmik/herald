@@ -54,6 +54,7 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [verify-settings-status.ps1](verify-settings-status.ps1) | Legacy Win32 baseline status checks. |
 | [verify-characters.ps1](verify-characters.ps1) | Legacy Win32 character controls and playback checks. |
 | [verify-announcement-audio.py](verify-announcement-audio.py) | Capture output audio and check announcement/preview timing. |
+| [verify-entrance-lightning.py](verify-entrance-lightning.py) | Check outline lightning in real PNG frames from `announce.ps1 -CaptureFrames`; pass the evidence `frames/` directory. |
 | [verify-linux-playback.py](verify-linux-playback.py) | Check Hyprland desktop transparency, sustained animation, focus and captured output audio with an isolated demo. |
 | [verify-linux-settings.py](verify-linux-settings.py) | Launch installed graphical settings on Hyprland, drive its AT-SPI controls, and verify navigation, Apply, draft discard, and reopening. |
 | [voice-api-fixture.mjs](voice-api-fixture.mjs) | Local speech API fixture for deterministic tests. |

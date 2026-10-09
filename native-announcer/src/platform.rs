@@ -444,7 +444,7 @@ impl Signal {
             wav.extend(16u16.to_le_bytes());
             wav.extend(b"data");
             wav.extend(sample_bytes.to_le_bytes());
-            let mut seed = 734971u32;
+            let mut seed = crate::state::SIGNAL_SEED;
             let mut filtered = 0.0_f32;
             for index in 0..samples {
                 seed ^= seed << 13;
@@ -463,7 +463,7 @@ impl Signal {
                 };
                 let envelope = crate::state::interference_amount(
                     Duration::from_secs_f32(crate::state::TRANSITION_DURATION.as_secs_f32() * index as f32 / (samples - 1) as f32),
-                    734971,
+                    crate::state::SIGNAL_SEED,
                 );
                 let value = ((white * 0.7 + filtered * 0.3 + crackle) * envelope * 24.0) as i16;
                 wav.extend(value.to_le_bytes());

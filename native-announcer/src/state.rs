@@ -83,6 +83,7 @@ pub fn display_duration(text: &str) -> Duration {
 }
 
 pub const TRANSITION_DURATION: Duration = Duration::from_millis(650);
+pub const SIGNAL_SEED: u32 = 734971;
 pub const VIDEO_FPS: u32 = 8;
 
 pub fn interference_amount(elapsed: Duration, seed: u32) -> f32 {
