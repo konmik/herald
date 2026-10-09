@@ -72,7 +72,10 @@ mod native {
         WaitUntil(Instant),
         Exit,
     }
-    thread_local! { static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) }; }
+    thread_local! {
+        static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+        static CARD_REGION: RefCell<Option<crate::render::PhysicalRect>> = const { RefCell::new(None) };
+    }
 
     unsafe extern "system" fn procedure(
         hwnd: HWND,
@@ -81,6 +84,13 @@ mod native {
         lparam: LPARAM,
     ) -> LRESULT {
         match message {
+            WM_NCHITTEST => {
+                let x = lparam as i16 as i32;
+                let y = (lparam >> 16) as i16 as i32;
+                if CARD_REGION.with(|region| region.borrow().is_some_and(|rect| !rect.contains(x, y))) {
+                    HTTRANSPARENT as isize
+                } else { HTCLIENT as isize }
+            }
             WM_MOUSEACTIVATE => MA_NOACTIVATE as isize,
             WM_ERASEBKGND => 1,
             WM_ACTIVATE => {
@@ -198,47 +208,29 @@ mod native {
         pub fn scale_factor(&self) -> f64 {
             unsafe { GetDpiForWindow(self.hwnd).max(96) as f64 / 96.0 }
         }
-        pub fn inner_size(&self) -> PhysicalSize {
-            let mut rect = RECT::default();
-            unsafe {
-                GetClientRect(self.hwnd, &mut rect);
-            }
-            PhysicalSize {
-                width: (rect.right - rect.left).max(1) as u32,
-                height: (rect.bottom - rect.top).max(1) as u32,
-            }
+        pub fn set_physical_bounds(&self, bounds: crate::render::PhysicalRect) -> Result<(), std::io::Error> {
+            let width = i32::try_from(bounds.width).map_err(std::io::Error::other)?;
+            let height = i32::try_from(bounds.height).map_err(std::io::Error::other)?;
+            if unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), bounds.x, bounds.y, width, height, SWP_NOACTIVATE | SWP_NOZORDER) } == 0 {
+                Err(std::io::Error::last_os_error())
+            } else { Ok(()) }
         }
-        pub fn set_inner_size(&self, size: LogicalSize) {
-            let scale = self.scale_factor();
-            unsafe {
-                SetWindowPos(
-                    self.hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    (size.width * scale) as i32,
-                    (size.height * scale) as i32,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
+        pub fn set_card_region(&self, bounds: crate::render::PhysicalRect) {
+            CARD_REGION.with(|region| *region.borrow_mut() = Some(bounds));
+            self.refresh_card_input();
         }
-        pub fn set_outer_position(&self, position: PhysicalPosition) {
+        pub fn refresh_card_input(&self) {
+            let mut pointer = POINT::default();
+            let mut window = RECT::default();
             unsafe {
-                SetWindowPos(
-                    self.hwnd,
-                    std::ptr::null_mut(),
-                    position.x,
-                    position.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+                if GetCursorPos(&mut pointer) == 0 || GetWindowRect(self.hwnd, &mut window) == 0 { return; }
+                let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+                let next = CARD_REGION.with(|region| card_input_style(style, physical_rect(window), *region.borrow(), pointer));
+                if style != next { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, next); }
             }
         }
         pub fn request_redraw(&self) {
-            unsafe {
-                InvalidateRect(self.hwnd, std::ptr::null(), 0);
-            }
+            EVENTS.with(|events| events.borrow_mut().push(Event::RedrawRequested(())));
         }
         pub fn current_monitor(&self) -> Option<Monitor> {
             let handle = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
@@ -250,7 +242,8 @@ mod native {
                 None
             } else {
                 Some(Monitor {
-                    rect: info.rcWork,
+                    work_area: physical_rect(info.rcWork),
+                    bounds: physical_rect(info.rcMonitor),
                     scale: self.scale_factor(),
                 })
             }
@@ -282,21 +275,76 @@ mod native {
         }
     }
     pub struct Monitor {
-        rect: RECT,
+        work_area: crate::render::PhysicalRect,
+        bounds: crate::render::PhysicalRect,
         scale: f64,
     }
     impl Monitor {
         pub fn size(&self) -> PhysicalSize {
             PhysicalSize {
-                width: (self.rect.right - self.rect.left) as u32,
-                height: (self.rect.bottom - self.rect.top) as u32,
+                width: self.work_area.width,
+                height: self.work_area.height,
             }
         }
         pub fn position(&self) -> PhysicalPosition {
-            PhysicalPosition::new(self.rect.left, self.rect.top)
+            PhysicalPosition::new(self.work_area.x, self.work_area.y)
         }
         pub fn scale_factor(&self) -> f64 {
             self.scale
+        }
+        pub fn bounds(&self) -> crate::render::PhysicalRect {
+            self.bounds
+        }
+    }
+
+    fn physical_rect(rect: RECT) -> crate::render::PhysicalRect {
+        crate::render::PhysicalRect { x: rect.left, y: rect.top, width: (rect.right - rect.left) as u32, height: (rect.bottom - rect.top) as u32 }
+    }
+
+    fn card_input_style(style: isize, window: crate::render::PhysicalRect, card: Option<crate::render::PhysicalRect>, pointer: POINT) -> isize {
+        if card.is_some_and(|card| window != card && !card.contains(pointer.x, pointer.y)) {
+            style | WS_EX_TRANSPARENT as isize
+        } else { style & !(WS_EX_TRANSPARENT as isize) }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn decorative_pixels_pass_hit_testing_but_the_card_remains_passive_and_interactive() {
+            let card = crate::render::PhysicalRect { x: -500, y: -200, width: 480, height: 390 };
+            CARD_REGION.with(|region| *region.borrow_mut() = Some(card));
+            let point = |x: i32, y: i32| ((y as u16 as u32) << 16 | x as u16 as u32) as isize;
+            unsafe {
+                assert_eq!(procedure(std::ptr::null_mut(), WM_NCHITTEST, 0, point(-400, -100)), HTCLIENT as isize);
+                assert_eq!(procedure(std::ptr::null_mut(), WM_NCHITTEST, 0, point(-600, -100)), HTTRANSPARENT as isize);
+                assert_eq!(procedure(std::ptr::null_mut(), WM_NCHITTEST, 0, point(-20, 0)), HTTRANSPARENT as isize);
+                assert_eq!(procedure(std::ptr::null_mut(), WM_MOUSEACTIVATE, 0, 0), MA_NOACTIVATE as isize);
+            }
+        }
+
+        #[test]
+        fn expanded_decorations_select_cross_process_transparency_only_outside_the_card() {
+            let card = crate::render::PhysicalRect { x: 600, y: 400, width: 320, height: 260 };
+            let canvas = crate::render::PhysicalRect { x: 440, y: 0, width: 480, height: 660 };
+            assert_eq!(card_input_style(0x08080088, canvas, Some(card), POINT { x: 480, y: 100 }), 0x080800a8);
+            assert_eq!(card_input_style(0x080800a8, canvas, Some(card), POINT { x: 700, y: 500 }), 0x08080088);
+            assert_eq!(card_input_style(0x080800a8, card, Some(card), POINT { x: 480, y: 100 }), 0x08080088);
+        }
+
+        #[test]
+        fn monitor_edge_is_separate_from_work_area_and_preserves_negative_coordinates() {
+            let monitor = Monitor { work_area: physical_rect(RECT { left: -1920, top: -160, right: 0, bottom: 880 }),
+                bounds: physical_rect(RECT { left: -1920, top: -200, right: 0, bottom: 880 }), scale: 1.5 };
+            assert_eq!((monitor.position().x, monitor.position().y), (-1920, -160));
+            assert_eq!((monitor.size().width, monitor.size().height), (1920, 1040));
+            let card = crate::render::CardPlacement { rect: crate::render::PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: monitor.scale_factor() as f32 };
+            let scene = crate::render::EntranceScene::new(monitor.bounds(), card, 17);
+            assert_eq!(scene.source[1], -200.0);
+            assert_eq!(scene.canvas.y, -200);
+            assert_eq!(scene.card.rect.x, -504);
+            assert_eq!(scene.card.scale, 1.5);
         }
     }
 
