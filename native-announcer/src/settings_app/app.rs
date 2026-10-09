@@ -177,7 +177,6 @@ struct SettingsView {
     active_page: Page,
     active_character: Option<String>,
     status: String,
-    usage_input: Entity<TextareaState>,
     quiet_start_input: Entity<InputState>,
     quiet_end_input: Entity<InputState>,
     default_voice_input: Entity<InputState>,
@@ -255,7 +254,6 @@ impl SettingsView {
             active_page: Page::Audio,
             active_character,
             status: status.clone(),
-            usage_input: cx.new(|cx| TextareaState::new(window, cx).default_value("Enter an ElevenLabs key to load voice usage.")),
             quiet_start_input: cx.new(|cx| InputState::new(window, cx).default_value(format_time(settings.quiet_start))),
             quiet_end_input: cx.new(|cx| InputState::new(window, cx).default_value(format_time(settings.quiet_end))),
             default_voice_input: cx.new(|cx| InputState::new(window, cx).default_value(settings.default_voice_id.clone())),
@@ -344,7 +342,7 @@ impl SettingsView {
     }
 
     fn install_subscriptions(&mut self, cx: &mut Context<Self>) {
-        for state in [&self.character_prompt_input, &self.summary_prompt_input, &self.usage_input] {
+        for state in [&self.character_prompt_input, &self.summary_prompt_input] {
             self.subscriptions.push(cx.observe(state, |_, _, cx| cx.notify()));
         }
         let state = self.quiet_start_input.clone();
@@ -538,13 +536,6 @@ impl SettingsView {
             character.summary_prompt = prompt;
             capture_draft_voice(character, &voice);
             capture_draft_video(&id, character, &video, &self.assets);
-        }
-    }
-
-    fn sync_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = voice_usage_text(&self.voice_usage);
-        if self.usage_input.read(cx).value().as_ref() != text {
-            self.usage_input.update(cx, |state, cx| state.set_value(text, window, cx));
         }
     }
 
@@ -1312,7 +1303,6 @@ impl SettingsView {
     }
 
     fn render_speech_service(&mut self, layout: Layout, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.sync_usage(window, cx);
         let key_status = api_key_status(self.draft.settings.elevenlabs_api_key.as_deref());
         v_flex()
             .w_full()
@@ -1327,7 +1317,7 @@ impl SettingsView {
             )
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Characters without a custom ElevenLabs voice use this ID."))
             .child(v_flex().gap_1().child(div().text_sm().child("ElevenLabs key")).child(Input::new(&self.api_key_input).accessibility_id("api-key").aria_label("ElevenLabs key").content_type(InputContentType::Password).mask_toggle().focus_ring(false).border_color(self.input_border_color(&self.api_key_input, window, cx)).w_full().reveal("reveal-api-key", &self.page_scroll).w_full()).child(div().id("api-key-status").role(gpui_kit::Role::Label).aria_label(key_status.clone()).text_sm().text_color(cx.theme().muted_foreground).child(key_status)))
-            .child(keyboard::textarea(&self.usage_input, "voice-usage", "Voice usage", 96., true, window, cx).reveal("reveal-voice-usage", &self.page_scroll).w_full())
+            .child(div().id("voice-usage").accessibility_id("voice-usage").role(gpui_kit::Role::Label).aria_value(voice_usage_text(&self.voice_usage)).w_full().text_sm().text_color(cx.theme().muted_foreground).child(voice_usage_text(&self.voice_usage)))
             .child(
                 h_flex()
                     .flex_wrap()
