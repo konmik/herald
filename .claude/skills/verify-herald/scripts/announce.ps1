@@ -69,6 +69,7 @@ try {
         $appearance = Get-Content -LiteralPath $AppearanceSettings -Raw | ConvertFrom-Json
         $settings.announcementBodyFont = $appearance.announcementBodyFont
         $settings.announcementTitleFont = $appearance.announcementTitleFont
+        if ($null -ne $appearance.lightning) { $settings.lightning = $appearance.lightning }
     }
     $settings | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $scratch 'settings.json') -Encoding utf8NoBOM
     Copy-Item (Join-Path $scratch 'settings.json') (Join-Path $evidencePath 'settings.json')

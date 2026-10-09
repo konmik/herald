@@ -64,6 +64,7 @@ pub struct Settings {
     pub announcement_title_font: FontPreference,
     #[serde(default = "default_summary_prompt")]
     pub summary_prompt: String,
+    pub lightning: crate::lightning::LightningSettings,
 }
 
 mod api_key_storage {
@@ -139,6 +140,7 @@ impl Default for Settings {
             announcement_body_font: default_body_font(),
             announcement_title_font: default_title_font(),
             summary_prompt: default_summary_prompt(),
+            lightning: crate::lightning::LightningSettings::default(),
         };
         settings.reconcile_bundled_characters();
         settings
@@ -167,6 +169,7 @@ impl Settings {
         self.announcement_body_font.validate("Announcement body")?;
         self.announcement_title_font.validate("Announcement title")?;
         validate_summary_prompt(&self.summary_prompt)?;
+        self.lightning.validate()?;
         Ok(())
     }
 
@@ -266,6 +269,56 @@ pub fn validate_summary_prompt(prompt: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_lightning_defaults_are_original() {
+        let original = crate::lightning::PRESETS[0].settings;
+        assert_eq!(Settings::default().lightning, original);
+        assert_eq!(Settings::decode(br#"{"volume":35}"#).unwrap().lightning, original);
+        assert_eq!(Settings::decode(br#"{"lightning":{}}"#).unwrap().lightning, original);
+        assert_eq!(Settings::decode(br#"{"lightning":{"preset":"storm","brightness":1.5}}"#).unwrap().lightning,
+            crate::lightning::LightningSettings { brightness: 1.5, ..original });
+    }
+
+    #[test]
+    fn inherited_capture_selector_is_ignored_by_settings_defaults() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "settings::tests::legacy_lightning_defaults_are_original"])
+            .env("HERALD_LIGHTNING_STYLE", "plasma").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[test]
+    fn lightning_persists_and_hot_reload_rejects_invalid_external_values() {
+        let data = std::env::temp_dir().join("opencode").join(format!("herald-lightning-settings-{}-{}", std::process::id(), crate::state::timestamp()));
+        let mut settings = Settings::default();
+        settings.save(&data).unwrap();
+        let mut store = Store::new(&data).unwrap();
+        for preset in &crate::lightning::PRESETS[1..] {
+            settings.lightning = preset.settings;
+            settings.save(&data).unwrap();
+            assert_eq!(Settings::load(&data).unwrap(), settings);
+            assert!(store.reload().unwrap());
+            assert_eq!(store.current.lightning, preset.settings);
+            assert!(!store.reload().unwrap());
+        }
+        let good = std::fs::read(data.join("settings.json")).unwrap();
+        settings.lightning.brightness = f32::NAN;
+        assert!(settings.save(&data).is_err());
+        assert_eq!(std::fs::read(data.join("settings.json")).unwrap(), good);
+        for invalid in [r#"{"brightness":2.01}"#, r#"{"roughness":0}"#, r#"{"coreWidth":null}"#,
+            r#"{"glowSpread":25}"#, r#"{"glowStrength":1}"#, r#"{"strokeRadius":0}"#,
+            r#"{"entranceForkSpacing":0}"#, r#"{"boltForkSpacing":129}"#, r#"{"outlineForkSpacing":-1}"#,
+            r#"{"haloColor":16777216}"#, r#"{"haloColor":16711935}"#, r#"{"coreColor":16711935}"#, r#"{"pulseProfile":"unknown"}"#] {
+            std::fs::write(data.join("settings.json"), format!("{{\"lightning\":{invalid}}}")).unwrap();
+            assert!(store.reload().is_err());
+            assert_eq!(store.current.lightning, crate::lightning::PRESETS[3].settings);
+        }
+        std::fs::write(data.join("settings.json"), good).unwrap();
+        assert!(store.reload().unwrap());
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn silent_sound_defaults_to_zero_and_survives_save_load_and_reload() {

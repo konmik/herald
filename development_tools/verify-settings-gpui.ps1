@@ -1,7 +1,7 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald.exe'),
     [string]$Evidence = ('temp/verification/gpui-settings-' + [guid]::NewGuid()),
-    [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'All')]
+    [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'Lightning', 'All')]
     [string]$Feature = 'All'
 )
 
@@ -29,8 +29,9 @@ $announcementPrompt = "GPUI exact prompt line one.`nLine two must remain separat
 $appliedBytes = $null
 $firstLaunchBytes = $null
 $themeVerification = $null
+$lightningVerification = $null
 
-$pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service', 'Offline voice', 'Announcements')
+$pageNames = @('Characters', 'Audio', 'Quiet hours', 'Speech service', 'Offline voice', 'Announcements', 'Lightning')
 $pageSpecs = [ordered]@{
     'Characters' = [ordered]@{ ids = @('characters'); names = @('Characters') }
     'Audio' = [ordered]@{ ids = @('audio'); names = @('Audio') }
@@ -38,6 +39,7 @@ $pageSpecs = [ordered]@{
     'Speech service' = [ordered]@{ ids = @('speech-service'); names = @('Speech service') }
     'Offline voice' = [ordered]@{ ids = @('offline-voice'); names = @('Offline voice') }
     'Announcements' = [ordered]@{ ids = @('announcements'); names = @('Announcements') }
+    'Lightning' = [ordered]@{ ids = @('lightning'); names = @('Lightning') }
 }
 $controlSpecs = [ordered]@{
     apply = [ordered]@{ ids = @('apply'); names = @('Apply') }
@@ -60,6 +62,10 @@ $controlSpecs = [ordered]@{
     characterPrompt = [ordered]@{ ids = @('character-prompt'); names = @('Summary prompt (blank uses default)') }
     summaryPrompt = [ordered]@{ ids = @('summary-prompt'); names = @('Default summary prompt') }
     pageTitle = [ordered]@{ ids = @('page-title'); names = @() }
+    lightningPreset = [ordered]@{ ids = @('lightning-preset'); names = @('Lightning preset') }
+    lightningPreview = [ordered]@{ ids = @('lightning-preview'); names = @('Silent lightning preview') }
+    lightningInfo = [ordered]@{ ids = @('lightning-preview-info'); names = @() }
+    lightningReplay = [ordered]@{ ids = @('lightning-replay'); names = @('Replay with another character') }
 }
 $script:pageNames = $pageNames
 $script:pageSpecs = $pageSpecs
@@ -109,11 +115,49 @@ public static class HeraldGpuiSettingsCaptureNative
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+    private delegate bool EnumWindowCallback(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int length);
+    public static IntPtr[] VisibleWindows(uint expectedProcess)
+    {
+        var windows = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows((window, data) => {
+            uint process;
+            GetWindowThreadProcessId(window, out process);
+            if (process == expectedProcess && IsWindowVisible(window)) windows.Add(window);
+            return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
+    public static string WindowTitle(IntPtr window)
+    {
+        var title = new System.Text.StringBuilder(512);
+        GetWindowText(window, title, title.Capacity);
+        return title.ToString();
+    }
     [DllImport("dwmapi.dll")] public static extern int DwmFlush();
     [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X; public int Y; public uint Data; public uint Flags; public uint Time; public UIntPtr Extra; }
     [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public MouseInput Mouse; }
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+    [DllImport("kernel32.dll")] private static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")] private static extern int GetThreadDescription(IntPtr thread, out IntPtr description);
+    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    public static string ThreadName(uint id)
+    {
+        IntPtr thread = OpenThread(0x0800, false, id);
+        if (thread == IntPtr.Zero) return "";
+        try
+        {
+            IntPtr description;
+            if (GetThreadDescription(thread, out description) < 0) return "";
+            try { return Marshal.PtrToStringUni(description) ?? ""; }
+            finally { LocalFree(description); }
+        }
+        finally { CloseHandle(thread); }
+    }
     public static void ClickOwnedPoint(Point point, uint expectedProcess)
     {
         SetThreadDpiAwarenessContext(new IntPtr(-4));
@@ -291,6 +335,7 @@ function New-StartInfo {
     $info.Environment['HERALD_TTS'] = Join-Path $script:root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
     $info.Environment['ELEVENLABS_API_KEY'] = 'ignored-environment-test-key'
     $info.Environment['HERALD_ELEVENLABS_API_KEY'] = 'ignored-legacy-environment-test-key'
+    $info.Environment['HERALD_LIGHTNING_STYLE'] = 'plasma'
     $info.Environment['ELEVENLABS_API_BASE_URL'] = 'http://127.0.0.1:1'
     foreach ($argument in @('--settings', '--assets', (Join-Path $script:root 'native-announcer/resources'))) { [void]$info.ArgumentList.Add($argument) }
     $info
@@ -513,6 +558,8 @@ function Set-UiaRange {
     if (-not $pattern) { throw "UI Automation control '$Label' does not expose RangeValuePattern." }
     $minimum = [double]$pattern.Current.Minimum
     $maximum = [double]$pattern.Current.Maximum
+    if ([math]::Abs($Value - $minimum) -lt 0.000001) { $Value = $minimum }
+    if ([math]::Abs($Value - $maximum) -lt 0.000001) { $Value = $maximum }
     if ($Value -lt $minimum -or $Value -gt $maximum) { throw "The '$Label' range does not contain the requested value." }
     Focus-OwnedWindow
     if ($Value -eq $minimum -or $Value -eq $maximum) {
@@ -1167,6 +1214,255 @@ function Set-AnnouncementDraft {
     Save-UiaSnapshot 'uia-announcement-draft' | Out-Null
 }
 
+function Get-LightningWorkerCount {
+    Assert-ActiveProcess
+    $script:activeRecord.Process.Refresh()
+    @($script:activeRecord.Process.Threads | Where-Object { [HeraldGpuiSettingsCaptureNative]::ThreadName([uint32]$_.Id) -ceq 'herald-lightning-preview' }).Count
+}
+
+function Assert-LightningWorkerCount {
+    param([int]$Expected)
+    Wait-Until { (Get-LightningWorkerCount) -eq $Expected } "Expected $Expected owned lightning preview workers."
+    Write-Action 'lightning-worker-count' @{ expected = $Expected; verified = $true }
+}
+
+function Assert-OneSettingsWindow {
+    Assert-ActiveProcess
+    $visible = @([HeraldGpuiSettingsCaptureNative]::VisibleWindows([uint32]$script:activeRecord.Pid))
+    $windows = @($visible | ForEach-Object { [ordered]@{ hwnd = $_.ToInt64(); title = [HeraldGpuiSettingsCaptureNative]::WindowTitle($_) } })
+    Write-Action 'lightning-native-windows' @{ windows = $windows }
+    if ($visible.Count -ne 1 -or $visible[0] -ne $script:activeRecord.Hwnd -or $windows[0].title -cne 'Herald settings') { throw "Expected only the owned settings window; found $($visible.Count) visible native windows." }
+    Write-Action 'lightning-single-window' @{ verified = $true; count = $visible.Count }
+}
+
+function Get-LightningInfo {
+    param($Element = $null)
+    if ($null -eq $Element) { $Element = Get-Control 'lightningInfo' '' }
+    $text = $Element.Current.Name
+    if ($text -match '^(.*) · (Leader|Impact|Propagation|Decay|Holding|Exit)$') {
+        return [ordered]@{ character = $Matches[1]; phase = $Matches[2] }
+    }
+    $null
+}
+
+function Get-LightningSlider {
+    param([string]$Id)
+    Find-Semantic $Id -AutomationIds @('lightning-' + $Id) -PatternKind RangeValue
+}
+
+function Set-LightningPreset {
+    param([string]$Label)
+    Click-Uia (Get-Control 'lightningPreset' '')
+    Wait-Until { $null -ne (Find-Semantic $Label -Names @($Label) -PatternKind SelectionItem -Optional) } "The lightning preset menu did not expose $Label."
+    Select-UiaItem (Find-Semantic $Label -Names @($Label) -PatternKind SelectionItem) $Label
+    Wait-Until { (Get-ComboSelection (Get-Control 'lightningPreset' '')) -ceq $Label } "The lightning preset did not select $Label."
+}
+
+function Read-LightningPixels {
+    param([string]$Path, $Panel)
+    $bitmap = [Drawing.Bitmap]::new($Path)
+    try {
+        $scale = [math]::Min($Panel.width / 352.0, $Panel.height / 336.0)
+        $left = $Panel.left + ($Panel.width - 352 * $scale) / 2
+        $top = $Panel.top + ($Panel.height - 336 * $scale) / 2
+        $outer = 0
+        for ($y = 10; $y -lt 332; $y += 3) {
+            for ($x = 10; $x -lt 348; $x += 3) {
+                if ($x -lt 288 -and $y -lt 268) { continue }
+                $pixel = $bitmap.GetPixel([int]($left + $x * $scale), [int]($top + $y * $scale))
+                if ($pixel.B -gt 70 -and $pixel.R -gt 40 -and $pixel.G -gt 40) { $outer++ }
+            }
+        }
+        $face = [Collections.Generic.List[int]]::new()
+        for ($y = 142; $y -lt 198; $y += 2) {
+            for ($x = 198; $x -lt 264; $x += 2) {
+                $face.Add($bitmap.GetPixel([int]($left + $x * $scale), [int]($top + $y * $scale)).ToArgb())
+            }
+        }
+        [ordered]@{ outerLitPixels = $outer; face = $face.ToArray() }
+    } finally { $bitmap.Dispose() }
+}
+
+function Compare-LightningFace {
+    param($Left, $Right)
+    $changed = 0
+    for ($index = 0; $index -lt $Left.Count; $index++) {
+        $a = [Drawing.Color]::FromArgb($Left[$index])
+        $b = [Drawing.Color]::FromArgb($Right[$index])
+        if ([math]::Max([math]::Abs([int]$a.R - $b.R), [math]::Max([math]::Abs([int]$a.G - $b.G), [math]::Abs([int]$a.B - $b.B))) -gt 15) { $changed++ }
+    }
+    $changed
+}
+
+function Assert-LightningContainment {
+    param([string]$LeftPath, [string]$RightPath, $Panel, $Info)
+    $left = [Drawing.Bitmap]::new($LeftPath)
+    $right = [Drawing.Bitmap]::new($RightPath)
+    try {
+        $changed = 0
+        for ($y = 40; $y -lt $left.Height - 12; $y += 4) {
+            for ($x = 12; $x -lt $left.Width - 12; $x += 4) {
+                if ($x -ge $Panel.left - 2 -and $x -le $Panel.left + $Panel.width + 2 -and $y -ge $Panel.top - 2 -and $y -le $Panel.top + $Panel.height + 2) { continue }
+                if ($x -ge $Info.left - 2 -and $x -le $Info.left + $Info.width + 2 -and $y -ge $Info.top - 2 -and $y -le $Info.top + $Info.height + 2) { continue }
+                $a = Convert-PixelColor ($left.GetPixel($x, $y))
+                $b = Convert-PixelColor ($right.GetPixel($x, $y))
+                if ((Get-ColorDistance $a $b) -gt 8) { $changed++ }
+            }
+        }
+        if ($changed -gt 0) { throw "Lightning changed $changed sampled pixels outside its inline panel and character label." }
+        [ordered]@{ verified = $true; changedOutside = $changed; stride = 4; excluded = @('preview panel', 'phase label') }
+    } finally { $left.Dispose(); $right.Dispose() }
+}
+
+function Capture-LightningCycle {
+    param([string]$Name)
+    $root = $script:activeRoot.Current.BoundingRectangle
+    $panelRect = (Get-Control 'lightningPreview' '').Current.BoundingRectangle
+    $infoRect = (Get-Control 'lightningInfo' '').Current.BoundingRectangle
+    $panel = [ordered]@{ left = $panelRect.Left - $root.Left; top = $panelRect.Top - $root.Top; width = $panelRect.Width; height = $panelRect.Height }
+    $info = [ordered]@{ left = $infoRect.Left - $root.Left; top = $infoRect.Top - $root.Top; width = $infoRect.Width; height = $infoRect.Height }
+    if ($panel.left -lt 0 -or $panel.top -lt 0 -or $panel.left + $panel.width -gt $root.Width -or $panel.top + $panel.height -gt $root.Height) { throw 'The preview panel is outside the owned settings window.' }
+    $samples = @()
+    $infoElement = Get-Control 'lightningInfo' ''
+    Focus-OwnedWindow
+    $rect = [HeraldGpuiSettingsCaptureNative+Rect]::new()
+    [HeraldGpuiSettingsCaptureNative]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
+    if (-not [HeraldGpuiSettingsCaptureNative]::GetWindowRect($script:activeRecord.Hwnd, [ref]$rect)) { throw 'Could not read the owned lightning sample window.' }
+    $bitmap = [Drawing.Bitmap]::new($rect.Right - $rect.Left, $rect.Bottom - $rect.Top, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    $deadline = [DateTime]::UtcNow.AddSeconds(12)
+    try {
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ([HeraldGpuiSettingsCaptureNative]::GetForegroundWindow() -ne $script:activeRecord.Hwnd) { throw 'The owned lightning capture lost foreground.' }
+            $state = Get-LightningInfo $infoElement
+            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+            $path = Join-Path $script:evidencePath ("$Name-" + $samples.Count.ToString('000') + '.png')
+            $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
+            $after = Get-LightningInfo $infoElement
+            $samples += ,([ordered]@{ path = $path; at = [DateTime]::UtcNow.ToString('o'); phase = $state.phase; character = $state.character; stablePhase = $state.phase -ceq $after.phase })
+            Start-Sleep -Milliseconds 60
+        }
+    } finally { $graphics.Dispose(); $bitmap.Dispose() }
+    Write-JsonFile (Join-Path $script:evidencePath ("$Name-sampling.json")) $samples
+    Write-Action 'lightning-cycle-capture' @{ name = $Name; samples = $samples.Count; seconds = 12; method = 'owned-desktop-region' }
+    $exits = 0
+    $previous = ''
+    foreach ($sample in $samples) {
+        if (-not $sample.stablePhase) { continue }
+        if ($sample.phase -ceq 'Exit' -and $previous -cne 'Exit') { $exits++ }
+        $previous = $sample.phase
+    }
+    $phases = @($samples | Where-Object stablePhase | ForEach-Object phase | Sort-Object -Unique)
+    foreach ($phase in @('Propagation', 'Holding', 'Exit')) { if ($phases -notcontains $phase) { throw "The native sample missed $phase. Its motion is not verified." } }
+    if ($exits -lt 2) { throw 'The native sample did not show two complete preview cycles.' }
+    $holding = @($samples | Where-Object { $_.stablePhase -and $_.phase -ceq 'Holding' })
+    $reference = Read-LightningPixels $holding[0].path $panel
+    $faceChanges = @()
+    $maxOuter = 0
+    foreach ($sample in $samples) {
+        $pixels = Read-LightningPixels $sample.path $panel
+        $maxOuter = [math]::Max($maxOuter, $pixels.outerLitPixels)
+        if ($sample.stablePhase -and $sample.phase -ceq 'Holding') { $faceChanges += Compare-LightningFace $reference.face $pixels.face }
+    }
+    if (@($faceChanges | Where-Object { $_ -gt 15 }).Count -lt 2) { throw 'The native holding samples did not show character motion beyond display grain.' }
+    $containment = Assert-LightningContainment $holding[0].path $holding[-1].path $panel $info
+    Assert-OneSettingsWindow
+    Assert-SpeechUnloaded
+    Assert-LightningWorkerCount 1
+    $result = [ordered]@{ phases = $phases; repeatedCycle = $true; observedExits = $exits; maxOuterLitPixels = $maxOuter; characterMotion = $true; faceChangedPixels = $faceChanges; containment = $containment; panel = $panel; samples = $samples }
+    Write-JsonFile (Join-Path $script:evidencePath ("$Name.json")) $result
+    $result
+}
+
+function Verify-Lightning {
+    Select-Page 'Audio'
+    Assert-LightningWorkerCount 0
+    $before = Read-Bytes $script:settingsPath
+    Save-SettingsEvidence 'settings-lightning-before' | Out-Null
+    Select-Page 'Lightning'
+    Wait-Until { $null -ne (Get-LightningInfo) } 'The bundled inline preview did not produce a frame.'
+    Assert-LightningWorkerCount 1
+    if ((Get-ComboSelection (Get-Control 'lightningPreset' '')) -cne 'Original') { throw 'A missing saved lightning key inherited the debug environment preset.' }
+    $character = (Get-LightningInfo).character
+    Set-UiaRange (Get-LightningSlider 'brightness') 0.1 'lightning dim draft'
+    $dim = Capture-LightningCycle 'lightning-dim'
+    Set-UiaRange (Get-LightningSlider 'brightness') 2.0 'lightning bright draft'
+    $bright = Capture-LightningCycle 'lightning-bright'
+    if ($bright.maxOuterLitPixels -le $dim.maxOuterLitPixels + 10) { throw 'The brightness control did not visibly change the draft effect before Apply.' }
+    if ((Get-LightningInfo).character -cne $character) { throw 'A slider edit changed the preview character.' }
+    Set-LightningPreset 'Storm'
+    if ([math]::Abs((Get-UiaRangeValue (Get-LightningSlider 'roughness')) - 1.7) -gt 0.01) { throw 'Storm did not refresh the numeric controls.' }
+    $draft = [ordered]@{ roughness = 1.5; brightness = 1.4; coreWidth = 1.1; glowSpread = 9.0; glowStrength = 0.3 }
+    $controls = [ordered]@{ roughness = 'roughness'; brightness = 'brightness'; coreWidth = 'core-width'; glowSpread = 'glow-spread'; glowStrength = 'glow-strength' }
+    foreach ($key in $draft.Keys) { Set-UiaRange (Get-LightningSlider $controls[$key]) $draft[$key] ('lightning ' + $key) }
+    if ((Get-LightningInfo).character -cne $character) { throw 'Preset or numeric edits changed the bundled character.' }
+    if (-not (Bytes-Equal $before (Read-Bytes $script:settingsPath))) { throw 'Lightning draft controls saved settings before Apply.' }
+    Save-UiaSnapshot 'uia-lightning-draft' | Out-Null
+    Capture-Window 'lightning-custom-draft' | Out-Null
+    Invoke-Apply
+    $saved = (Get-Content -LiteralPath $script:settingsPath -Raw | ConvertFrom-Json).lightning
+    foreach ($key in $draft.Keys) { if ([math]::Abs([double]$saved.$key - $draft[$key]) -gt 0.01) { throw "Apply did not persist lightning $key." } }
+    Set-UiaRange (Get-LightningSlider 'brightness') 0.1 'unapplied lightning brightness'
+    Invoke-Uia (Get-Control 'lightningReplay' 'Invoke') 'Replay with another character'
+    Wait-Until { $current = Get-LightningInfo; $current -and $current.character -cne $character } 'Replay did not select a different bundled character.'
+    $replayCharacter = (Get-LightningInfo).character
+    Assert-LightningWorkerCount 1
+    Save-UiaSnapshot 'uia-lightning-unapplied' | Out-Null
+    Close-ActiveSettings
+    if (-not (Bytes-Equal $script:appliedBytes (Read-Bytes $script:settingsPath))) { throw 'Close saved the unapplied lightning edit.' }
+    Launch-Settings 'lightning-reopen'
+    Select-Page 'Lightning'
+    Wait-Until { $null -ne (Get-LightningInfo) } 'The reopened inline preview did not start.'
+    foreach ($key in $draft.Keys) {
+        if ([math]::Abs((Get-UiaRangeValue (Get-LightningSlider $controls[$key])) - $draft[$key]) -gt 0.01) { throw "Reopen did not restore applied lightning $key." }
+    }
+    Save-UiaSnapshot 'uia-lightning-reopened' | Out-Null
+    Capture-Window 'lightning-reopened' | Out-Null
+    Select-Page 'Audio'
+    Assert-LightningWorkerCount 0
+    Select-Page 'Lightning'
+    Assert-LightningWorkerCount 1
+    $rect = [HeraldGpuiSettingsCaptureNative+Rect]::new()
+    [HeraldGpuiSettingsCaptureNative]::GetWindowRect($script:activeRecord.Hwnd, [ref]$rect) | Out-Null
+    $scale = [HeraldGpuiSettingsCaptureNative]::GetDpiForWindow($script:activeRecord.Hwnd) / 96.0
+    if (-not [HeraldGpuiSettingsCaptureNative]::SetWindowPos($script:activeRecord.Hwnd, [IntPtr]::Zero, $rect.Left, $rect.Top, [int](420 * $scale), [int](650 * $scale), 20)) { throw 'Could not resize the owned settings window.' }
+    Start-Sleep -Milliseconds 300
+    Save-UiaSnapshot 'uia-lightning-compact-before' | Out-Null
+    Capture-Window 'lightning-compact-before' | Out-Null
+    $compact = @()
+    foreach ($id in @('lightning-preset', 'lightning-roughness', 'lightning-brightness', 'lightning-core-width', 'lightning-glow-spread', 'lightning-glow-strength', 'lightning-replay')) {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+            Start-Sleep -Milliseconds 60
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            if ($focused.Current.AutomationId -ceq $id -or ($id -ceq 'lightning-preset' -and $focused.Current.Name -ceq 'Lightning preset')) { break }
+        }
+        if ($attempt -ge 20) { throw "Keyboard focus did not reach compact $id." }
+        Wait-Until {
+            $bounds = $focused.Current.BoundingRectangle
+            $root = $script:activeRoot.Current.BoundingRectangle
+            $footer = (Find-Semantic 'Settings actions' -AutomationIds @('settings-footer')).Current.BoundingRectangle
+            $sidebar = (Get-Control 'navigation' '').Current.BoundingRectangle
+            $bounds.Left -ge $root.Left -and $bounds.Right -le $root.Right -and $bounds.Top -ge $sidebar.Bottom -and $bounds.Bottom -le $footer.Top -and -not $focused.Current.IsOffscreen
+        } "Compact $id was not revealed above the global footer." 5
+        $bounds = $focused.Current.BoundingRectangle
+        $root = $script:activeRoot.Current.BoundingRectangle
+        $footer = (Find-Semantic 'Settings actions' -AutomationIds @('settings-footer')).Current.BoundingRectangle
+        if ($bounds.Left -lt $root.Left -or $bounds.Right -gt $root.Right -or $bounds.Bottom -gt $footer.Top) { throw "Compact $id was not revealed above the global footer." }
+        $compact += Get-ElementSnapshot $focused
+    }
+    Save-UiaSnapshot 'uia-lightning-compact' | Out-Null
+    Capture-Window 'lightning-compact' | Out-Null
+    [HeraldGpuiSettingsCaptureNative]::SetWindowPos($script:activeRecord.Hwnd, [IntPtr]::Zero, $rect.Left, $rect.Top, $rect.Right - $rect.Left, $rect.Bottom - $rect.Top, 20) | Out-Null
+    Start-Sleep -Milliseconds 300
+    Select-Page 'Audio'
+    Assert-LightningWorkerCount 0
+    Assert-SpeechUnloaded
+    $result = [ordered]@{ dim = $dim; bright = $bright; brightnessFeedback = $true; characterStableOnEdits = $true; replayCharacter = $replayCharacter; applied = $draft; draftBytesUnchanged = $true; discardedOnClose = $true; reopened = $true; stoppedOffTab = $true; singleWorker = $true; compactControls = $compact; silent = $true; noExtraWindow = $true; linuxNative = 'unverified on Windows' }
+    Write-JsonFile (Join-Path $script:evidencePath 'lightning-verification.json') $result
+    $script:lightningVerification = $result
+}
+
 function Invoke-Apply {
     $before = Read-Bytes $script:settingsPath
     $apply = Get-Control 'apply' 'Invoke'
@@ -1339,7 +1635,9 @@ try {
     $runPreview = $Feature -in @('All', 'Settings', 'Preview')
     $runCharacters = $Feature -in @('All', 'Settings', 'Characters')
     $runAnnouncements = $Feature -in @('All', 'Settings', 'Announcements')
+    $runLightning = $Feature -in @('All', 'Settings', 'Lightning')
     if ($runTheme) { Verify-Theme | Out-Null }
+    if ($runLightning) { Verify-Lightning }
     if ($runQuiet) { Set-QuietDraft }
     if ($runAnnouncements) { Set-AnnouncementDraft }
     if ($runCharacters) { $characterCreated = Try-CharacterDraft } else { $characterCreated = $false }
@@ -1402,6 +1700,7 @@ try {
         pages = $pageResults
         outputDropdown = $outputDropdown
         theme = if ($runTheme) { [ordered]@{ verification = $themeVerification; afterMainReopen = $themeAfterReopen } } else { $null }
+        lightning = $lightningVerification
         systemDefaultPersisted = $runOutput
         snapshots = $script:snapshotPaths
         screenshots = $screenshots
@@ -1418,6 +1717,10 @@ try {
 catch {
     if (Test-Path -LiteralPath $evidencePath) {
         $_ | Out-String | Set-Content -LiteralPath (Join-Path $evidencePath 'failure.txt') -Encoding utf8NoBOM
+        if ($script:activeRoot -and (Test-OwnedProcess $script:activeRecord)) {
+            try { Save-UiaSnapshot 'uia-failure' | Out-Null } catch {}
+            try { Capture-Window 'failure-window' | Out-Null } catch {}
+        }
         try {
             $failureResult = [ordered]@{ verdict = 'FAILED'; feature = $Feature; binary = $binaryPath; sha256 = $binaryHash; error = $_.Exception.Message; theme = $script:themeVerification; snapshots = $script:snapshotPaths; actions = $script:actionRecords.Count; actionTranscript = (Join-Path $evidencePath 'actions.txt') }
             Write-JsonFile (Join-Path $evidencePath 'result.json') $failureResult

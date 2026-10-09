@@ -8,6 +8,7 @@ mod characters;
 mod elevenlabs;
 mod fonts;
 mod history;
+mod lightning;
 #[cfg(target_os = "linux")]
 mod linux_surface;
 mod platform;
@@ -246,6 +247,8 @@ fn run() -> Result<(), String> {
         return Err("Capture speech duration requires frame capture".into());
     }
     let mut frames = capture_directory.as_deref().map(capture::Frames::new).transpose()?;
+    let capture_lightning = capture_directory.as_ref().and_then(|_| std::env::var("HERALD_LIGHTNING_STYLE").ok())
+        .map(|value| lightning::PRESETS.iter().find(|preset| preset.id == value).map(|preset| preset.settings).unwrap_or_default());
     private::directory(&data).map_err(|e| e.to_string())?;
     for name in ["queue.json", "queue.tmp", "history.jsonl", "settings.json", "errors.log", "errors.previous.log"] {
         private::harden(&data.join(name)).map_err(|error| error.to_string())?;
@@ -433,6 +436,8 @@ fn run() -> Result<(), String> {
                     renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
+                        let lightning = capture_lightning.unwrap_or(settings.lightning);
+                        renderer.set_lightning(lightning);
                         renderer.text = render::display_text(&notification.text);
                         let title = render::display_text(&notification.title);
                         renderer.title = if title.is_empty() { "Untitled session".into() } else { title };
@@ -456,7 +461,7 @@ fn run() -> Result<(), String> {
                                 && bounds.contains(placement.rect.right() - 1, placement.rect.bottom() - 1)
                         }).map(|monitor| {
                             let seed = notification.id.bytes().fold(notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)));
-                            EntranceScene::new(monitor.bounds(), placement, seed)
+                            EntranceScene::new(monitor.bounds(), placement, seed, lightning)
                         });
                         #[cfg(not(target_os = "windows"))]
                         let entrance = None;
@@ -689,7 +694,7 @@ mod tests {
         assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), Some(Duration::from_millis(120)));
         assert_eq!(active.entrance_strike(started + Duration::from_millis(650)), None);
         assert_eq!(active.entrance_strike(started + Duration::from_secs(5)), None);
-        active.entrance = Some(EntranceScene::new(PhysicalRect { x: -500, y: -200, width: 1500, height: 1200 }, active.placement, 1234));
+        active.entrance = Some(EntranceScene::new(PhysicalRect { x: -500, y: -200, width: 1500, height: 1200 }, active.placement, 1234, lightning::LightningSettings::default()));
         assert_eq!(active.viewport(started + Duration::from_millis(140)).bottom(), 1000);
         assert_eq!(active.viewport(started + Duration::from_millis(650)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
         active.end = Some(started + Duration::from_millis(80));

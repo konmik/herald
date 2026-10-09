@@ -340,7 +340,7 @@ mod native {
             assert_eq!((monitor.position().x, monitor.position().y), (-1920, -160));
             assert_eq!((monitor.size().width, monitor.size().height), (1920, 1040));
             let card = crate::render::CardPlacement { rect: crate::render::PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: monitor.scale_factor() as f32 };
-            let scene = crate::render::EntranceScene::new(monitor.bounds(), card, 17);
+            let scene = crate::render::EntranceScene::new(monitor.bounds(), card, 17, crate::lightning::LightningSettings::default());
             assert_eq!(scene.source[0], -1.0);
             assert_eq!(scene.canvas.right(), 0);
             assert_eq!(scene.card.rect.x, -504);

@@ -81,7 +81,7 @@ def application(pid):
 
 def control(app, name, role):
     roles = {role}
-    if role == Atspi.Role.PUSH_BUTTON and name in {"Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements"}:
+    if role == Atspi.Role.PUSH_BUTTON and name in {"Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements", "Lightning"}:
         roles.add(Atspi.Role.PAGE_TAB)
     return next((node for node in walk(app) if node.get_name() == name and node.get_role() in roles and node.get_state_set().contains(Atspi.StateType.SHOWING) and node.get_state_set().contains(Atspi.StateType.VISIBLE)), None)
 
@@ -118,7 +118,7 @@ def layout_bounds(app, window):
         name = node.get_name()
         assert rect["width"] > 0 and rect["height"] > 0, f"Collapsed control {name}"
         assert rect["x"] >= -2 and rect["x"] + rect["width"] <= width + 2, f"Horizontal overflow at {name}: {rect} in {width}px"
-        if name in {"Apply", "Close", "Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements"}:
+        if name in {"Apply", "Close", "Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements", "Lightning"}:
             assert rect["y"] >= -2 and rect["y"] + rect["height"] <= height + 2, f"Unreachable navigation or footer control {name}: {rect} in {height}px"
         controls.append({"name": name, "role": node.get_role_name(), "id": node.get_accessible_id(), "bounds": rect})
     return controls
@@ -154,7 +154,7 @@ def main():
     env = dict(os.environ, HERALD_DATA=str(data))
     owned = []
     actions = []
-    pages = ["Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements"]
+    pages = ["Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements", "Lightning"]
     proof = {"passed": False, "binary": str(binary), "binarySha256": original_hash, "desktopEntry": args.desktop_entry}
     current_page = None
     window = app = None
@@ -280,7 +280,7 @@ def main():
         press("Home")
         expect_focus("Characters")
         press("End")
-        expect_focus("Announcements")
+        expect_focus("Lightning")
         press("Tab", "ctrl")
         expect_focus("Characters")
         press("Tab", "ctrl")
@@ -391,6 +391,8 @@ def main():
         expect_focus("Summary prompt")
         dispatch_window(window, "float", '')
         expect_focus("Summary prompt")
+        press("Tab", "ctrl")
+        expect_focus("Lightning")
         press("Tab", "ctrl")
         expect_focus("Characters")
         press("Tab")
