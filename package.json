@@ -30,6 +30,8 @@
     "benchmark:settings": "pwsh -NoProfile -File development_tools/benchmark-settings-memory.ps1",
     "test:assets": "node --test development_tools/tests/assets.test.mjs development_tools/tests/linux-menu.test.mjs",
     "install:linux-menu": "node development_tools/install-linux-menu.mjs",
+    "test:settings:linux": "python3 development_tools/verify-linux-settings.py",
+    "test:settings:layout:linux": "python3 development_tools/verify-linux-settings.py --layout",
     "profile:plugin": "bun development_tools/profile-plugin.ts"
   },
   "devDependencies": {

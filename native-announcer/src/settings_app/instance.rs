@@ -77,6 +77,8 @@ impl InstanceGuard {
     pub(super) fn keep_alive(&self) {
         let _ = &self.lock;
     }
+
+    pub(super) fn activate_pending(&self, _: &mut gpui_kit::Window) {}
 }
 
 fn open_lock(path: &Path) -> std::io::Result<File> {
