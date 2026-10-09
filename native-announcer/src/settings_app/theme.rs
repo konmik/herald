@@ -1,3 +1,4 @@
+use super::appearance::AppearancePreference;
 use gpui_kit::component::{Theme, ThemeColor, ThemeMode};
 use gpui_kit::{App, Hsla, Window};
 use std::ffi::c_void;
@@ -75,10 +76,11 @@ pub(super) struct ThemePreferences {
 }
 
 impl ThemePreferences {
-    pub(super) fn capture() -> Self {
+    pub(super) fn capture(preference: AppearancePreference) -> Self {
         let apps_use_light_theme = read_apps_use_light_theme();
         let high_contrast = high_contrast_enabled();
-        let detected = theme_from_preferences(apps_use_light_theme, high_contrast);
+        let system = theme_from_preferences(apps_use_light_theme, high_contrast);
+        let detected = effective_theme(preference, system);
         Self {
             detected,
             system_colors: detected.is_high_contrast().then(SystemColors::capture),
@@ -93,21 +95,35 @@ impl ThemePreferences {
                 theme.colors = colors;
                 theme.shadow = false;
             });
+        } else {
+            Theme::update(cx, |theme| theme.shadow = true);
         }
     }
 }
 
 pub(super) struct ThemeMonitor {
+    preference: AppearancePreference,
     preferences: ThemePreferences,
 }
 
 impl ThemeMonitor {
-    pub(super) fn new() -> Self {
-        Self { preferences: ThemePreferences::capture() }
+    pub(super) fn preference(&self) -> AppearancePreference {
+        self.preference
+    }
+
+    pub(super) fn set_preference(&mut self, preference: AppearancePreference, window: Option<&mut Window>, cx: &mut App) -> bool {
+        self.preference = preference;
+        let preferences = ThemePreferences::capture(preference);
+        if preferences == self.preferences {
+            return false;
+        }
+        preferences.apply(window, cx);
+        self.preferences = preferences;
+        true
     }
 
     pub(super) fn refresh(&mut self, window: Option<&mut Window>, cx: &mut App) -> bool {
-        let preferences = ThemePreferences::capture();
+        let preferences = ThemePreferences::capture(self.preference);
         if preferences == self.preferences {
             return false;
         }
@@ -117,8 +133,8 @@ impl ThemeMonitor {
     }
 }
 
-pub(super) fn sync(window: Option<&mut Window>, cx: &mut App) -> ThemeMonitor {
-    let monitor = ThemeMonitor::new();
+pub(super) fn sync(window: Option<&mut Window>, cx: &mut App, preference: AppearancePreference) -> ThemeMonitor {
+    let monitor = ThemeMonitor { preference, preferences: ThemePreferences::capture(preference) };
     monitor.preferences.apply(window, cx);
     monitor
 }
@@ -130,6 +146,17 @@ fn theme_from_preferences(apps_use_light_theme: Option<u32>, high_contrast: bool
         DetectedTheme::Dark
     } else {
         DetectedTheme::Light
+    }
+}
+
+fn effective_theme(preference: AppearancePreference, system: DetectedTheme) -> DetectedTheme {
+    if system.is_high_contrast() {
+        return DetectedTheme::HighContrast;
+    }
+    match preference {
+        AppearancePreference::System => system,
+        AppearancePreference::Light => DetectedTheme::Light,
+        AppearancePreference::Dark => DetectedTheme::Dark,
     }
 }
 
@@ -200,6 +227,23 @@ mod tests {
         assert_eq!(theme_from_preferences(Some(1), true), DetectedTheme::HighContrast);
         assert_eq!(theme_from_preferences(None, true), DetectedTheme::HighContrast);
         assert_eq!(DetectedTheme::HighContrast.mode(), ThemeMode::Light);
+    }
+
+    #[test]
+    fn explicit_theme_preferences_ignore_light_and_dark_system_changes() {
+        assert_eq!(effective_theme(AppearancePreference::Light, DetectedTheme::Light), DetectedTheme::Light);
+        assert_eq!(effective_theme(AppearancePreference::Light, DetectedTheme::Dark), DetectedTheme::Light);
+        assert_eq!(effective_theme(AppearancePreference::Dark, DetectedTheme::Light), DetectedTheme::Dark);
+        assert_eq!(effective_theme(AppearancePreference::Dark, DetectedTheme::Dark), DetectedTheme::Dark);
+        assert_eq!(effective_theme(AppearancePreference::System, DetectedTheme::Light), DetectedTheme::Light);
+        assert_eq!(effective_theme(AppearancePreference::System, DetectedTheme::Dark), DetectedTheme::Dark);
+    }
+
+    #[test]
+    fn high_contrast_overrides_explicit_theme_preferences() {
+        assert_eq!(effective_theme(AppearancePreference::Light, DetectedTheme::HighContrast), DetectedTheme::HighContrast);
+        assert_eq!(effective_theme(AppearancePreference::Dark, DetectedTheme::HighContrast), DetectedTheme::HighContrast);
+        assert_eq!(effective_theme(AppearancePreference::System, DetectedTheme::HighContrast), DetectedTheme::HighContrast);
     }
 
     #[test]
