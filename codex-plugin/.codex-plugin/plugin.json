@@ -1,0 +1,13 @@
+{
+  "name": "herald",
+  "version": "0.3.0",
+  "description": "Read one-sentence completion summaries through a lightweight cross-platform animated adviser.",
+  "author": { "name": "elkmo" },
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Herald",
+    "shortDescription": "Spoken, animated summaries when long Codex tasks finish",
+    "developerName": "elkmo",
+    "category": "Productivity"
+  }
+}
