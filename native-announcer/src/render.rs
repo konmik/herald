@@ -276,26 +276,23 @@ impl LightningPaint {
         self.strokes.push(Stroke { from, to, scale, taper, intensity });
     }
 
+    /// Two-pass chamfer distance. The neighbour rows are folded in first as a branch-free pass the compiler vectorizes, then
+    /// the in-row neighbour runs as the only serial chain. min is exact, so the result matches the textbook pass order bit for bit.
     fn distance_field(&self) -> Vec<f32> {
         let (width, height) = (self.width, self.height);
         let mut distance: Vec<f32> = self.glow.iter().map(|strength| if *strength > 0.25 { 0.0 } else { 10000.0 }).collect();
+        if width == 0 || height == 0 { return distance; }
         for y in 0..height {
-            for x in 0..width {
-                let index = y * width + x;
-                if x > 0 { distance[index] = distance[index].min(distance[index - 1] + 1.0); }
-                if y > 0 { distance[index] = distance[index].min(distance[index - width] + 1.0); }
-                if x > 0 && y > 0 { distance[index] = distance[index].min(distance[index - width - 1] + 1.414); }
-                if x + 1 < width && y > 0 { distance[index] = distance[index].min(distance[index - width + 1] + 1.414); }
-            }
+            let (done, rest) = distance.split_at_mut(y * width);
+            let row = &mut rest[..width];
+            if y > 0 { fold_neighbour_row(row, &done[(y - 1) * width..]); }
+            for x in 1..width { row[x] = row[x].min(row[x - 1] + 1.0); }
         }
         for y in (0..height).rev() {
-            for x in (0..width).rev() {
-                let index = y * width + x;
-                if x + 1 < width { distance[index] = distance[index].min(distance[index + 1] + 1.0); }
-                if y + 1 < height { distance[index] = distance[index].min(distance[index + width] + 1.0); }
-                if x + 1 < width && y + 1 < height { distance[index] = distance[index].min(distance[index + width + 1] + 1.414); }
-                if x > 0 && y + 1 < height { distance[index] = distance[index].min(distance[index + width - 1] + 1.414); }
-            }
+            let (head, done) = distance.split_at_mut((y + 1) * width);
+            let row = &mut head[y * width..];
+            if y + 1 < height { fold_neighbour_row(row, &done[..width]); }
+            for x in (0..width - 1).rev() { row[x] = row[x].min(row[x + 1] + 1.0); }
         }
         distance
     }
@@ -310,6 +307,13 @@ impl LightningPaint {
             *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
         });
     }
+}
+
+fn fold_neighbour_row(row: &mut [f32], neighbour: &[f32]) {
+    let width = row.len();
+    for x in 0..width { row[x] = row[x].min(neighbour[x] + 1.0); }
+    for x in 1..width { row[x] = row[x].min(neighbour[x - 1] + 1.414); }
+    for x in 0..width - 1 { row[x] = row[x].min(neighbour[x + 1] + 1.414); }
 }
 
 pub fn display_text(text: &str) -> String {
@@ -1215,6 +1219,43 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distance_field_matches_the_sequential_chamfer_passes() {
+        fn reference(glow: &[f32], width: usize, height: usize) -> Vec<f32> {
+            let mut distance: Vec<f32> = glow.iter().map(|strength| if *strength > 0.25 { 0.0 } else { 10000.0 }).collect();
+            for y in 0..height {
+                for x in 0..width {
+                    let index = y * width + x;
+                    if x > 0 { distance[index] = distance[index].min(distance[index - 1] + 1.0); }
+                    if y > 0 { distance[index] = distance[index].min(distance[index - width] + 1.0); }
+                    if x > 0 && y > 0 { distance[index] = distance[index].min(distance[index - width - 1] + 1.414); }
+                    if x + 1 < width && y > 0 { distance[index] = distance[index].min(distance[index - width + 1] + 1.414); }
+                }
+            }
+            for y in (0..height).rev() {
+                for x in (0..width).rev() {
+                    let index = y * width + x;
+                    if x + 1 < width { distance[index] = distance[index].min(distance[index + 1] + 1.0); }
+                    if y + 1 < height { distance[index] = distance[index].min(distance[index + width] + 1.0); }
+                    if x + 1 < width && y + 1 < height { distance[index] = distance[index].min(distance[index + width + 1] + 1.414); }
+                    if x > 0 && y + 1 < height { distance[index] = distance[index].min(distance[index + width - 1] + 1.414); }
+                }
+            }
+            distance
+        }
+        let mut seed = 7_u32;
+        for (width, height) in [(1, 1), (1, 9), (9, 1), (37, 23), (320, 260)] {
+            let mut paint = LightningPaint::new(width, height, crate::lightning::PRESETS[0].settings);
+            for strength in &mut paint.glow {
+                seed = crate::state::noise_hash(seed);
+                *strength = if seed % 97 == 0 { 1.0 } else { 0.0 };
+            }
+            let expected: Vec<u32> = reference(&paint.glow, width, height).iter().map(|value| value.to_bits()).collect();
+            let actual: Vec<u32> = paint.distance_field().iter().map(|value| value.to_bits()).collect();
+            assert_eq!(actual, expected, "{width}x{height}");
+        }
+    }
 
     #[test]
     fn card_template_matches_direct_bubble_and_scanline_painting() {
