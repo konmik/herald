@@ -38,7 +38,7 @@ test('options, architectures and process ownership', () => {
   assert.throws(() => parseArguments(['--force']), /Unknown option/)
   assert.throws(() => parseArguments(['--applications']), /Missing value/)
   assert.equal(backupName('/Users/a/.claude/plugins/known_marketplaces.json', '/Users/a'), 'claude__plugins__known_marketplaces.json')
-  assert.equal(parseArguments(['--codex-home', '/tmp/codex']).codexHome, '/tmp/codex')
+  assert.equal(parseArguments(['--codex-home', '/tmp/codex']).codexHome, resolve('/tmp/codex'))
   assert.equal(backupName('/Users/a/.codex/config.toml', '/Users/a'), 'codex__config.toml')
   assert.equal(macArch('x64'), 'x64')
   assert.equal(macArch('arm64'), 'arm64')
