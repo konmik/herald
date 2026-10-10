@@ -298,9 +298,11 @@ impl Speech {
                 if cancelled.load(Ordering::Relaxed) {
                     continue;
                 }
+                crate::state::timing(format!("speech_start id={id}"));
                 let ready_events = events.clone();
                 let ready_id = id.clone();
                 let ready = move || {
+                    crate::state::timing(format!("speech_ready id={ready_id}"));
                     let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone() });
                 };
                 let playback = SpeechPlayback { gate: &gate, ready: &ready };
@@ -309,6 +311,7 @@ impl Speech {
                 if !retain_engine || settings.elevenlabs_api_key.is_some() { crate::tts::release_engine(); }
                 #[cfg(not(target_os = "windows"))]
                 let _ = retain_engine;
+                crate::state::timing(format!("speech_end id={id} ok={} cancelled={}", result.is_ok(), cancelled.load(Ordering::Relaxed)));
                 let _ = events.send(SpeechEvent::Finished { id, result });
             }
         });

@@ -230,7 +230,12 @@ pub fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, local_sp
         ResolvedVoice::Local { .. } => settings.default_voice_id.as_str(),
     };
     let remote = match crate::elevenlabs::Client::from_settings(settings) {
-        Ok(Some(client)) => Some(client.synthesize_speech(voice_id, text, settings.speech_model, cancelled)),
+        Ok(Some(client)) => {
+            crate::state::timing("remote_speech_start");
+            let result = client.synthesize_speech(voice_id, text, settings.speech_model, cancelled);
+            crate::state::timing("remote_speech_end");
+            Some(result)
+        }
         Ok(None) => None,
         Err(error) => Some(Err(crate::elevenlabs::SpeechError::Message(error))),
     };

@@ -199,16 +199,19 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
     unsafe {
         let mut output = HWAVEOUT::default();
         let index = device_index(selected);
+        if start.is_some() { crate::state::timing("audio_open_start"); }
         let mut result = waveOutOpen(Some(&mut output), index, &format, None, None, MIDI_WAVE_OPEN_TYPE(0));
         if result != 0 && index != WAVE_MAPPER {
             result = waveOutOpen(Some(&mut output), WAVE_MAPPER, &format, None, None, MIDI_WAVE_OPEN_TYPE(0));
         }
+        if start.is_some() { crate::state::timing(format!("audio_open_end ok={}", result == 0)); }
         if result != 0 { return Err(format!("Could not open announcement audio output: {result}")); }
         #[repr(align(8))]
         struct Block { header: WAVEHDR, samples: Vec<i16>, prepared: bool }
         let mut blocks: Vec<_> = (0..2).map(|_| Box::new(Block { header: WAVEHDR::default(), samples: vec![0; sample_rate as usize / 25], prepared: false })).collect();
         let size = std::mem::size_of::<WAVEHDR>() as u32;
         let mut progress = PlaybackProgress::new(samples.len(), sample_rate, start.as_ref().map(|start| start.silence), std::time::Instant::now());
+        if let Some(start) = &start { crate::state::timing(format!("warmup_start seconds={}", start.silence.as_secs())); }
         while !cancelled.load(Ordering::Relaxed) {
             for block in &mut blocks {
                 if cancelled.load(Ordering::Relaxed) { break; }
@@ -232,6 +235,7 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
             if result != 0 || cancelled.load(Ordering::Relaxed) { break; }
             progress.drained(blocks.iter().any(|block| block.prepared), samples.len());
             if progress.phase == PlaybackPhase::Activation {
+                crate::state::timing("warmup_end");
                 let allowed = start.take().is_some_and(|start| (start.activate)()) && !cancelled.load(Ordering::Relaxed);
                 progress.activate(allowed, std::time::Instant::now());
             }

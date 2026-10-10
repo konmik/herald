@@ -439,6 +439,7 @@ fn run() -> Result<(), String> {
                 for event in speech.events.try_iter() {
                     match event {
                         SpeechEvent::Ready { id } => {
+                            state::timing(format!("speech_ready_received id={id}"));
                             if let Some(pending) = current.take_preparing(Some(&id)) {
                                 if muted { speech.cancel(); }
                                 activation = Some((pending, muted));
@@ -470,6 +471,7 @@ fn run() -> Result<(), String> {
                     renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
+                        state::timing(format!("notification_selected id={} completed={}", notification.id, notification.completed));
                         let lightning = capture_lightning.unwrap_or(settings.lightning);
                         renderer.set_lightning(lightning);
                         renderer.text = render::display_text(&notification.text);
@@ -502,6 +504,7 @@ fn run() -> Result<(), String> {
                         let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
                         let mut path = character.video_path.clone();
+                        state::timing(format!("video_load_start id={}", notification.id));
                         let video = match video::Video::open(&path) {
                             Ok(video) => Some(video),
                             Err(error) => {
@@ -519,6 +522,7 @@ fn run() -> Result<(), String> {
                                 } else { None }
                             }
                         };
+                        state::timing(format!("video_load_end id={}", notification.id));
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
                         let readiness_timeout = speech_readiness_timeout(settings);
                         let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path, placement, entrance };
@@ -556,7 +560,10 @@ fn run() -> Result<(), String> {
                     if now.saturating_duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
                         active.speaking = true;
                         signal.stop();
-                        if !active.silent { speech.release(&active.notification.id); }
+                        if !active.silent {
+                            state::timing(format!("speech_release id={}", active.notification.id));
+                            speech.release(&active.notification.id);
+                        }
                     }
                     if active.end.is_none() && active.ready_to_end(now) {
                         active.end = Some(now); speech.cancel();
@@ -655,6 +662,7 @@ fn run() -> Result<(), String> {
                                 }
                             }
                             if !active.history_recorded {
+                                state::timing(format!("visual_presented id={}", active.notification.id));
                                 let result = if active.character.id.is_some() {
                                     history::record_with_identity(&data, &active.notification, active.character.history_identity(), &active.video_path, chrono::Utc::now())
                                 } else {

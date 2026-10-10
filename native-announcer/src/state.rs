@@ -145,6 +145,20 @@ pub fn log(data: &Path, message: impl std::fmt::Display) {
     }
 }
 
+pub fn timing(message: impl std::fmt::Display) {
+    use std::io::Write;
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_lock) = LOCK.lock() else { return; };
+    let data = crate::platform::data_directory();
+    let path = data.join("timing.log");
+    if path.metadata().is_ok_and(|m| m.len() > 65536) {
+        let _ = std::fs::rename(&path, data.join("timing.previous.log"));
+    }
+    if let Ok(mut file) = crate::private::file(&path, true) {
+        let _ = writeln!(file, "{} {message}", timestamp());
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(crate) enum Command {
