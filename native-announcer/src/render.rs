@@ -208,16 +208,43 @@ impl EntranceScene {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Stroke {
+    from: [f32; 2],
+    to: [f32; 2],
+    scale: f32,
+    taper: f32,
+    intensity: f32,
+}
+
+/// Rows per parallel raster band; each band applies every stroke clipped to its rows.
+const RASTER_BAND_ROWS: usize = 16;
+
 struct LightningPaint {
     width: usize,
     height: usize,
     glow: Vec<f32>,
     lightning: LightningSettings,
+    strokes: Vec<Stroke>,
 }
 
 impl LightningPaint {
     fn new(width: usize, height: usize, lightning: LightningSettings) -> Self {
-        Self { width, height, glow: vec![0.0; width * height], lightning }
+        Self { width, height, glow: vec![0.0; width * height], lightning, strokes: Vec::new() }
+    }
+
+    /// Applies the queued strokes. A pixel keeps the maximum strength of all strokes, which does not depend on order,
+    /// so bands of rows are rasterized in parallel with the same per-pixel arithmetic as one sequential pass.
+    fn rasterize(&mut self) {
+        if self.strokes.is_empty() { return; }
+        use rayon::prelude::*;
+        let strokes = std::mem::take(&mut self.strokes);
+        let (width, height, lightning) = (self.width, self.height, self.lightning);
+        self.glow.par_chunks_mut(RASTER_BAND_ROWS * width).enumerate().for_each(|(band, glow)| {
+            let top = band * RASTER_BAND_ROWS;
+            let rows = top..(top + RASTER_BAND_ROWS).min(height);
+            for stroke in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, *stroke); }
+        });
     }
 
     fn bolt(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, seed: u32, intensity: f32, reveal: f32) {
@@ -246,28 +273,7 @@ impl LightningPaint {
 
     fn stroke(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, taper: f32, intensity: f32) {
         if intensity <= 0.0 { return; }
-        let LightningSettings { core_width: core, glow_spread: halo, glow_strength: halo_strength, stroke_radius: radius, brightness, .. } = self.lightning;
-        let intensity = intensity * brightness;
-        let radius = radius * scale * taper.sqrt();
-        let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(self.width);
-        let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(self.width);
-        let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(self.height);
-        let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(self.height);
-        let dx = to[0] - from[0];
-        let dy = to[1] - from[1];
-        let squared = (dx * dx + dy * dy).max(0.001);
-        for y in top..bottom {
-            for x in left..right {
-                let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
-                let distance = ((x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy) - 0.4).max(0.0) / scale;
-                let strength = (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp()
-                    + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity;
-                if strength > 0.015 {
-                    let index = y * self.width + x;
-                    self.glow[index] = self.glow[index].max(strength);
-                }
-            }
-        }
+        self.strokes.push(Stroke { from, to, scale, taper, intensity });
     }
 
     fn distance_field(&self) -> Vec<f32> {
@@ -294,7 +300,8 @@ impl LightningPaint {
         distance
     }
 
-    fn composite(self, buffer: &mut [u32]) {
+    fn composite(mut self, buffer: &mut [u32]) {
+        self.rasterize();
         let LightningSettings { halo_color: halo, core_color: core, .. } = self.lightning;
         profile::time(Stage::Composite, || for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
             if strength == 0.0 { continue; }
@@ -700,6 +707,33 @@ struct PaintCoverage {
     traced: std::cell::OnceCell<Contours>,
 }
 
+/// Paints one stroke into `glow`, which holds image rows `rows` of an image `width` by `height` pixels.
+fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::Range<usize>, lightning: LightningSettings, stroke: Stroke) {
+    let Stroke { from, to, scale, taper, intensity } = stroke;
+    let LightningSettings { core_width: core, glow_spread: halo, glow_strength: halo_strength, stroke_radius: radius, brightness, .. } = lightning;
+    let intensity = intensity * brightness;
+    let radius = radius * scale * taper.sqrt();
+    let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(width);
+    let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(width);
+    let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(height).max(rows.start);
+    let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(height).min(rows.end);
+    let dx = to[0] - from[0];
+    let dy = to[1] - from[1];
+    let squared = (dx * dx + dy * dy).max(0.001);
+    for y in top..bottom {
+        for x in left..right {
+            let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
+            let distance = ((x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy) - 0.4).max(0.0) / scale;
+            let strength = (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp()
+                + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity;
+            if strength > 0.015 {
+                let index = (y - rows.start) * width + x;
+                glow[index] = glow[index].max(strength);
+            }
+        }
+    }
+}
+
 fn draw_ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale: f32, seed: u32, intensity: f32, buildup: f32) {
     for (surface, contour) in coverage.contours(glow.width, glow.height).iter().enumerate() {
         for arc in 0..(1 + (buildup * 2.5) as usize) {
@@ -736,6 +770,7 @@ impl PaintCoverage {
                 let mut glow = LightningPaint::new(width, height, lightning);
                 let intensity = lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0, intensity);
                 draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);
+                glow.rasterize();
                 for (index, strength) in glow.glow.iter_mut().enumerate() {
                     if !self.pixels[index] { *strength = 0.0; }
                 }
@@ -778,6 +813,8 @@ impl PaintCoverage {
             glow.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
             if let Some(removal) = &mut removal { removal.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0)); }
         }
+        glow.rasterize();
+        if let Some(removal) = &mut removal { removal.rasterize(); }
         let distance = (consumption > 0.0).then(|| profile::time(Stage::Distance, || removal.as_ref().unwrap_or(&glow).distance_field()));
         for (index, pixel) in buffer.iter_mut().enumerate() {
             if !self.pixels[index] { glow.glow[index] = 0.0; continue; }
@@ -1328,8 +1365,8 @@ mod tests {
         let mut late = LightningPaint::new(320, 260, LightningSettings::default());
         draw_ambient_edges(&coverage, &mut early, 1.0, 1234, 1.0, 0.0);
         draw_ambient_edges(&coverage, &mut late, 1.0, 1234, 1.0, 1.0);
-        let lit = |paint: &LightningPaint| paint.glow.iter().filter(|strength| **strength > 0.2).count();
-        assert!(lit(&late) > lit(&early) * 3);
+        let lit = |paint: &mut LightningPaint| { paint.rasterize(); paint.glow.iter().filter(|strength| **strength > 0.2).count() };
+        assert!(lit(&mut late) > lit(&mut early) * 3);
         let card = CardPlacement { rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
         let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1234, LightningSettings::default());
         let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();

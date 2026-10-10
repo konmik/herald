@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 fontdue = "0.9"
 chrono = "0.4"
 rand = "0.8.8"
+rayon = "1.12"
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 gpui-kit = "=0.7.1"
