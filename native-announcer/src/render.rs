@@ -336,6 +336,7 @@ pub struct Renderer {
     pub lightning_activity: Option<LightningActivity>,
     impact: Option<[f32; 2]>,
     lightning: LightningSettings,
+    contour_cache: Option<(Vec<bool>, Contours)>,
 }
 
 struct TextBlock<'a> {
@@ -370,6 +371,7 @@ impl Renderer {
             lightning_activity: None,
             impact: None,
             lightning: settings.lightning,
+            contour_cache: None,
         })
     }
 
@@ -475,7 +477,7 @@ impl Renderer {
             Some(LightningActivity::Closing(_, _)) => true,
             None => false,
         };
-        let mut coverage = (strike.is_some() || active).then(|| PaintCoverage { pixels: vec![false; width * height] });
+        let mut coverage = (strike.is_some() || active).then(|| PaintCoverage::new(vec![false; width * height]));
         profile::time(Stage::Bubble, || draw_bubble(
             buffer,
             width,
@@ -641,11 +643,19 @@ impl Renderer {
         }
         if let Some(start) = portrait { profile::add(Stage::Portrait, start); }
         if let Some(coverage) = coverage {
+            if let Some((pixels, contours)) = &self.contour_cache {
+                if *pixels == coverage.pixels { let _ = coverage.traced.set(contours.clone()); }
+            }
             profile::time(Stage::Lightning, || if let Some(elapsed) = strike {
                 coverage.draw_entrance_lightning(buffer, width, height, scale, elapsed, self.impact.unwrap_or([187.5 * scale, height as f32 - 90.5 * scale]), self.lightning);
             } else if let Some(activity) = self.lightning_activity {
                 coverage.draw_activity(buffer, width, height, scale, activity, self.lightning);
             });
+            if let Some(contours) = coverage.traced.get() {
+                if !self.contour_cache.as_ref().is_some_and(|(_, cached)| std::sync::Arc::ptr_eq(cached, contours)) {
+                    self.contour_cache = Some((coverage.pixels, contours.clone()));
+                }
+            }
         }
     }
 
@@ -683,8 +693,11 @@ impl Renderer {
     }
 }
 
+type Contours = std::sync::Arc<Vec<Vec<[f32; 2]>>>;
+
 struct PaintCoverage {
     pixels: Vec<bool>,
+    traced: std::cell::OnceCell<Contours>,
 }
 
 fn draw_ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale: f32, seed: u32, intensity: f32, buildup: f32) {
@@ -786,8 +799,11 @@ impl PaintCoverage {
         glow.composite(buffer);
     }
 
-    fn contours(&self, width: usize, height: usize) -> Vec<Vec<[f32; 2]>> {
-        profile::time(Stage::Contours, || self.trace_contours(width, height))
+    fn new(pixels: Vec<bool>) -> Self { Self { pixels, traced: std::cell::OnceCell::new() } }
+
+    /// The painted outlines, traced once per coverage; the renderer reuses them while the card geometry is unchanged.
+    fn contours(&self, width: usize, height: usize) -> Contours {
+        self.traced.get_or_init(|| profile::time(Stage::Contours, || std::sync::Arc::new(self.trace_contours(width, height)))).clone()
     }
 
     fn trace_contours(&self, width: usize, height: usize) -> Vec<Vec<[f32; 2]>> {
@@ -839,6 +855,7 @@ impl PaintCoverage {
             }
         } else {
             let contours = self.contours(width, height);
+            let contours = contours.as_slice();
             let closest = |contour: &Vec<[f32; 2]>, point: [f32; 2]| {
                 contour.iter().enumerate().min_by(|(_, a), (_, b)| {
                     (a[0] - point[0]).hypot(a[1] - point[1]).total_cmp(&(b[0] - point[0]).hypot(b[1] - point[1]))
@@ -1306,7 +1323,7 @@ mod tests {
         let mut renderer = Renderer::new().unwrap();
         let mut plain = vec![0; 320 * 260];
         renderer.draw(&mut plain, 320, 260, 1.0, None, 0.0, None);
-        let coverage = PaintCoverage { pixels: plain.iter().map(|pixel| *pixel != 0xff00ff).collect() };
+        let coverage = PaintCoverage::new(plain.iter().map(|pixel| *pixel != 0xff00ff).collect());
         let mut early = LightningPaint::new(320, 260, LightningSettings::default());
         let mut late = LightningPaint::new(320, 260, LightningSettings::default());
         draw_ambient_edges(&coverage, &mut early, 1.0, 1234, 1.0, 0.0);
@@ -1461,7 +1478,7 @@ mod tests {
     #[test]
     fn disconnected_bubble_receives_charge_through_its_tail_after_the_video() {
         let mut pixels = vec![0xff00ff; 320 * 260];
-        let mut coverage = PaintCoverage { pixels: vec![false; pixels.len()] };
+        let mut coverage = PaintCoverage::new(vec![false; pixels.len()]);
         draw_bubble(&mut pixels, 320, 260, 1.0, 88.0, 0x191f2a, Some(&mut coverage));
         for y in 120..248 {
             for x in 188..316 { coverage.pixels[y * 320 + x] = true; pixels[y * 320 + x] = 0x191f2a; }
@@ -1555,13 +1572,13 @@ mod tests {
                     } else {
                         assert_eq!(reached, [true; 8], "Missing complete outline at scale {scale}, height {logical_height}");
                         assert!(white > 50);
-                        let mut coverage = PaintCoverage { pixels: vec![false; width * height] };
+                        let mut coverage = PaintCoverage::new(vec![false; width * height]);
                         let mut mask = vec![0; width * height];
                         draw_bubble(&mut mask, width, height, scale, bottom, 0, Some(&mut coverage));
                         for y in ((logical_height as f32 - 140.0) * scale) as usize..((logical_height as f32 - 12.0) * scale) as usize {
                             for x in (188.0 * scale) as usize..(316.0 * scale) as usize { coverage.pixels[y * width + x] = true; }
                         }
-                        for contour in coverage.contours(width, height) {
+                        for contour in coverage.contours(width, height).iter() {
                             let lit = contour.iter().filter(|point| {
                                 let radius = (3.0 * scale).ceil() as i32;
                                 (-radius..=radius).any(|dy| (-radius..=radius).any(|dx| {
