@@ -238,12 +238,14 @@ impl LightningPaint {
     fn rasterize(&mut self) {
         if self.strokes.is_empty() { return; }
         use rayon::prelude::*;
-        let strokes = std::mem::take(&mut self.strokes);
+        let lightning = self.lightning;
+        let strokes: Vec<(Stroke, StrokeReach)> = std::mem::take(&mut self.strokes).into_par_iter()
+            .filter_map(|stroke| stroke_reach(lightning, stroke).map(|reach| (stroke, reach))).collect();
         let (width, height, lightning) = (self.width, self.height, self.lightning);
         self.glow.par_chunks_mut(RASTER_BAND_ROWS * width).enumerate().for_each(|(band, glow)| {
             let top = band * RASTER_BAND_ROWS;
             let rows = top..(top + RASTER_BAND_ROWS).min(height);
-            for stroke in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, *stroke); }
+            for (stroke, reach) in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, *stroke, reach); }
         });
     }
 
@@ -809,26 +811,69 @@ struct PaintCoverage {
 }
 
 /// Paints one stroke into `glow`, which holds image rows `rows` of an image `width` by `height` pixels.
-fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::Range<usize>, lightning: LightningSettings, stroke: Stroke) {
-    let Stroke { from, to, scale, taper, intensity } = stroke;
-    let LightningSettings { core_width: core, glow_spread: halo, glow_strength: halo_strength, stroke_radius: radius, brightness, .. } = lightning;
+fn stroke_strength(lightning: LightningSettings, stroke: Stroke, distance: f32) -> f32 {
+    let LightningSettings { core_width: core, glow_spread: halo, glow_strength: halo_strength, brightness, .. } = lightning;
+    let Stroke { taper, intensity, .. } = stroke;
     let intensity = intensity * brightness;
-    let radius = radius * scale * taper.sqrt();
-    let left = ((from[0].min(to[0]) - radius).floor().max(0.0) as usize).min(width);
-    let right = ((from[0].max(to[0]) + radius).ceil().max(0.0) as usize).min(width);
-    let top = ((from[1].min(to[1]) - radius).floor().max(0.0) as usize).min(height).max(rows.start);
-    let bottom = ((from[1].max(to[1]) + radius).ceil().max(0.0) as usize).min(height).min(rows.end);
+    (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp() + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity
+}
+
+/// Number of distance bins in a stroke's strength bound table.
+const STRENGTH_BINS: usize = 32;
+
+/// Where a stroke can still change the glow. Strength only falls with distance (each term is a decreasing exp of the
+/// squared distance), so `bound[k]`, the strength at distance k * step, caps every pixel at distance k * step or more.
+struct StrokeReach {
+    /// Pixel distance past which nothing paints (0.015 threshold plus a pixel for rounding); infinity keeps the radius box.
+    pixels: f32,
+    step: f32,
+    bound: [f32; STRENGTH_BINS + 1],
+}
+
+/// None when the stroke paints nothing at all.
+fn stroke_reach(lightning: LightningSettings, stroke: Stroke) -> Option<StrokeReach> {
+    let strength = |distance: f32| stroke_strength(lightning, stroke, distance);
+    let limit = lightning.stroke_radius * stroke.scale * stroke.taper.sqrt() / stroke.scale;
+    if !(strength(0.0) > 0.015) { return None; }
+    let pixels = if strength(limit) > 0.015 { f32::INFINITY } else {
+        let (mut inside, mut outside) = (0.0_f32, limit);
+        for _ in 0..24 {
+            let middle = (inside + outside) * 0.5;
+            if strength(middle) > 0.015 { inside = middle; } else { outside = middle; }
+        }
+        outside * stroke.scale + 0.4 + 1.0
+    };
+    let step = limit / STRENGTH_BINS as f32;
+    let bound = std::array::from_fn(|bin| strength(bin as f32 * step));
+    Some(StrokeReach { pixels, step, bound })
+}
+
+fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::Range<usize>, lightning: LightningSettings, stroke: Stroke, reach: &StrokeReach) {
+    let Stroke { from, to, scale, taper, .. } = stroke;
+    let radius = lightning.stroke_radius * scale * taper.sqrt();
+    let reach_squared = reach.pixels * reach.pixels;
+    let extent = radius.min(reach.pixels);
+    let top = ((from[1].min(to[1]) - extent).floor().max(0.0) as usize).min(height).max(rows.start);
+    let bottom = ((from[1].max(to[1]) + extent).ceil().max(0.0) as usize).min(height).min(rows.end);
+    if top >= bottom { return; }
+    let left = ((from[0].min(to[0]) - extent).floor().max(0.0) as usize).min(width);
+    let right = ((from[0].max(to[0]) + extent).ceil().max(0.0) as usize).min(width);
     let dx = to[0] - from[0];
     let dy = to[1] - from[1];
     let squared = (dx * dx + dy * dy).max(0.001);
+    let per_step = if reach.step > 0.0 { 1.0 / reach.step } else { 0.0 };
     for y in top..bottom {
         for x in left..right {
             let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
-            let distance = ((x as f32 - from[0] - along * dx).hypot(y as f32 - from[1] - along * dy) - 0.4).max(0.0) / scale;
-            let strength = (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp()
-                + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity;
+            let (offset_x, offset_y) = (x as f32 - from[0] - along * dx, y as f32 - from[1] - along * dy);
+            if offset_x * offset_x + offset_y * offset_y > reach_squared { continue; }
+            let distance = (offset_x.hypot(offset_y) - 0.4).max(0.0) / scale;
+            let index = (y - rows.start) * width + x;
+            // One bin nearer than the pixel, so the bound's distance is never past the pixel's despite rounding.
+            let bin = ((distance * per_step) as usize).saturating_sub(1).min(STRENGTH_BINS);
+            if reach.bound[bin] <= glow[index] { continue; }
+            let strength = stroke_strength(lightning, stroke, distance);
             if strength > 0.015 {
-                let index = (y - rows.start) * width + x;
                 glow[index] = glow[index].max(strength);
             }
         }
