@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { APPS, BUNDLE_ID, backupName, infoPlist, isAnnouncer, macArch, ownedExecutable, parseArguments } from '../deploy-macos.mjs'
 
@@ -33,7 +33,7 @@ test('property lists are valid', { skip: process.platform !== 'darwin' }, async 
 test('options, architectures and process ownership', () => {
   assert.deepEqual(parseArguments([]), { applications: '/Applications', checks: true, hosts: true, start: true, reloadOpenCode: false, dryRun: false })
   const options = parseArguments(['--applications', '/tmp/apps', '--skip-checks', '--skip-host-registration', '--no-start'])
-  assert.equal(options.applications, '/tmp/apps')
+  assert.equal(options.applications, resolve('/tmp/apps'))
   assert.equal(options.checks || options.hosts || options.start, false)
   assert.throws(() => parseArguments(['--force']), /Unknown option/)
   assert.throws(() => parseArguments(['--applications']), /Missing value/)
@@ -43,8 +43,9 @@ test('options, architectures and process ownership', () => {
   assert.equal(macArch('x64'), 'x64')
   assert.equal(macArch('arm64'), 'arm64')
   assert.throws(() => macArch('ia32'), /Unsupported/)
-  assert.ok(ownedExecutable('/Applications/Herald.app/Contents/MacOS/Herald', ['/Applications/Herald.app']))
-  assert.ok(!ownedExecutable('/Applications/Herald.app.old/Contents/MacOS/Herald', ['/Applications/Herald.app']))
+  const announcer = resolve('/Applications/Herald.app')
+  assert.ok(ownedExecutable(resolve('/Applications/Herald.app/Contents/MacOS/Herald'), [announcer]))
+  assert.ok(!ownedExecutable(resolve('/Applications/Herald.app.old/Contents/MacOS/Herald'), [announcer]))
   assert.ok(isAnnouncer({ executable: '/Applications/Herald.app/Contents/MacOS/Herald', args: '/Applications/Herald.app/Contents/MacOS/Herald' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --settings' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --bridge --assets /x' }))
