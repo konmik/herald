@@ -344,6 +344,107 @@ pub struct Renderer {
     impact: Option<[f32; 2]>,
     lightning: LightningSettings,
     contour_cache: Option<(Vec<bool>, Contours)>,
+    glyph_cache: std::cell::RefCell<std::collections::HashMap<TextKey, std::sync::Arc<Vec<CachedGlyph>>>>,
+    template: Option<CardTemplate>,
+}
+
+/// Identifies one laid-out text block; its glyph rasters do not change between frames.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TextKey {
+    font: usize,
+    text: String,
+    size: u32,
+    y: u32,
+    max_height: u32,
+    scale: u32,
+}
+
+struct CachedGlyph {
+    x: f32,
+    y: f32,
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+/// Lays out and rasterizes a text block, keeping only the glyphs that fit above its maximum height.
+fn layout_glyphs(font: &Font, block: &TextBlock<'_>, scale: f32) -> Vec<CachedGlyph> {
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.reset(&LayoutSettings {
+        x: 26.0 * scale,
+        y: block.y * scale,
+        max_width: Some(268.0 * scale),
+        ..LayoutSettings::default()
+    });
+    layout.append(&[font], &TextStyle::new(block.text, block.size * scale, 0));
+    layout.glyphs().iter().filter(|glyph| glyph.y + glyph.height as f32 <= block.max_height * scale).map(|glyph| {
+        let (_, pixels) = font.rasterize_config(glyph.key);
+        CachedGlyph { x: glyph.x, y: glyph.y, width: glyph.width, height: glyph.height, pixels }
+    }).collect()
+}
+
+/// The bubble's per-pixel paint, traced once per card size by running `draw_bubble` itself.
+struct CardTemplate {
+    width: usize,
+    height: usize,
+    scale: u32,
+    bottom: u32,
+    /// 0 untouched, 1 outline, 2 fill, 3 fill highlight.
+    classes: Vec<u8>,
+    /// Pixels darkened by the bubble scanlines.
+    scanlines: Vec<u32>,
+}
+
+const TEMPLATE_PROBES: [u32; 2] = [0x123456, 0x654321];
+
+impl CardTemplate {
+    fn new(width: usize, height: usize, scale: f32, bottom: f32) -> Self {
+        let probe = |fill: u32| {
+            let mut buffer = vec![0xff00ff; width * height];
+            draw_bubble(&mut buffer, width, height, scale, bottom, fill, None);
+            buffer
+        };
+        let [first, second] = TEMPLATE_PROBES.map(probe);
+        let classes = first.iter().zip(&second).map(|(a, b)| match (*a, *b) {
+            (0xff00ff, 0xff00ff) => 0,
+            (0x080908, 0x080908) => 1,
+            (a, b) if a == TEMPLATE_PROBES[0] && b == TEMPLATE_PROBES[1] => 2,
+            (a, b) if a == blend(TEMPLATE_PROBES[0], 0xffffff, 30) && b == blend(TEMPLATE_PROBES[1], 0xffffff, 30) => 3,
+            other => panic!("Unclassified bubble pixel {other:x?}"),
+        }).collect();
+        let mut scanlines = Vec::new();
+        for y in 0..height {
+            if (y as f32 / scale).floor() as usize % 2 != 0 { continue; }
+            for x in 0..width {
+                if bubble_contains(x as f32 / scale, y as f32 / scale, bottom) { scanlines.push((y * width + x) as u32); }
+            }
+        }
+        Self { width, height, scale: scale.to_bits(), bottom: bottom.to_bits(), classes, scanlines }
+    }
+
+    fn matches(&self, width: usize, height: usize, scale: f32, bottom: f32) -> bool {
+        self.width == width && self.height == height && self.scale == scale.to_bits() && self.bottom == bottom.to_bits()
+    }
+
+    /// Same pixels and coverage as `draw_bubble` on a buffer filled with the transparency key.
+    fn paint(&self, buffer: &mut [u32], fill: u32, coverage: Option<&mut PaintCoverage>) {
+        let colors = [0xff00ff, 0x080908, fill, blend(fill, 0xffffff, 30)];
+        for (pixel, class) in buffer.iter_mut().zip(&self.classes) {
+            if *class != 0 { *pixel = colors[*class as usize]; }
+        }
+        if let Some(coverage) = coverage {
+            for (covered, class) in coverage.pixels.iter_mut().zip(&self.classes) { *covered |= *class != 0; }
+        }
+    }
+
+    /// Same pixels as `shade_bubble_scanlines`.
+    fn shade(&self, buffer: &mut [u32]) {
+        let darker: [u32; 256] = std::array::from_fn(|channel| ((channel as f32 * 0.82).clamp(0.0, 255.0)) as u32);
+        for index in &self.scanlines {
+            let color = buffer[*index as usize];
+            buffer[*index as usize] = darker[(color & 255) as usize] | darker[((color >> 8) & 255) as usize] << 8 | darker[((color >> 16) & 255) as usize] << 16;
+        }
+    }
 }
 
 struct TextBlock<'a> {
@@ -379,6 +480,8 @@ impl Renderer {
             impact: None,
             lightning: settings.lightning,
             contour_cache: None,
+            glyph_cache: Default::default(),
+            template: None,
         })
     }
 
@@ -421,22 +524,18 @@ impl Renderer {
         font: &Font,
         block: TextBlock<'_>,
     ) {
-        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-        layout.reset(&LayoutSettings {
-            x: 26.0 * scale,
-            y: block.y * scale,
-            max_width: Some(268.0 * scale),
-            ..LayoutSettings::default()
+        let key = TextKey { font: font.file_hash(), text: block.text.to_owned(), size: (block.size * scale).to_bits(),
+            y: (block.y * scale).to_bits(), max_height: (block.max_height * scale).to_bits(), scale: scale.to_bits() };
+        let glyphs = self.glyph_cache.borrow().get(&key).cloned();
+        let glyphs = glyphs.unwrap_or_else(|| {
+            let glyphs = std::sync::Arc::new(layout_glyphs(font, &block, scale));
+            let mut cache = self.glyph_cache.borrow_mut();
+            if cache.len() >= 8 { cache.clear(); }
+            cache.insert(key, glyphs.clone());
+            glyphs
         });
-        layout.append(
-            &[font],
-            &TextStyle::new(block.text, block.size * scale, 0),
-        );
-        for glyph in layout.glyphs() {
-            if glyph.y + glyph.height as f32 > block.max_height * scale {
-                continue;
-            }
-            let (_, pixels) = font.rasterize_config(glyph.key);
+        for glyph in glyphs.iter() {
+            let pixels = &glyph.pixels;
             for row in 0..glyph.height {
                 for column in 0..glyph.width {
                     let mut x = glyph.x as i32 + column as i32;
@@ -485,15 +584,13 @@ impl Renderer {
             None => false,
         };
         let mut coverage = (strike.is_some() || active).then(|| PaintCoverage::new(vec![false; width * height]));
-        profile::time(Stage::Bubble, || draw_bubble(
-            buffer,
-            width,
-            height,
-            scale,
-            logical_height - 152.0,
-            video_background(image),
-            coverage.as_mut(),
-        ));
+        let bottom = logical_height - 152.0;
+        profile::time(Stage::Bubble, || {
+            if !self.template.as_ref().is_some_and(|template| template.matches(width, height, scale, bottom)) {
+                self.template = Some(CardTemplate::new(width, height, scale, bottom));
+            }
+            self.template.as_ref().unwrap().paint(buffer, video_background(image), coverage.as_mut());
+        });
         let title_y = logical_height - 188.0;
         profile::time(Stage::Text, || self.text(
             buffer,
@@ -539,7 +636,7 @@ impl Renderer {
                 max_height: title_y + f32::from(self.title_preference.size) + 8.0,
             },
         ));
-        profile::time(Stage::Scanlines, || shade_bubble_scanlines(buffer, width, height, scale, logical_height - 152.0));
+        profile::time(Stage::Scanlines, || self.template.as_ref().unwrap().shade(buffer));
         let portrait = profile::enabled().then(std::time::Instant::now);
         let face_x = (188.0 * scale) as usize;
         let face_y = ((logical_height - 140.0) * scale) as usize;
@@ -967,6 +1064,7 @@ fn multiply_color(color: u32, amount: f32) -> u32 {
     result
 }
 
+#[cfg(test)]
 fn shade_bubble_scanlines(
     buffer: &mut [u32],
     width: usize,
@@ -1117,6 +1215,27 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_template_matches_direct_bubble_and_scanline_painting() {
+        for (scale, logical_height) in [(1.0, 240.0), (1.25, 263.0), (1.5, 300.0), (2.0, 310.0)] {
+            let (width, height) = ((320.0 * scale) as usize, (logical_height * scale) as usize);
+            let bottom = height as f32 / scale - 152.0;
+            let template = CardTemplate::new(width, height, scale, bottom);
+            for fill in [0x191f2a, 0x000000, 0xffffff, 0x080908, 0xff00ff] {
+                let mut expected = vec![0xff00ff; width * height];
+                let mut expected_coverage = PaintCoverage::new(vec![false; width * height]);
+                draw_bubble(&mut expected, width, height, scale, bottom, fill, Some(&mut expected_coverage));
+                shade_bubble_scanlines(&mut expected, width, height, scale, bottom);
+                let mut actual = vec![0xff00ff; width * height];
+                let mut coverage = PaintCoverage::new(vec![false; width * height]);
+                template.paint(&mut actual, fill, Some(&mut coverage));
+                template.shade(&mut actual);
+                assert!(actual == expected, "Template pixels differ at scale {scale}, fill {fill:06x}");
+                assert!(coverage.pixels == expected_coverage.pixels, "Template coverage differs at scale {scale}");
+            }
+        }
+    }
 
     #[test]
     fn every_exposed_parameter_changes_actual_lightning_pixels() {
