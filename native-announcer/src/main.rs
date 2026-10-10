@@ -55,6 +55,7 @@ struct Active {
     history_recorded: bool,
     placement: CardPlacement,
     entrance: Option<EntranceScene>,
+    transition_duration: Duration,
     presented_bounds: Option<PhysicalRect>,
 }
 
@@ -68,6 +69,7 @@ struct Pending {
     video_path: PathBuf,
     placement: CardPlacement,
     entrance: Option<EntranceScene>,
+    transition_duration: Duration,
 }
 
 enum Presentation {
@@ -130,6 +132,7 @@ impl Pending {
             history_recorded: false,
             placement: self.placement,
             entrance: self.entrance,
+            transition_duration: self.transition_duration,
             presented_bounds: None,
         }
     }
@@ -146,7 +149,7 @@ fn speech_readiness_timeout(settings: &settings::Settings) -> Duration {
 impl Active {
     fn entrance_strike(&self, now: Instant) -> Option<Duration> {
         let elapsed = now.saturating_duration_since(self.started);
-        (self.end.is_none() && elapsed < state::TRANSITION_DURATION).then_some(elapsed)
+        (self.end.is_none() && elapsed < self.transition_duration).then_some(elapsed)
     }
 
     fn seed(&self) -> u32 {
@@ -541,9 +544,10 @@ fn run() -> Result<(), String> {
                             }
                         };
                         state::timing(format!("video_load_end id={}", notification.id));
-                        let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + state::TRANSITION_DURATION).unwrap_or_default());
+                        let transition_duration = lightning.transition_duration();
+                        let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + transition_duration).unwrap_or_default());
                         let readiness_timeout = speech_readiness_timeout(settings);
-                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path, placement, entrance };
+                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path, placement, entrance, transition_duration };
                         if muted {
                             activation = Some((pending, true));
                         } else {
@@ -576,7 +580,7 @@ fn run() -> Result<(), String> {
                 let mut dismiss = false;
                 if let Presentation::Playing(active) = &mut current {
                     if muted && !active.silent { active.silent = true; speech.cancel(); signal.stop(); }
-                    if now.saturating_duration_since(active.started) >= state::TRANSITION_DURATION && !active.speaking {
+                    if now.saturating_duration_since(active.started) >= active.transition_duration && !active.speaking {
                         active.speaking = true;
                         signal.stop();
                         if !active.silent {
@@ -588,7 +592,7 @@ fn run() -> Result<(), String> {
                         active.end = Some(now); speech.cancel();
                         if !active.silent && !muted { signal.play(settings); }
                     }
-                    if active.end.is_some_and(|end| now.duration_since(end) >= state::TRANSITION_DURATION) {
+                    if active.end.is_some_and(|end| now.duration_since(end) >= active.transition_duration) {
                         max_visible = max_visible.max(active.started.elapsed().as_secs_f64());
                         durations.push(active.started.elapsed().as_secs_f64());
                         dismiss = true;
@@ -601,9 +605,9 @@ fn run() -> Result<(), String> {
                 }
                 let interval = match &current {
                     Presentation::Preparing(_) => Duration::from_millis(42),
-                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION => ANIMATION_FRAME,
+                    Presentation::Playing(active) if active.started.elapsed() < active.transition_duration => ANIMATION_FRAME,
                     Presentation::Playing(active) if active.end.is_some() => ANIMATION_FRAME,
-                    Presentation::Playing(active) if render::ambient_active(active.started.elapsed(), active.expires.duration_since(active.started), active.seed()) => ANIMATION_FRAME,
+                    Presentation::Playing(active) if renderer.ambient_active(active.started.elapsed(), active.expires.duration_since(active.started), active.seed()) => ANIMATION_FRAME,
                     Presentation::Playing(active) => Duration::from_millis(((1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33)),
                     Presentation::Idle => Duration::from_millis(250),
                 };
@@ -671,7 +675,7 @@ fn run() -> Result<(), String> {
                             if let Some(frames) = &mut frames {
                                 frames.save_scene(&pixels, viewport.width, viewport.height, elapsed, active.end.map(|end| end.duration_since(active.started)), active.placement, active.entrance.as_ref(), viewport)?;
                             }
-                            if elapsed >= state::TRANSITION_DURATION && active.end.is_none() {
+                            if elapsed >= active.transition_duration && active.end.is_none() {
                                 if let Some(path) = snapshot.take() {
                                     let preview = image::RgbaImage::from_fn(viewport.width, viewport.height, |x, y| {
                                         let color = pixels[(y * viewport.width + x) as usize];
@@ -767,6 +771,7 @@ mod tests {
             history_recorded: false,
             placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
             entrance: None,
+            transition_duration: state::TRANSITION_DURATION,
             presented_bounds: None,
         };
         assert!(!active.ready_to_end(started + Duration::from_secs(20)));
@@ -784,6 +789,11 @@ mod tests {
         active.entrance = Some(EntranceScene::new(PhysicalRect { x: -500, y: -200, width: 1500, height: 1200 }, active.placement, 1234, lightning::LightningSettings::default()));
         assert_eq!(active.viewport(started + Duration::from_millis(140)).bottom(), 1000);
         assert_eq!(active.viewport(started + Duration::from_millis(650)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
+        active.transition_duration = lightning::LightningSettings { speed: 0.25, ..lightning::LightningSettings::default() }.transition_duration();
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(2000)), Some(Duration::from_millis(2000)));
+        assert_eq!(active.viewport(started + Duration::from_millis(2000)).bottom(), 1000);
+        assert_eq!(active.entrance_strike(started + Duration::from_millis(2600)), None);
+        assert_eq!(active.viewport(started + Duration::from_millis(2600)), active.placement.rect);
         active.end = Some(started + Duration::from_millis(80));
         assert_eq!(active.entrance_strike(started + Duration::from_millis(120)), None);
         assert_eq!(active.viewport(started + Duration::from_millis(120)), PhysicalRect { x: 100, y: 100, width: 320, height: 260 });
@@ -814,6 +824,7 @@ mod tests {
             video_path: PathBuf::new(),
             placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
             entrance: None,
+            transition_duration: state::TRANSITION_DURATION,
         });
         assert!(matches!(&presentation, Presentation::Preparing(_)));
         assert!(presentation.take_preparing(Some("other")).is_none());

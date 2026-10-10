@@ -45,29 +45,31 @@ pub enum LightningActivity {
     Closing(Duration, u32),
 }
 
-fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u32, f32, f32)> {
-    let time = elapsed.saturating_sub(crate::state::TRANSITION_DURATION).as_secs_f32();
-    let duration = duration.saturating_sub(crate::state::TRANSITION_DURATION).as_secs_f32().max(1.0);
-    let mut start = 0.1 + (crate::state::noise_hash(seed) % 500) as f32 / 1000.0;
+fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32, lightning: LightningSettings) -> Option<(u32, f32, f32)> {
+    let time = elapsed.saturating_sub(lightning.transition_duration()).as_secs_f32();
+    let duration = duration.saturating_sub(lightning.transition_duration()).as_secs_f32().max(1.0);
+    let mut start = (0.1 + (crate::state::noise_hash(seed) % 500) as f32 / 1000.0) / lightning.frequency;
     let mut event = 0_u32;
+    let mut burst = None;
     while start <= time {
         let random = crate::state::noise_hash(seed ^ event.wrapping_mul(7919));
         let buildup = (start / duration).min(1.0);
         let length = 0.09 + ((random >> 8) % 140) as f32 / 1000.0 + buildup * 0.05;
-        if time < start + length {
-            let age = (time - start) / length;
-            return Some((random, (std::f32::consts::PI * age).sin(), buildup));
+        let flash_length = length / lightning.speed;
+        if time < start + flash_length {
+            let age = (time - start) / flash_length;
+            burst = Some((random, (std::f32::consts::PI * age).sin(), buildup));
         }
         let gap = if random % 4 == 0 { 0.04 + ((random >> 16) % 110) as f32 / 1000.0 }
             else { 0.22 + ((random >> 16) % 900) as f32 / 1000.0 };
-        start += length + gap * (1.0 - 0.55 * buildup);
+        start += ((length + gap * (1.0 - 0.55 * buildup)) / lightning.frequency).max(length + 0.015);
         event = event.wrapping_add(1);
     }
-    None
+    burst
 }
 
 /// True while a holding-phase ambient burst is drawn, the frames that pay for Lightning while the card is held.
-pub fn ambient_active(elapsed: Duration, duration: Duration, seed: u32) -> bool { ambient_burst(elapsed, duration, seed).is_some() }
+pub fn ambient_active(elapsed: Duration, duration: Duration, seed: u32, lightning: LightningSettings) -> bool { ambient_burst(elapsed, duration, seed, lightning).is_some() }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +103,8 @@ fn irregular_channel(from: [f32; 2], to: [f32; 2], seed: u32, roughness: f32, st
 }
 
 impl EntranceScene {
+    pub fn lightning(&self) -> LightningSettings { self.lightning }
+
     pub fn new(monitor: PhysicalRect, card: CardPlacement, seed: u32, lightning: LightningSettings) -> Self {
         let scale = card.scale;
         let left = card.rect.x as f32;
@@ -182,7 +186,7 @@ impl EntranceScene {
     }
 
     fn draw_incoming_bolt(&self, buffer: &mut [u32], elapsed: Duration) {
-        let milliseconds = elapsed.as_secs_f32() * 1000.0;
+        let milliseconds = elapsed.as_secs_f32() * 1000.0 * self.lightning.speed;
         if milliseconds <= 0.0 || milliseconds >= 650.0 { return; }
         let mut paint = LightningPaint::new(self.canvas.width as usize, self.canvas.height as usize, self.lightning);
         let reveal = (milliseconds / 120.0).min(1.0);
@@ -644,6 +648,8 @@ impl Renderer {
 
     pub fn set_lightning(&mut self, lightning: LightningSettings) { self.lightning = lightning; }
 
+    pub fn ambient_active(&self, elapsed: Duration, duration: Duration, seed: u32) -> bool { ambient_active(elapsed, duration, seed, self.lightning) }
+
     #[cfg(test)]
     pub fn body_preference(&self) -> &FontPreference { &self.body_preference }
 
@@ -726,9 +732,9 @@ impl Renderer {
         let image = resized.as_ref().or(image);
         buffer.fill(0xff00ff);
         let logical_height = height as f32 / scale;
-        let strike = entrance.filter(|elapsed| !elapsed.is_zero() && *elapsed < crate::state::TRANSITION_DURATION);
+        let strike = entrance.filter(|elapsed| !elapsed.is_zero() && *elapsed < self.lightning.transition_duration());
         let active = match self.lightning_activity {
-            Some(LightningActivity::Holding(elapsed, duration, seed)) => ambient_burst(elapsed, duration, seed).is_some(),
+            Some(LightningActivity::Holding(elapsed, duration, seed)) => ambient_burst(elapsed, duration, seed, self.lightning).is_some(),
             Some(LightningActivity::Closing(_, _)) => true,
             None => false,
         };
@@ -1104,9 +1110,9 @@ impl PaintCoverage {
     fn draw_activity(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, activity: LightningActivity, lightning: LightningSettings) {
         match activity {
             LightningActivity::Holding(elapsed, duration, seed) => {
-                let Some((seed, intensity, buildup)) = ambient_burst(elapsed, duration, seed) else { return; };
+                let Some((seed, intensity, buildup)) = ambient_burst(elapsed, duration, seed, lightning) else { return; };
                 let mut glow = LightningPaint::new(width, height, lightning);
-                let intensity = lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0, intensity);
+                let intensity = lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0 * lightning.speed, intensity);
                 draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);
                 glow.rasterize();
                 for (index, strength) in glow.glow.iter_mut().enumerate() {
@@ -1121,6 +1127,7 @@ impl PaintCoverage {
     }
 
     fn draw_exit(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, seed: u32, lightning: LightningSettings) {
+        let elapsed = elapsed.mul_f32(lightning.speed);
         let progress = (elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
         let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
         let reach = consumption.powi(2) * width.max(height) as f32;
@@ -1227,7 +1234,7 @@ impl PaintCoverage {
     }
 
     fn draw_entrance_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, impact: [f32; 2], lightning: LightningSettings) {
-        let milliseconds = elapsed.as_secs_f32() * 1000.0;
+        let milliseconds = elapsed.as_secs_f32() * 1000.0 * lightning.speed;
         if milliseconds < 120.0 { return; }
         let mut paint = LightningPaint::new(width, height, lightning);
         let intensity = lightning.pulse_profile.entrance(milliseconds) * ((650.0 - milliseconds) / 140.0).clamp(0.0, 1.0);
@@ -1541,6 +1548,13 @@ mod tests {
             paint.bolt([15.0, 235.0], [290.0, 25.0], 1.0, 567891, 0.7, 1.0);
             let mut pixels = vec![0xff00ff; 320 * 260];
             paint.composite(&mut pixels);
+            let mut renderer = Renderer::with_settings(&Settings { lightning, ..Settings::default() }).unwrap();
+            for time in [1000, 1250, 1500, 1750, 2000] {
+                let mut frame = vec![0; 320 * 260];
+                renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(time), Duration::from_secs(5), 1234));
+                renderer.draw(&mut frame, 320, 260, 1.0, None, 0.0, None);
+                pixels.extend(frame);
+            }
             pixels
         };
         let original = LightningSettings::default();
@@ -1559,10 +1573,10 @@ mod tests {
     fn all_presets_preserve_characterized_bolts_entrance_holding_and_exit_pixels() {
         use sha2::{Digest, Sha256};
         let pins = [
-            "c74a6a69704183f727181d59d082395f933c6335c9852d26ee85436cbc51cc7b",
-            "f3b121084bec70d764e15fef82fead376cfd63bfa9f4dee0f26f25281c6e4cc8",
-            "081f7f2c79e80d22c10c962f5ca3ae4c4736cd7a9050285fb0b5984f3ea66234",
-            "aabfc7c987b2b36bce7066a215e702a3ffd8e2f3e3b62f4d7f55c0b2978f0b1b",
+            "608ba67c3018469631b55ebbb5fd77018637829db015a5ef20734f1b527c54b8",
+            "f857c6fdea2c8e3103ee6017723fba47d3b8f539059c2a5927524d7ec98b4bca",
+            "7f6d4b900cb07c67a7464811615122899ca1b9205b811626250d9f5b6f955e75",
+            "1f94a0ab398424f0dcbb9a47f9cec1baab71185e2b80f6ede63bc57dd7eb11fa",
         ];
         for (preset, expected) in crate::lightning::PRESETS.iter().zip(pins) {
             let mut digest = Sha256::new();
@@ -1588,7 +1602,7 @@ mod tests {
                         pin(&renderer.draw_scene(&scene, None, 0.0, Some(Duration::from_millis(time))));
                     }
                     let duration = Duration::from_secs(5);
-                    let active = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+                    let active = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, preset.settings).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
                     for activity in [
                         LightningActivity::Holding(Duration::from_millis(700), duration, seed),
                         LightningActivity::Holding(Duration::from_millis(active), duration, seed),
@@ -1601,7 +1615,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(format!("{:x}", digest.finalize()), expected, "{} changed its original output", preset.label);
+            assert_eq!(format!("{:x}", digest.finalize()), expected, "{} changed its characterized output", preset.label);
         }
     }
 
@@ -1785,7 +1799,7 @@ mod tests {
         assert!(lit(&mut late) > lit(&mut early) * 3);
         let card = CardPlacement { rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
         let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1234, LightningSettings::default());
-        let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+        let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234, LightningSettings::default()).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
         renderer.seed = 567891;
         renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(time), Duration::from_secs(5), 1234));
         let frame = renderer.draw_scene(&scene, None, 0.0, None);
@@ -1801,11 +1815,62 @@ mod tests {
     }
 
     #[test]
+    fn holding_frequency_and_speed_control_event_count_and_flash_duration() {
+        let sample = |lightning: LightningSettings| {
+            let mut count = 0;
+            let mut visible = 0;
+            let mut previous = None;
+            for time in 0..30000 {
+                if let Some((seed, _, _)) = ambient_burst(lightning.transition_duration() + Duration::from_millis(time), lightning.transition_duration() + Duration::from_secs(30), 1234, lightning) {
+                    visible += 1;
+                    if previous != Some(seed) { count += 1; }
+                    previous = Some(seed);
+                }
+            }
+            (count, visible)
+        };
+        let baseline = sample(LightningSettings { frequency: 1.0, ..LightningSettings::default() });
+        let frequent = sample(LightningSettings::default());
+        let fast = sample(LightningSettings { frequency: 1.0, speed: 2.0, ..LightningSettings::default() });
+        assert!(frequent.0 > baseline.0 * 2);
+        assert_eq!(fast.0, baseline.0);
+        assert!((fast.1 as f32 / baseline.1 as f32 - 0.5).abs() < 0.02);
+    }
+
+    #[test]
+    fn speed_scales_the_complete_entrance_and_exit() {
+        let monitor = PhysicalRect { x: 0, y: 0, width: 800, height: 700 };
+        let card = CardPlacement { rect: PhysicalRect { x: 400, y: 300, width: 320, height: 260 }, scale: 1.0 };
+        let render = |speed, time, closing: bool| {
+            let lightning = LightningSettings { speed, ..LightningSettings::default() };
+            let scene = EntranceScene::new(monitor, card, 1234, lightning);
+            let mut renderer = Renderer::with_settings(&Settings { lightning, ..Settings::default() }).unwrap();
+            let elapsed = Duration::from_secs_f32(time);
+            renderer.lightning_activity = closing.then_some(LightningActivity::Closing(elapsed, 1234));
+            renderer.draw_scene(&scene, None, 0.0, (!closing).then_some(elapsed))
+        };
+        for time in [0.06, 0.14, 0.26, 0.48, 0.6] {
+            let baseline = render(1.0, time, false);
+            for speed in [0.25, 0.5, 2.0, 4.0] {
+                assert_eq!(render(speed, time / speed, false), baseline);
+            }
+        }
+        assert_ne!(render(0.5, 0.26, false), render(2.0, 0.26, false));
+        for time in [0.06, 0.14, 0.3, 0.48, 0.65] {
+            let baseline = render(1.0, time, true);
+            for speed in [0.25, 0.5, 2.0, 4.0] {
+                assert_eq!(render(speed, time / speed, true), baseline);
+            }
+        }
+        assert_ne!(render(0.5, 0.3, true), render(2.0, 0.3, true));
+    }
+
+    #[test]
     fn sporadic_bolts_are_fully_visible_and_stationary_during_each_flash() {
         let duration = Duration::from_secs(5);
         let mut previous = None;
         for milliseconds in 650..5000 {
-            if let Some((seed, _, buildup)) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234) {
+            if let Some((seed, _, buildup)) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234, LightningSettings::default()) {
                 if let Some((last_seed, last_buildup)) = previous {
                     if seed == last_seed { assert_eq!(buildup, last_buildup); }
                 }
@@ -1820,15 +1885,16 @@ mod tests {
         let mut starts = Vec::new();
         let mut last_seed = None;
         for time in (650..30000).step_by(5) {
-            if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, 1234) {
+            if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, 1234, LightningSettings::default()) {
                 if last_seed != Some(seed) { starts.push(time); }
                 last_seed = Some(seed);
             }
         }
         let intervals: Vec<_> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(starts.len() >= 90 && starts.len() <= 150, "Expected frequent holding flashes, got {}", starts.len());
         assert!(intervals.iter().any(|gap| *gap < 300));
-        assert!(intervals.iter().any(|gap| *gap > 800));
-        assert!(intervals.iter().max().unwrap() - intervals.iter().min().unwrap() > 600);
+        assert!(intervals.iter().any(|gap| *gap > 300));
+        assert!(intervals.iter().max().unwrap() - intervals.iter().min().unwrap() > 200);
     }
 
     #[test]
@@ -1842,7 +1908,7 @@ mod tests {
                 for (region, start) in [650, 650 + total * 2 / 3].into_iter().enumerate() {
                     let mut previous_seed = None;
                     for time in (start..start + total / 3).step_by(5) {
-                        if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, notification) {
+                        if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, notification, LightningSettings::default()) {
                             samples[region] += 1;
                             if previous_seed != Some(seed) { bursts[region] += 1; }
                             previous_seed = Some(seed);
@@ -1856,20 +1922,22 @@ mod tests {
     }
 
     #[test]
-    fn holding_has_sparse_bursts_and_exit_consumes_both_interiors() {
+    fn holding_has_frequent_bursts_and_exit_consumes_both_interiors() {
         let mut renderer = Renderer::new().unwrap();
         let mut plain = vec![0; 320 * 260];
         renderer.draw(&mut plain, 320, 260, 1.0, None, 0.0, None);
         let seed = 1234;
         let duration = Duration::from_secs(5);
-        let active: Vec<_> = (650..5000).step_by(20).filter(|time| ambient_burst(Duration::from_millis(*time), duration, seed).is_some()).collect();
-        assert!(active.len() >= 30 && active.len() < 140);
-        for time in [700, active[active.len() / 2]] {
+        let active: Vec<_> = (650..5000).step_by(20).filter(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_some()).collect();
+        assert!(active.len() >= 100 && active.len() < 210);
+        let inactive = (650..5000).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_none()).unwrap();
+        let peak = (650..5000).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+        for time in [inactive, peak] {
             let mut pixels = vec![0; plain.len()];
             renderer.seed = 567891;
             renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(time), duration, seed));
             renderer.draw(&mut pixels, 320, 260, 1.0, None, 0.0, None);
-            assert_eq!(pixels == plain, ambient_burst(Duration::from_millis(time), duration, seed).is_none());
+            assert_eq!(pixels == plain, ambient_burst(Duration::from_millis(time), duration, seed, LightningSettings::default()).is_none());
             assert!(pixels.iter().zip(&plain).all(|(pixel, before)| *before != 0xff00ff || pixel == before));
         }
         let mut remaining = Vec::new();

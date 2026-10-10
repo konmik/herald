@@ -4,7 +4,7 @@ use crate::lightning::PRESETS;
 use crate::profile::{self, STAGES};
 use crate::render::{self, AnnouncementPhase, LightningActivity, Renderer};
 use crate::settings::Settings;
-use crate::state::{display_duration, visual_interference_amount, TRANSITION_DURATION};
+use crate::state::{display_duration, visual_interference_amount};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -70,16 +70,16 @@ fn announcement(assets: &Path, settings: &Settings, preset: &str, options: &Opti
     let mut decoded = 0;
     for cycle in 0..options.cycles {
         let mut elapsed = Duration::ZERO;
-        let video_origin = Duration::from_secs_f64((duration + TRANSITION_DURATION).as_secs_f64() * cycle as f64);
-        while elapsed < duration + TRANSITION_DURATION {
+        let video_origin = Duration::from_secs_f64((duration + settings.lightning.transition_duration()).as_secs_f64() * cycle as f64);
+        while elapsed < duration + settings.lightning.transition_duration() {
             let closing = elapsed >= duration;
             let transition = if closing { elapsed - duration } else { elapsed };
-            let entrance = (!closing && elapsed < TRANSITION_DURATION).then_some(elapsed);
+            let entrance = (!closing && elapsed < settings.lightning.transition_duration()).then_some(elapsed);
             let interference = visual_interference_amount(transition, SEED);
             let activity = if closing { Some(LightningActivity::Closing(transition, SEED)) }
                 else if entrance.is_none() { Some(LightningActivity::Holding(elapsed, duration, SEED)) } else { None };
             let burst = closing || entrance.is_some_and(|time| time >= Duration::from_millis(120))
-                || matches!(activity, Some(LightningActivity::Holding(..))) && render::ambient_active(elapsed, duration, SEED);
+                || matches!(activity, Some(LightningActivity::Holding(..))) && render::ambient_active(elapsed, duration, SEED, settings.lightning);
             let start = Instant::now();
             let before = video.decoded_frames;
             video.advance(video_origin + elapsed)?;
@@ -96,7 +96,7 @@ fn announcement(assets: &Path, settings: &Settings, preset: &str, options: &Opti
             #[cfg(not(target_os = "macos"))]
             let layer = pixels.clone().into_boxed_slice();
             let bytes = unsafe { std::slice::from_raw_parts(layer.as_ptr().cast::<u8>(), layer.len() * 4) };
-            recorder.record("announcement", preset, cycle, elapsed, render::announcement_phase(transition, closing), burst, start, bytes);
+            recorder.record("announcement", preset, cycle, elapsed, render::announcement_phase(transition.mul_f32(settings.lightning.speed), closing), burst, start, bytes);
             elapsed += period;
         }
     }
@@ -108,14 +108,14 @@ fn preview(assets: &Path, settings: &Settings, preset: &str, options: &Options, 
     let mut preview = crate::settings_app::BenchmarkPreview::new(assets, settings, options.scale, SEED)?;
     let period = Duration::from_secs_f64(1.0 / options.fps);
     let cycle_length = preview.cycle();
-    let duration = cycle_length - TRANSITION_DURATION;
+    let duration = cycle_length - settings.lightning.transition_duration();
     let mut at = Duration::ZERO;
     for cycle in 0..options.cycles {
         while at < cycle_length * (cycle as u32 + 1) {
             let start = Instant::now();
             let (image, phase) = preview.frame(if at.is_zero() { Duration::ZERO } else { period });
             let local = at - cycle_length * cycle as u32;
-            let burst = phase != AnnouncementPhase::Holding || render::ambient_active(local, duration, SEED);
+            let burst = phase != AnnouncementPhase::Holding || render::ambient_active(local, duration, SEED, settings.lightning);
             recorder.record("preview", preset, cycle, local, phase, burst, start, image.as_raw());
             at += period;
         }

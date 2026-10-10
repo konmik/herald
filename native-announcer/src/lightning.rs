@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LightningSettings {
+    pub frequency: f32,
+    pub speed: f32,
     pub roughness: f32,
     pub brightness: f32,
     pub core_width: f32,
@@ -62,21 +64,25 @@ pub struct LightningPreset {
 
 pub const PRESETS: [LightningPreset; 4] = [
     LightningPreset { id: "original", label: "Original", settings: LightningSettings {
+        frequency: 3.0, speed: 1.0,
         roughness: 1.0, brightness: 1.0, core_width: 0.72, glow_spread: 6.0, glow_strength: 0.2, stroke_radius: 5.0,
         entrance_fork_spacing: 11, bolt_fork_spacing: 19, outline_fork_spacing: 29,
         halo_color: 0x8097ef, core_color: 0xf7fbff, pulse_profile: PulseProfile::Original,
     } },
     LightningPreset { id: "storm", label: "Storm", settings: LightningSettings {
+        frequency: 3.0, speed: 1.0,
         roughness: 1.7, brightness: 1.0, core_width: 0.85, glow_spread: 8.0, glow_strength: 0.25, stroke_radius: 5.0,
         entrance_fork_spacing: 5, bolt_fork_spacing: 7, outline_fork_spacing: 11,
         halo_color: 0x607fea, core_color: 0xffffff, pulse_profile: PulseProfile::Storm,
     } },
     LightningPreset { id: "electric", label: "Electric", settings: LightningSettings {
+        frequency: 3.0, speed: 1.0,
         roughness: 0.65, brightness: 1.0, core_width: 0.48, glow_spread: 3.5, glow_strength: 0.16, stroke_radius: 5.0,
         entrance_fork_spacing: 17, bolt_fork_spacing: 29, outline_fork_spacing: 43,
         halo_color: 0x36c8ed, core_color: 0xeaffff, pulse_profile: PulseProfile::Electric,
     } },
     LightningPreset { id: "plasma", label: "Plasma", settings: LightningSettings {
+        frequency: 3.0, speed: 1.0,
         roughness: 1.2, brightness: 1.0, core_width: 1.0, glow_spread: 16.0, glow_strength: 0.38, stroke_radius: 9.0,
         entrance_fork_spacing: 11, bolt_fork_spacing: 19, outline_fork_spacing: 29,
         halo_color: 0xb075f5, core_color: 0xfff0ff, pulse_profile: PulseProfile::Plasma,
@@ -88,11 +94,13 @@ impl Default for LightningSettings {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Parameter { Roughness, Brightness, CoreWidth, GlowSpread, GlowStrength }
+pub enum Parameter { Frequency, Speed, Roughness, Brightness, CoreWidth, GlowSpread, GlowStrength }
 
 impl Parameter {
     pub fn get(self, settings: LightningSettings) -> f32 {
         match self {
+            Self::Frequency => settings.frequency,
+            Self::Speed => settings.speed,
             Self::Roughness => settings.roughness,
             Self::Brightness => settings.brightness,
             Self::CoreWidth => settings.core_width,
@@ -103,6 +111,8 @@ impl Parameter {
 
     pub fn set(self, settings: &mut LightningSettings, value: f32) {
         match self {
+            Self::Frequency => settings.frequency = value,
+            Self::Speed => settings.speed = value,
             Self::Roughness => settings.roughness = value,
             Self::Brightness => settings.brightness = value,
             Self::CoreWidth => settings.core_width = value,
@@ -122,7 +132,9 @@ pub struct ParameterSpec {
     pub step: f32,
 }
 
-pub const PARAMETERS: [ParameterSpec; 5] = [
+pub const PARAMETERS: [ParameterSpec; 7] = [
+    ParameterSpec { parameter: Parameter::Frequency, id: "lightning-frequency", label: "Lightning frequency", min: 0.25, max: 6.0, step: 0.05 },
+    ParameterSpec { parameter: Parameter::Speed, id: "lightning-speed", label: "Lightning speed", min: 0.25, max: 4.0, step: 0.05 },
     ParameterSpec { parameter: Parameter::Roughness, id: "lightning-roughness", label: "Roughness", min: 0.25, max: 2.5, step: 0.05 },
     ParameterSpec { parameter: Parameter::Brightness, id: "lightning-brightness", label: "Brightness", min: 0.1, max: 2.0, step: 0.05 },
     ParameterSpec { parameter: Parameter::CoreWidth, id: "lightning-core-width", label: "Core width", min: 0.2, max: 2.0, step: 0.01 },
@@ -135,6 +147,8 @@ impl ParameterSpec {
 }
 
 impl LightningSettings {
+    pub fn transition_duration(self) -> std::time::Duration { crate::state::TRANSITION_DURATION.div_f32(self.speed) }
+
     pub fn preset(self) -> Option<&'static LightningPreset> { PRESETS.iter().find(|preset| preset.settings == self) }
 
     pub fn validate(self) -> Result<(), String> {
@@ -173,6 +187,8 @@ mod tests {
         assert_eq!(serde_json::from_str::<LightningSettings>("{}").unwrap(), PRESETS[0].settings);
         let partial: LightningSettings = serde_json::from_str(r#"{"brightness":1.5}"#).unwrap();
         assert_eq!(partial, LightningSettings { brightness: 1.5, ..LightningSettings::default() });
+        let timing: LightningSettings = serde_json::from_str(r#"{"frequency":1.5,"speed":2.0}"#).unwrap();
+        assert_eq!(timing, LightningSettings { frequency: 1.5, speed: 2.0, ..LightningSettings::default() });
     }
 
     #[test]

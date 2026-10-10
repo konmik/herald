@@ -1,7 +1,6 @@
 use crate::lightning::LightningSettings;
 use crate::render::{announcement_phase, AnnouncementPhase, CardPlacement, EntranceScene, LightningActivity, PhysicalRect, Renderer};
 use crate::settings::Settings;
-use crate::state::TRANSITION_DURATION;
 use crate::video::Video;
 use gpui_kit::{RenderImage, Task, Window};
 use image::{Frame as ImageFrame, RgbaImage};
@@ -205,11 +204,12 @@ impl Playback {
     fn frame(&mut self, delta: Duration) -> Frame {
         self.video_elapsed += delta;
         self.effect_elapsed += delta;
-        let cycle = self.duration + TRANSITION_DURATION;
+        let lightning = self.scene.lightning();
+        let cycle = self.duration + lightning.transition_duration();
         while self.effect_elapsed >= cycle { self.effect_elapsed -= cycle; }
         let closing = self.effect_elapsed >= self.duration;
         let transition = if closing { self.effect_elapsed - self.duration } else { self.effect_elapsed };
-        let entrance = (!closing && self.effect_elapsed < TRANSITION_DURATION).then_some(self.effect_elapsed);
+        let entrance = (!closing && self.effect_elapsed < lightning.transition_duration()).then_some(self.effect_elapsed);
         let _ = self.video.advance(self.video_elapsed);
         let interference = crate::state::visual_interference_amount(transition, self.seed);
         self.renderer.text_interference = if closing || entrance.is_some() { interference } else { 0.0 };
@@ -219,7 +219,7 @@ impl Playback {
         let pixels = self.renderer.draw_scene(&self.scene, Some(self.video.frame()), interference, entrance);
         let origin = if entrance.is_some() { self.scene.canvas } else { self.scene.card.rect };
         Frame { image: crate::profile::time(crate::profile::Stage::Canvas, || compose(&pixels, origin, self.stage)), character_id: self.character_id.clone(),
-            character_name: self.character_name.clone(), phase: announcement_phase(transition, closing) }
+            character_name: self.character_name.clone(), phase: announcement_phase(transition.mul_f32(lightning.speed), closing) }
     }
 }
 
@@ -237,7 +237,7 @@ impl BenchmarkPreview {
         Ok(Self(playback))
     }
 
-    pub(crate) fn cycle(&self) -> Duration { self.0.duration + TRANSITION_DURATION }
+    pub(crate) fn cycle(&self) -> Duration { self.0.duration + self.0.scene.lightning().transition_duration() }
 
     /// Renders the next frame `delta` after the previous one and returns it with its phase.
     pub(crate) fn frame(&mut self, delta: Duration) -> (RgbaImage, AnnouncementPhase) {
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(playback.effect_elapsed, Duration::ZERO);
         let frame = playback.frame(Duration::from_millis(140));
         assert_eq!(frame.phase, AnnouncementPhase::Impact);
-        playback.effect_elapsed = playback.duration + TRANSITION_DURATION - Duration::from_millis(1);
+        playback.effect_elapsed = playback.duration + playback.scene.lightning().transition_duration() - Duration::from_millis(1);
         assert_eq!(playback.frame(Duration::from_millis(2)).phase, AnnouncementPhase::Leader);
         assert_eq!(playback.character_id, identity);
     }

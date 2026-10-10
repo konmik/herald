@@ -1395,8 +1395,8 @@ function Verify-Lightning {
     if ((Get-LightningInfo).character -cne $character) { throw 'A slider edit changed the preview character.' }
     Set-LightningPreset 'Storm'
     if ([math]::Abs((Get-UiaRangeValue (Get-LightningSlider 'roughness')) - 1.7) -gt 0.01) { throw 'Storm did not refresh the numeric controls.' }
-    $draft = [ordered]@{ roughness = 1.5; brightness = 1.4; coreWidth = 1.1; glowSpread = 9.0; glowStrength = 0.3 }
-    $controls = [ordered]@{ roughness = 'roughness'; brightness = 'brightness'; coreWidth = 'core-width'; glowSpread = 'glow-spread'; glowStrength = 'glow-strength' }
+    $draft = [ordered]@{ frequency = 1.5; speed = 2.0; roughness = 1.5; brightness = 1.4; coreWidth = 1.1; glowSpread = 9.0; glowStrength = 0.3 }
+    $controls = [ordered]@{ frequency = 'frequency'; speed = 'speed'; roughness = 'roughness'; brightness = 'brightness'; coreWidth = 'core-width'; glowSpread = 'glow-spread'; glowStrength = 'glow-strength' }
     foreach ($key in $draft.Keys) { Set-UiaRange (Get-LightningSlider $controls[$key]) $draft[$key] ('lightning ' + $key) }
     if ((Get-LightningInfo).character -cne $character) { throw 'Preset or numeric edits changed the bundled character.' }
     if (-not (Bytes-Equal $before (Read-Bytes $script:settingsPath))) { throw 'Lightning draft controls saved settings before Apply.' }
@@ -1433,7 +1433,7 @@ function Verify-Lightning {
     Save-UiaSnapshot 'uia-lightning-compact-before' | Out-Null
     Capture-Window 'lightning-compact-before' | Out-Null
     $compact = @()
-    foreach ($id in @('lightning-preset', 'lightning-roughness', 'lightning-brightness', 'lightning-core-width', 'lightning-glow-spread', 'lightning-glow-strength', 'lightning-replay')) {
+    foreach ($id in @('lightning-preset', 'lightning-frequency', 'lightning-speed', 'lightning-roughness', 'lightning-brightness', 'lightning-core-width', 'lightning-glow-spread', 'lightning-glow-strength', 'lightning-replay')) {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
             Start-Sleep -Milliseconds 60
