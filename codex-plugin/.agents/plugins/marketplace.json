@@ -1,0 +1,12 @@
+{
+  "name": "herald-local",
+  "interface": { "displayName": "Herald" },
+  "plugins": [
+    {
+      "name": "herald",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

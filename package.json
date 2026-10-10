@@ -11,9 +11,9 @@
   "scripts": {
     "check": "pwsh -NoProfile -File development_tools/check.ps1",
     "setup:checks": "pwsh -NoProfile -File development_tools/setup-checks.ps1",
-    "lint": "oxlint opencode-plugin claude-plugin/hooks claude-plugin/tests development_tools --deny-warnings",
+    "lint": "oxlint opencode-plugin codex-plugin claude-plugin/hooks claude-plugin/tests development_tools --deny-warnings",
     "typecheck": "tsc --noEmit && tsc --noEmit -p claude-plugin/tsconfig.json",
-    "test": "bun test ./opencode-plugin/tests",
+    "test": "bun test ./opencode-plugin/tests && bun test ./codex-plugin/tests",
     "test:claude": "claude plugin test ./claude-plugin",
     "test:tools": "pwsh -NoProfile -File development_tools/test-tools.ps1",
     "test:verification": "pwsh -NoProfile -File development_tools/test-verification-process.ps1",
