@@ -322,6 +322,31 @@ fn fold_neighbour_row(row: &mut [f32], neighbour: &[f32]) {
     for x in 0..width - 1 { row[x] = row[x].min(neighbour[x + 1] + 1.414); }
 }
 
+/// The renderer's xorshift32 state after `steps` draws, in O(log steps): the step is linear over GF(2), so it is a
+/// 32x32 bit matrix and powers of two of it are precomputed once.
+fn xorshift_jump(mut state: u32, mut steps: usize) -> u32 {
+    static POWERS: std::sync::OnceLock<Vec<[u32; 32]>> = std::sync::OnceLock::new();
+    fn apply(matrix: &[u32; 32], value: u32) -> u32 {
+        (0..32).filter(|bit| value >> bit & 1 == 1).fold(0, |sum, bit| sum ^ matrix[bit])
+    }
+    let powers = POWERS.get_or_init(|| {
+        let step = |mut value: u32| { value ^= value << 13; value ^= value >> 17; value ^= value << 5; value };
+        let mut powers = vec![std::array::from_fn(|bit| step(1 << bit))];
+        for _ in 1..usize::BITS {
+            let last = *powers.last().unwrap();
+            powers.push(std::array::from_fn(|bit| apply(&last, last[bit])));
+        }
+        powers
+    });
+    let mut power = 0;
+    while steps > 0 {
+        if steps & 1 == 1 { state = apply(&powers[power], state); }
+        steps >>= 1;
+        power += 1;
+    }
+    state
+}
+
 /// Per-pixel constants of the curved portrait screen: where it samples the video and its scanline times vignette shade.
 #[derive(Clone, Copy)]
 struct PortraitTexel { warped: [f32; 2], shade: f32, inside: bool }
@@ -713,19 +738,33 @@ impl Renderer {
             Some(warp) if warp.0 == face_size => warp,
             _ => (face_size, portrait_warp(face_size)),
         };
-        for y in 0..face_size {
+        // Pixels draw from the serial xorshift stream in row order. xorshift is linear, so each row's starting state is
+        // the frame state jumped ahead by the draws of the rows above, and rows are then painted in parallel with
+        // exactly the numbers the serial loop would have used.
+        let columns = face_size.min(width.saturating_sub(face_x));
+        let rows = face_size.min(height.saturating_sub(face_y));
+        if let Some(coverage) = &mut coverage {
+            for y in 0..rows { coverage.pixels[(face_y + y) * width + face_x..][..columns].fill(true); }
+        }
+        let draws = 1 + usize::from(interference > 0.0);
+        let mut row_seeds = Vec::with_capacity(rows);
+        for y in 0..rows {
+            row_seeds.push(self.seed);
+            let inside = warp.1[y * face_size..][..columns].iter().filter(|texel| texel.inside).count();
+            self.seed = xorshift_jump(self.seed, inside * draws);
+        }
+        let texels = &warp.1;
+        let paint_row = |y: usize, row: &mut [u32]| {
+            let mut seed = row_seeds[y];
+            let mut random = || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
             let source_y = y * 128 / face_size;
             let row_offset = row_displacement[source_y];
-            for x in 0..face_size {
-                if face_x + x >= width || face_y + y >= height {
-                    continue;
-                }
-                let index = (face_y + y) * width + face_x + x;
-                buffer[index] = 0x0b0b09;
-                if let Some(coverage) = &mut coverage { coverage.pixels[index] = true; }
-                let PortraitTexel { warped: [warped_x, warped_y], shade, inside } = warp.1[y * face_size + x];
+            for x in 0..columns {
+                let pixel_out = &mut row[face_x + x];
+                *pixel_out = 0x0b0b09;
+                let PortraitTexel { warped: [warped_x, warped_y], shade, inside } = texels[y * face_size + x];
                 if !inside {
-                    buffer[index] = 0x080908;
+                    *pixel_out = 0x080908;
                     continue;
                 }
                 if let Some(frame) = image {
@@ -738,20 +777,20 @@ impl Renderer {
                     }
                     let color =
                         ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32;
-                    buffer[index] = blend(buffer[index], color, pixel[3] as u32);
+                    *pixel_out = blend(*pixel_out, color, pixel[3] as u32);
                 }
-                let background = buffer[index];
+                let background = *pixel_out;
                 let luminance = (((background >> 16) & 255) * 77
                     + ((background >> 8) & 255) * 150
                     + (background & 255) * 29)
                     / 256;
                 let faded = blend(background, luminance * 0x010101, 24);
                 let brightness = shade * picture_flicker;
-                buffer[index] = multiply_color(faded, brightness);
-                let ambient_grain = self.random() & 255;
-                buffer[index] = blend(buffer[index], ambient_grain * 0x010101, 5);
+                *pixel_out = multiply_color(faded, brightness);
+                let ambient_grain = random() & 255;
+                *pixel_out = blend(*pixel_out, ambient_grain * 0x010101, 5);
                 if interference > 0.0 {
-                    let random = self.random();
+                    let random = random();
                     let mut grain =
                         ((random & 255) + ((random >> 8) & 255) + ((random >> 16) & 255)) / 3;
                     if row_snow[source_y] && random & 3 == 0 {
@@ -765,15 +804,19 @@ impl Renderer {
                         interference.clamp(0.0, 1.0) * if row_snow[source_y] { 1.0 } else { 0.12 };
                     let alpha = (strength * flicker * 180.0) as u32;
                     let monochrome = grain * 0x010101;
-                    let background = buffer[index];
+                    let background = *pixel_out;
                     let luminance = (((background >> 16) & 255) * 77
                         + ((background >> 8) & 255) * 150
                         + (background & 255) * 29)
                         / 256;
                     let desaturated = blend(background, luminance * 0x010101, alpha / 2);
-                    buffer[index] = blend(desaturated, monochrome, alpha);
+                    *pixel_out = blend(desaturated, monochrome, alpha);
                 }
             }
+        };
+        if rows > 0 && columns > 0 {
+            use rayon::prelude::*;
+            buffer[face_y * width..(face_y + rows) * width].par_chunks_mut(width).enumerate().for_each(|(y, row)| paint_row(y, row));
         }
         self.portrait_warp = Some(warp);
         if let Some(start) = portrait { profile::add(Stage::Portrait, start); }
@@ -1296,6 +1339,17 @@ fn triangle_contains(x: f32, y: f32, points: [[f32; 2]; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xorshift_jump_matches_repeated_draws() {
+        let mut state = 0x1234_5678_u32;
+        for steps in [0_usize, 1, 2, 3, 31, 32, 255, 256, 1000, 65_537] {
+            let mut serial = state;
+            for _ in 0..steps { serial ^= serial << 13; serial ^= serial >> 17; serial ^= serial << 5; }
+            assert_eq!(xorshift_jump(state, steps), serial, "{steps} steps");
+            state = serial.wrapping_add(0x9e37_79b9);
+        }
+    }
 
     #[test]
     fn distance_field_matches_the_sequential_chamfer_passes() {
