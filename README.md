@@ -22,7 +22,7 @@ See [installation instructions](INSTALLATION.md) for the Windows bundle.
 
 Plugins for **OpenCode**, **Claude** and **Codex** share the announcer and settings. They summarize the existing conversation after background work finishes; subagents stay silent. The Windows installer and `pnpm run deploy:macos` register all three; Codex is registered when `codex` is on PATH.
 
-Codex runs the plugin through lifecycle hooks and skips new or changed plugin hooks until you trust them. After installing, open `/hooks` in Codex once and trust the Herald hooks. Codex hooks cannot see background terminals, prompt typing or subagent expansion, so a Codex announcement does not wait for background jobs and is dismissed only by your next prompt. Codex has no plugin slash commands, so `/herald-status` and `/voice-dismiss` exist only in Claude.
+Codex runs the plugin through lifecycle hooks and skips new or changed plugin hooks until you trust them. After installing, open `/hooks` in Codex once and trust the Herald hooks. Codex hooks cannot see background terminals, prompt typing or subagent expansion, so a Codex announcement does not wait for background jobs and is dismissed only by your next prompt. Codex has no plugin slash commands, so `/voice-dismiss` exists only in Claude.
 
 ## ElevenLabs voices
 

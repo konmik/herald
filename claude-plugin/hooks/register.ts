@@ -135,7 +135,6 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bridge($, { type: 'boot' })
     await startPresence($)
-    await $.command.register({ name: 'herald-status', description: 'Check the voice adviser installation', immediate: true })
     await $.command.register({ name: 'voice-dismiss', description: 'Dismiss queued voice messages for this session or a subagent', argumentHint: '[agent-id]', immediate: true })
     return next(e)
   })
@@ -237,7 +236,6 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  on('command.run', { command: 'herald-status' }, async () => ({ text: 'Herald is loaded; announcements start after one minute and pause during meetings.' }))
   on('command.run', { command: 'voice-dismiss' }, async ($, e) => {
     await discard($, e.args.trim() || undefined)
     return { text: 'Queued voice announcement dismissed.' }
