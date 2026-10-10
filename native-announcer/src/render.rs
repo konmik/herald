@@ -302,12 +302,16 @@ impl LightningPaint {
     fn composite(mut self, buffer: &mut [u32]) {
         self.rasterize();
         let LightningSettings { halo_color: halo, core_color: core, .. } = self.lightning;
-        profile::time(Stage::Composite, || for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
-            if strength == 0.0 { continue; }
-            let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
-            let color = blend(halo, core, (strength.min(1.0).powi(3) * 255.0) as u32);
-            *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
-        });
+        use rayon::prelude::*;
+        let band = RASTER_BAND_ROWS * self.width.max(1);
+        profile::time(Stage::Composite, || buffer.par_chunks_mut(band).zip(self.glow.par_chunks(band)).for_each(|(pixels, strengths)| {
+            for (pixel, &strength) in pixels.iter_mut().zip(strengths) {
+                if strength == 0.0 { continue; }
+                let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
+                let color = blend(halo, core, (strength.min(1.0).powi(3) * 255.0) as u32);
+                *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
+            }
+        }));
     }
 }
 
@@ -983,23 +987,30 @@ impl PaintCoverage {
         glow.rasterize();
         if let Some(removal) = &mut removal { removal.rasterize(); }
         let distance = (consumption > 0.0).then(|| profile::time(Stage::Distance, || removal.as_ref().unwrap_or(&glow).distance_field()));
-        for (index, pixel) in buffer.iter_mut().enumerate() {
-            if !self.pixels[index] { glow.glow[index] = 0.0; continue; }
-            // Before consumption the shade is zero, which leaves the pixel unchanged.
-            if let Some(distance) = &distance {
-                if distance[index] < reach {
-                    *pixel = 0xff00ff;
-                    glow.glow[index] = 0.0;
-                    continue;
+        // Every pixel is independent, so rows are shaded in parallel bands with unchanged per-pixel arithmetic.
+        use rayon::prelude::*;
+        let band = RASTER_BAND_ROWS * width;
+        let covered = &self.pixels;
+        buffer.par_chunks_mut(band).zip(glow.glow.par_chunks_mut(band)).enumerate().for_each(|(chunk, (pixels, strengths))| {
+            for (offset, (pixel, strength)) in pixels.iter_mut().zip(strengths.iter_mut()).enumerate() {
+                let index = chunk * band + offset;
+                if !covered[index] { *strength = 0.0; continue; }
+                // Before consumption the shade is zero, which leaves the pixel unchanged.
+                if let Some(distance) = &distance {
+                    if distance[index] < reach {
+                        *pixel = 0xff00ff;
+                        *strength = 0.0;
+                        continue;
+                    }
+                    let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
+                    *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
+                    let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
+                    let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
+                    *strength = strength.max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
                 }
-                let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
-                *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
-                let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
-                let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
-                glow.glow[index] = glow.glow[index].max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
+                *strength *= if progress < 0.88 { intensity } else { 0.0 };
             }
-            glow.glow[index] *= if progress < 0.88 { intensity } else { 0.0 };
-        }
+        });
         glow.composite(buffer);
     }
 
