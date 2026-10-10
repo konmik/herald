@@ -1,7 +1,7 @@
-// Build a release Herald payload, install Herald.app and Herald Settings.app, register the Claude and OpenCode plugins and restart the announcer.
+// Build a release Herald payload, install Herald.app and Herald Settings.app, register the Claude, Codex and OpenCode plugins and restart the announcer.
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { copyFile, cp, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 export const BUNDLE_ID = 'io.github.konmik.herald'
 export const PLUGIN_ID = 'herald@herald-local'
+export const CODEX_PLUGIN_FILES = ['.codex-plugin/plugin.json', '.agents/plugins/marketplace.json', 'hooks/hooks.json', 'hooks/herald.mjs']
 // Herald.app runs the announcer outside the Dock; Herald Settings.app is the Settings entry, like the Linux menu item.
 export const APPS = [
   { name: 'Herald', identifier: BUNDLE_ID, background: true, payload: true },
@@ -56,6 +57,7 @@ export function parseArguments(argv) {
     if (argument === '--applications') options.applications = resolve(value())
     else if (argument === '--claude-config') options.claudeConfig = resolve(value())
     else if (argument === '--opencode-config') options.openCodeConfig = resolve(value())
+    else if (argument === '--codex-home') options.codexHome = resolve(value())
     else if (argument === '--skip-checks') options.checks = false
     else if (argument === '--skip-host-registration') options.hosts = false
     else if (argument === '--no-start') options.start = false
@@ -148,6 +150,10 @@ async function buildPayload(stage, binary, arch) {
     await mkdir(dirname(join(payload, 'claude-plugin', name)), { recursive: true })
     await copyFile(join(root, 'claude-plugin', name), join(payload, 'claude-plugin', name))
   }
+  for (const name of CODEX_PLUGIN_FILES) {
+    await mkdir(dirname(join(payload, 'codex-plugin', name)), { recursive: true })
+    await copyFile(join(root, 'codex-plugin', name), join(payload, 'codex-plugin', name))
+  }
   const runtime = join(payload, 'native-announcer')
   await mkdir(join(runtime, 'bin'), { recursive: true })
   await copyFile(binary, join(runtime, 'bin', `herald-darwin-${arch}`))
@@ -172,10 +178,10 @@ async function buildPayload(stage, binary, arch) {
   return { payload, version: pkg.version }
 }
 
-/** Sign the plugin runtimes, which the app bundle later seals as resources, then copy the Claude runtime and write the manifest. */
+/** Sign the plugin runtimes, which the app bundle later seals as resources, then copy the Claude and Codex runtimes and write the manifest. */
 async function sealPayload(payload, arch, identifier) {
   output('codesign', ['--force', '--sign', '-', '--identifier', `${identifier}.runtime`, join(payload, 'native-announcer/bin', `herald-darwin-${arch}`)])
-  await cp(join(payload, 'native-announcer'), join(payload, 'claude-plugin/native-announcer'), { recursive: true })
+  for (const host of ['claude-plugin', 'codex-plugin']) await cp(join(payload, 'native-announcer'), join(payload, host, 'native-announcer'), { recursive: true })
   const pkg = JSON.parse(await readFile(join(payload, 'package.json'), 'utf8'))
   const listed = []
   for (const path of await files(payload)) {
@@ -196,11 +202,11 @@ export async function verifyPayload(payload, arch) {
     if (/\/resources\/tts\//.test(file.path)) throw new Error('Offline voice must be installed from Settings, not included in the bundle')
     if (await sha256(join(payload, file.path)) !== file.sha256) throw new Error(`Payload verification failed: ${file.path}`)
   }
-  for (const required of ['register-opencode.mjs', 'package.json', 'index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/.claude-plugin/packaged.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', `native-announcer/bin/herald-darwin-${arch}`, `claude-plugin/native-announcer/bin/herald-darwin-${arch}`]) {
+  for (const required of ['register-opencode.mjs', 'package.json', 'index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/.claude-plugin/packaged.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', ...CODEX_PLUGIN_FILES.map(name => `codex-plugin/${name}`), `native-announcer/bin/herald-darwin-${arch}`, `claude-plugin/native-announcer/bin/herald-darwin-${arch}`, `codex-plugin/native-announcer/bin/herald-darwin-${arch}`]) {
     if (!paths.includes(required)) throw new Error(`Required runtime file missing: ${required}`)
   }
   if (paths.includes('claude-plugin/.claude-plugin/development.json')) throw new Error('Development fallback markers cannot be installed')
-  for (const prefix of ['native-announcer', 'claude-plugin/native-announcer']) {
+  for (const prefix of ['native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer']) {
     const characters = JSON.parse(await readFile(join(payload, prefix, 'resources/characters.json'), 'utf8'))
     if (!Object.keys(characters).length) throw new Error('Character library is empty')
     for (const character of Object.values(characters)) {
@@ -367,6 +373,31 @@ async function registerClaude(payload, config, explicit) {
   return { changes, installations: installations.map(entry => entry.installPath) }
 }
 
+function codexState(env) {
+  const plugins = JSON.parse(output('codex', ['plugin', 'list', '--available', '--json'], { env }))
+  const entry = [...plugins.installed, ...plugins.available].find(plugin => plugin.pluginId === PLUGIN_ID)
+  return { source: entry?.marketplaceSource?.source, installed: Boolean(entry?.installed), enabled: Boolean(entry?.enabled) }
+}
+
+async function registerCodex(payload, codexHome, explicit) {
+  const source = join(payload, 'codex-plugin')
+  const env = explicit ? { ...process.env, CODEX_HOME: codexHome } : process.env
+  const before = codexState(env)
+  const changes = []
+  if (before.source && await realpath(before.source).catch(() => before.source) !== await realpath(source)) {
+    if ((await readJson(join(before.source, '.codex-plugin/plugin.json')))?.name !== 'herald') throw new Error(`Cannot confirm ownership of the herald-local Codex marketplace at ${before.source}`)
+    run('codex', ['plugin', 'marketplace', 'remove', 'herald-local'], { env })
+    changes.push(`removed marketplace herald-local -> ${before.source}`)
+  }
+  // Both commands edit config.toml in place and are idempotent; `plugin add` also refreshes the cached copy.
+  run('codex', ['plugin', 'marketplace', 'add', source], { env })
+  run('codex', ['plugin', 'add', PLUGIN_ID], { env })
+  changes.push(`installed ${PLUGIN_ID} from ${source}`)
+  const after = codexState(env)
+  if (!after.installed || !after.enabled) throw new Error('Codex did not report an enabled herald plugin')
+  return { changes, hooks: 'Codex skips new or changed plugin hooks until they are trusted: open /hooks in Codex once and trust the Herald hooks.' }
+}
+
 async function registerOpenCode(payload, configDirectory, reload) {
   const existing = ['opencode.json', 'opencode.jsonc'].map(name => join(configDirectory, name)).filter(path => existsSync(path))
   const configs = existing.length ? existing : [join(configDirectory, 'opencode.jsonc')]
@@ -390,10 +421,12 @@ async function main() {
   const arch = macArch()
   const claudeConfig = options.claudeConfig ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
   const openCodeConfig = options.openCodeConfig ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode')
+  const codexHome = options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex')
   const claude = options.hosts && hasCommand('claude')
+  const codex = options.hosts && hasCommand('codex')
   const openCode = options.hosts && hasCommand('opencode')
   if (options.dryRun) {
-    console.log(JSON.stringify({ applications: APPS.map(app => join(options.applications, `${app.name}.app`)), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, openCodeConfig: openCode ? openCodeConfig : null, checks: options.checks, start: options.start }, null, 2))
+    console.log(JSON.stringify({ applications: APPS.map(app => join(options.applications, `${app.name}.app`)), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, codexHome: codex ? codexHome : null, openCodeConfig: openCode ? openCodeConfig : null, checks: options.checks, start: options.start }, null, 2))
     return
   }
   if (options.checks) {
@@ -404,7 +437,7 @@ async function main() {
   const binary = join(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'native-announcer/target'), 'release/herald')
   const stage = join(root, 'temp/bundles', `.herald-stage-macos-${randomUUID()}`)
   await mkdir(stage, { recursive: true })
-  const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', openCode: 'skipped', backups: null }
+  const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', codex: 'skipped', openCode: 'skipped', backups: null }
   try {
     const { payload, version } = await buildPayload(stage, binary, arch)
     await sealPayload(payload, arch, BUNDLE_ID)
@@ -414,18 +447,19 @@ async function main() {
     for (const app of APPS) bundles.push([app, await makeApplication(join(stage, 'apps'), app, { binary, icon, payload, version })])
     const installedPayload = join(options.applications, 'Herald.app/Contents/Resources/herald')
     const previous = claude ? await claudeState(claudeConfig) : { installations: [] }
-    const owned = [join(root, 'native-announcer'), join(root, 'claude-plugin'), ...APPS.map(app => join(options.applications, `${app.name}.app`)), ...(previous.source ? [previous.source, dirname(previous.source)] : []), ...previous.installations.map(entry => entry.installPath)]
+    const owned = [join(root, 'native-announcer'), join(root, 'claude-plugin'), ...APPS.map(app => join(options.applications, `${app.name}.app`)), ...(previous.source ? [previous.source, dirname(previous.source)] : []), ...previous.installations.map(entry => entry.installPath), join(codexHome, 'plugins/cache/herald-local')]
     summary.stopped = await stopOwnedAnnouncers(owned)
     for (const [app, bundle] of bundles) summary.applications.push(await installApplication(bundle, options.applications, app))
     await verifyPayload(installedPayload, arch)
     summary.payload = installedPayload
     if (options.hosts) {
       const backupDirectory = join(root, 'temp/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
-      const watched = [...['settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json'].map(name => join(claudeConfig, name)), ...(openCode ? ['opencode.json', 'opencode.jsonc'].map(name => join(openCodeConfig, name)) : [])]
+      const watched = [...['settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json'].map(name => join(claudeConfig, name)), ...(codex ? [join(codexHome, 'config.toml')] : []), ...(openCode ? ['opencode.json', 'opencode.jsonc'].map(name => join(openCodeConfig, name)) : [])]
       const snapshots = await snapshot(watched, backupDirectory)
       summary.backups = backupDirectory
       try {
         summary.claude = claude ? await registerClaude(installedPayload, claudeConfig, Boolean(options.claudeConfig || process.env.CLAUDE_CONFIG_DIR)) : 'skipped: claude is not on PATH'
+        summary.codex = codex ? await registerCodex(installedPayload, codexHome, Boolean(options.codexHome || process.env.CODEX_HOME)) : 'skipped: codex is not on PATH'
         summary.openCode = openCode ? await registerOpenCode(installedPayload, openCodeConfig, options.reloadOpenCode) : 'skipped: opencode is not on PATH'
       } catch (error) {
         await restore(snapshots)
