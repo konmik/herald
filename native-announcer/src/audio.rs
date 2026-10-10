@@ -211,7 +211,8 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
         let mut blocks: Vec<_> = (0..2).map(|_| Box::new(Block { header: WAVEHDR::default(), samples: vec![0; sample_rate as usize / 25], prepared: false })).collect();
         let size = std::mem::size_of::<WAVEHDR>() as u32;
         let mut progress = PlaybackProgress::new(samples.len(), sample_rate, start.as_ref().map(|start| start.silence), std::time::Instant::now());
-        if let Some(start) = &start { crate::state::timing(format!("warmup_start seconds={}", start.silence.as_secs())); }
+        let warming = start.as_ref().is_some_and(|start| !start.silence.is_zero());
+        if warming { crate::state::timing(format!("warmup_start seconds={}", start.as_ref().unwrap().silence.as_secs())); }
         while !cancelled.load(Ordering::Relaxed) {
             for block in &mut blocks {
                 if cancelled.load(Ordering::Relaxed) { break; }
@@ -235,7 +236,7 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
             if result != 0 || cancelled.load(Ordering::Relaxed) { break; }
             progress.drained(blocks.iter().any(|block| block.prepared), samples.len());
             if progress.phase == PlaybackPhase::Activation {
-                crate::state::timing("warmup_end");
+                if warming { crate::state::timing("warmup_end"); }
                 let allowed = start.take().is_some_and(|start| (start.activate)()) && !cancelled.load(Ordering::Relaxed);
                 progress.activate(allowed, std::time::Instant::now());
             }

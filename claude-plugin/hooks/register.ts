@@ -116,6 +116,8 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
     pending.delete(key)
     return
   }
+  await bridge($, { type: 'get-ready', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at })
+  if (pending.get(key) !== token) return
   const reply = await $.model.fork({ prompt: profile.prompt })
   if (pending.get(key) !== token) return
   pending.delete(key)
