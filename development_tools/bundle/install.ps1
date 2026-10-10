@@ -4,6 +4,7 @@ param(
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'Programs/herald'),
     [string]$ClaudeConfigDirectory,
     [string]$OpenCodeConfigDirectory,
+    [string]$CodexHome,
     [string]$ProgramsDirectory = [Environment]::GetFolderPath('Programs'),
     [switch]$SkipHostRegistration,
     [switch]$NoStart,
@@ -12,6 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PluginId = 'herald@herald-local'
+$CodexPluginFiles = @('.codex-plugin/plugin.json', '.agents/plugins/marketplace.json', 'hooks/hooks.json', 'hooks/herald.mjs')
 . "$PSScriptRoot/shortcut.ps1"
 
 function Assert-NoLinks {
@@ -71,7 +73,7 @@ function Test-Bundle {
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe")) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-win32-$architecture.exe") + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
     }
     foreach ($obsolete in @('claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
@@ -79,7 +81,7 @@ function Test-Bundle {
     }
     if (-not $paths.Contains('shortcut.ps1')) { throw 'Required runtime file missing: shortcut.ps1' }
     foreach ($entry in @('index.ts', 'tui.ts')) { if (-not $paths.Contains($entry)) { throw "Required OpenCode entry missing: $entry" } }
-    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
+    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer')) {
         foreach ($name in @('characters.json')) {
             if (-not $paths.Contains("$prefix/resources/$name")) { throw "Required runtime asset missing: $prefix/resources/$name" }
         }
@@ -96,6 +98,9 @@ function Test-Bundle {
     $package = Get-Content -LiteralPath (Join-Path $Directory 'package.json') -Raw | ConvertFrom-Json -AsHashtable
     $plugin = Get-Content -LiteralPath (Join-Path $Directory 'claude-plugin/.claude-plugin/plugin.json') -Raw | ConvertFrom-Json
     $marketplace = Get-Content -LiteralPath (Join-Path $Directory 'claude-plugin/.claude-plugin/marketplace.json') -Raw | ConvertFrom-Json
+    $codexPlugin = Get-Content -LiteralPath (Join-Path $Directory 'codex-plugin/.codex-plugin/plugin.json') -Raw | ConvertFrom-Json
+    $codexMarketplace = Get-Content -LiteralPath (Join-Path $Directory 'codex-plugin/.agents/plugins/marketplace.json') -Raw | ConvertFrom-Json
+    if ($codexPlugin.name -ne $manifest.name -or $codexPlugin.version -ne $manifest.version -or $codexMarketplace.name -ne 'herald-local') { throw 'Codex plugin identity does not match the bundle' }
     if ($package.name -ne $manifest.name -or $package.version -ne $manifest.version -or $package.exports['.'] -ne './opencode-plugin/index.js' -or $package.exports['./tui'] -ne './opencode-plugin/tui.js' -or $plugin.name -ne $manifest.name -or $plugin.version -ne $manifest.version -or $marketplace.name -ne 'herald-local') { throw 'Runtime package identity does not match the bundle' }
     if ($package.dependencies.Count) { throw 'Plugin runtime dependencies must be compiled into the bundle' }
     if ($actual.Count -ne $paths.Count + 1) { throw 'Bundle contains unlisted files' }
@@ -251,6 +256,7 @@ function Get-OwnedAnnouncerDirectories {
         Assert-ClaudeInstallation $installation.installPath $ConfigDirectory
         Join-Path $installation.installPath 'native-announcer'
     }
+    if ($CodexHome) { Join-Path $CodexHome 'plugins/cache/herald-local/herald' }
 }
 
 function Stop-OwnedAnnouncers {
@@ -413,9 +419,35 @@ function Register-ClaudeBundle {
     Enable-ClaudePlugin
 }
 
+function Get-CodexPlugin {
+    $plugins = (& codex plugin list --available --json) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect Codex plugins' }
+    @(@($plugins.installed) + @($plugins.available) | Where-Object { $_.pluginId -eq $PluginId }) | Select-Object -First 1
+}
+
+function Register-CodexBundle {
+    param([string]$App)
+    if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { Write-Warning 'Codex is not on PATH; skipping the Codex plugin.'; return }
+    $source = [IO.Path]::GetFullPath((Join-Path $App 'codex-plugin'))
+    $existing = Get-CodexPlugin
+    $oldSource = $existing.marketplaceSource.source
+    if ($oldSource -and [IO.Path]::GetFullPath($oldSource) -ne $source) {
+        $manifest = Join-Path $oldSource '.codex-plugin/plugin.json'
+        if (-not (Test-Path -LiteralPath $manifest) -or (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name -ne 'herald') { throw 'Cannot confirm ownership of the existing herald-local Codex marketplace' }
+        Invoke-Checked 'codex' @('plugin', 'marketplace', 'remove', 'herald-local')
+    }
+    # Both commands edit config.toml in place and are idempotent; `plugin add` refreshes the cached copy.
+    Invoke-Checked 'codex' @('plugin', 'marketplace', 'add', $source)
+    Invoke-Checked 'codex' @('plugin', 'add', $PluginId)
+    $installed = Get-CodexPlugin
+    if (-not $installed.installed -or -not $installed.enabled) { throw 'Codex did not report an enabled herald plugin' }
+    Write-Warning 'Codex skips new or changed plugin hooks until they are trusted: open /hooks in Codex once and trust the Herald hooks.'
+}
+
 function Register-BundleHosts {
-    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand)
+    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand, [string]$CodexHome)
     $files = @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ }
+    if ($CodexHome) { $files += Join-Path $CodexHome 'config.toml' }
     $files += Join-Path $ProgramsDirectory 'Herald settings.lnk'
     $snapshots = @($files | ForEach-Object {
         Assert-NoLinks $_
@@ -427,6 +459,7 @@ function Register-BundleHosts {
         Register-OpenCodeBundle $App $Configs {
             if ($BeforeRegistration) { & $BeforeRegistration }
             Register-ClaudeBundle $App $ClaudeConfigDirectory -Backups $backups
+            if ($CodexHome) { Register-CodexBundle $App }
         } {
             Install-SettingsShortcut $Binary $ProgramsDirectory
             if ($AfterRegistration) { & $AfterRegistration }
@@ -470,6 +503,7 @@ $manifest = Test-Bundle $app
 $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
 if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
+    if (-not $CodexHome) { $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }
     Get-Command claude -ErrorAction Stop | Out-Null
     $openCodeCommand = @(Get-Command opencode -CommandType Application,ExternalScript -ErrorAction Stop | Select-Object -First 1).Source
@@ -488,8 +522,8 @@ if (-not $SkipHostRegistration) {
             $script:stopped = @(Stop-OwnedAnnouncers @(Get-OwnedAnnouncerDirectories $ClaudeConfigDirectory))
         } {
             if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
-            else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude sessions to load the installed hooks.' }
-        } -OpenCodeCommand $openCodeCommand
+            else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude and Codex sessions to load the installed hooks.' }
+        } -OpenCodeCommand $openCodeCommand -CodexHome $CodexHome
     } catch {
         foreach ($previous in $stopped) {
             if (Test-Path -LiteralPath $previous.binary) {
