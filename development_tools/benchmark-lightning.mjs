@@ -1,7 +1,7 @@
 // Benchmark every Lightning frame: release build, repeated alternating runs, per-phase percentiles, a stage breakdown from
 // a separate profiled run, output digests that must not change, and an optional live jitter run of the real announcer.
 // Usage: node development_tools/benchmark-lightning.mjs [--runs 5] [--cycles 3] [--scale 2] [--fps 120] [--live] [--out dir]
-import { spawnSync, spawn } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
