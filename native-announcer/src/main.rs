@@ -11,6 +11,8 @@ mod history;
 mod lightning;
 #[cfg(target_os = "linux")]
 mod linux_surface;
+#[cfg(target_os = "macos")]
+mod macos_surface;
 mod platform;
 mod private;
 mod render;
@@ -300,6 +302,8 @@ fn run() -> Result<(), String> {
         use tao::platform::unix::WindowBuilderExtUnix;
         builder.with_transparent(true).with_transparent_draw(false).with_default_vbox(false)
     };
+    #[cfg(target_os = "macos")]
+    let builder = builder.with_transparent(true);
     let window = Rc::new(
         builder
             .build(&event_loop)
@@ -312,11 +316,13 @@ fn run() -> Result<(), String> {
         window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
         window.gtk_window().realize();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     let context = softbuffer::Context::new(window.clone()).map_err(|e| e.to_string())?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let mut surface = macos_surface::Surface::new(&window)?;
     #[cfg(target_os = "linux")]
     let mut surface = linux_surface::Surface::new(window.clone());
     #[cfg(target_os = "linux")]
