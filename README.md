@@ -12,7 +12,7 @@ Recorded replay with Mad Hatter and his configured voice.
 
 ## How it works
 
-Works with OpenCode and Claude. Tasks lasting at least one minute trigger an announcement when they finish. It waits for background jobs and stays above other windows without taking focus.
+Works with OpenCode, Claude and Codex. Tasks lasting at least one minute trigger an announcement when they finish. It waits for background jobs and stays above other windows without taking focus.
 
 Speech is muted during meetings. Quiet hours default to 22:00–08:00 and can be changed or disabled.
 
@@ -20,7 +20,9 @@ See [installation instructions](INSTALLATION.md) for the Windows bundle.
 
 ## Plugins
 
-Plugins for **OpenCode** and **Claude** share the announcer and settings. They summarize the existing conversation after background work finishes; subagents stay silent. The Windows installer registers both.
+Plugins for **OpenCode**, **Claude** and **Codex** share the announcer and settings. They summarize the existing conversation after background work finishes; subagents stay silent. The Windows installer and `pnpm run deploy:macos` register all three; Codex is registered when `codex` is on PATH.
+
+Codex runs the plugin through lifecycle hooks and skips new or changed plugin hooks until you trust them. After installing, open `/hooks` in Codex once and trust the Herald hooks. Codex hooks cannot see background terminals, prompt typing or subagent expansion, so a Codex announcement does not wait for background jobs and is dismissed only by your next prompt. Codex has no plugin slash commands, so `/herald-status` and `/voice-dismiss` exist only in Claude.
 
 ## ElevenLabs voices
 

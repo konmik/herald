@@ -45,6 +45,8 @@ Preserve existing configuration fields and other plugins. Start a new host sessi
 
 For Claude, install a copy of `claude-plugin` with `native-announcer/bin` and `native-announcer/resources` inside that copy. Register the copy with `claude plugin marketplace add <copy-path> --scope user`, then install `herald@herald-local` with `claude plugin install --scope user`. A marketplace cache copy cannot use the checkout's sibling runtime directory.
 
+For Codex, do the same with a copy of `codex-plugin`: put `native-announcer/bin` and `native-announcer/resources` inside the copy, then run `codex plugin marketplace add <copy-path>` and `codex plugin add herald@herald-local`. Both commands edit `~/.codex/config.toml` in place. Start Codex, open `/hooks` and trust the Herald hooks; Codex skips untrusted plugin hooks. Helper output goes to `PLUGIN_DATA/helpers.log` inside the Codex plugin data directory.
+
 On Omarchy, add this rule to `~/.config/hypr/hyprland.lua`:
 
 ```lua
@@ -100,7 +102,7 @@ Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Open
 
 The Start menu shortcut uses Windows' native Unicode shell-link interface, including when checking an existing shortcut's ownership. PowerShell 7 compiles this helper internally; no separate compiler installation is needed. Local speech uses Windows short filenames for non-ASCII paths. If the volume does not provide those names, install into an ASCII path.
 
-The complete payload is copied to `%LOCALAPPDATA%/Programs/herald/versions/<version>-<arch>-<payloadHash>`. Claude's local marketplace points there and its cache receives a separate physical runtime copy. Node is not bundled; host registration requires the installed Claude and OpenCode CLIs. OpenCode and the Start menu shortcut point to that installed version. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/herald`.
+The complete payload is copied to `%LOCALAPPDATA%/Programs/herald/versions/<version>-<arch>-<payloadHash>`. Claude's local marketplace points there and its cache receives a separate physical runtime copy. When `codex` is on PATH, the Codex `herald-local` marketplace points to the installed `codex-plugin` and `codex plugin add` copies it into the Codex plugin cache. Node is not bundled; host registration requires the installed Claude and OpenCode CLIs. OpenCode and the Start menu shortcut point to that installed version. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/herald`.
 
 Existing owned Claude marketplace registrations migrate with `claude plugin marketplace add` from the installed source. This changes the source without removing installed plugins. Existing cache junctions are replaced without touching their targets. OpenCode migration recognizes local packages by their package name, exports and plugin ID, preserving unrelated entries, comments and options. Keep the old registered package available until migration completes; unknown registrations are not removed.
 
@@ -110,10 +112,10 @@ For a copy-only test installation:
 pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/opencode/herald-test" -SkipHostRegistration -NoStart
 ```
 
-`-ClaudeConfigDirectory`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
+`-ClaudeConfigDirectory`, `-CodexHome`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
 
-Host registration keeps the previous Claude cache until OpenCode registration and the shortcut have succeeded. A registration failure restores the previous cache, Claude registry and settings files, OpenCode configuration and shortcut. A newly created OpenCode config is removed on rollback. The verified versioned payload remains available for retry.
+Host registration keeps the previous Claude cache until OpenCode registration and the shortcut have succeeded. A registration failure restores the previous cache, Claude registry and settings files, Codex `config.toml`, OpenCode configuration and shortcut. A newly created OpenCode config is removed on rollback. The verified versioned payload remains available for retry.
 
-Restart Claude sessions after installation. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
+Restart Claude and Codex sessions after installation, and trust the Herald hooks once in Codex's `/hooks`. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
 
 `pnpm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.
