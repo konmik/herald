@@ -228,21 +228,79 @@ struct LightningPaint {
     glow: Vec<f32>,
     lightning: LightningSettings,
     strokes: Vec<Stroke>,
+    /// Glow is still all zero, so a rasterization depends only on the size, settings and strokes.
+    fresh: bool,
+    /// Identifies this paint as the owner of the cached rasterization while its glow is that result.
+    cached: Option<u64>,
+}
+
+/// Everything a rasterization of a fresh paint depends on, bit for bit.
+#[derive(PartialEq)]
+struct RasterKey { width: usize, height: usize, lightning: String, strokes: Vec<u32> }
+
+impl RasterKey {
+    fn new(paint: &LightningPaint) -> Self {
+        let strokes = paint.strokes.iter().flat_map(|stroke| [stroke.from[0], stroke.from[1], stroke.to[0], stroke.to[1], stroke.scale, stroke.taper, stroke.intensity])
+            .map(f32::to_bits).collect();
+        Self { width: paint.width, height: paint.height, lightning: format!("{:?}", paint.lightning), strokes }
+    }
+}
+
+/// The last fresh rasterization on this thread and, once asked for, its distance field. Once the exit's bolts are fully
+/// revealed they are the same strokes every frame (fixed seed, geometry and settings; the pulse is applied afterwards),
+/// so later frames reuse the glow and distance instead of repainting thousands of strokes.
+struct RasterCache { key: RasterKey, owner: u64, glow: Vec<f32>, distance: Option<Vec<f32>> }
+
+thread_local! {
+    static RASTER_CACHE: std::cell::RefCell<Option<RasterCache>> = const { std::cell::RefCell::new(None) };
+}
+
+fn next_raster_owner() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl LightningPaint {
     fn new(width: usize, height: usize, lightning: LightningSettings) -> Self {
-        Self { width, height, glow: vec![0.0; width * height], lightning, strokes: Vec::new() }
+        Self { width, height, glow: vec![0.0; width * height], lightning, strokes: Vec::new(), fresh: true, cached: None }
     }
 
-    /// Applies the queued strokes. A pixel keeps the maximum strength of all strokes, which does not depend on order,
-    /// so bands of rows are rasterized in parallel with the same per-pixel arithmetic as one sequential pass.
+    /// Applies the queued strokes, reusing this thread's previous result when a fresh paint queues identical strokes.
     fn rasterize(&mut self) {
         if self.strokes.is_empty() { return; }
+        let fresh = std::mem::replace(&mut self.fresh, false);
+        self.cached = None;
+        if !fresh {
+            let strokes = std::mem::take(&mut self.strokes);
+            self.paint_strokes(strokes);
+            return;
+        }
+        let key = RasterKey::new(self);
+        let owner = next_raster_owner();
+        let hit = RASTER_CACHE.with(|cache| match cache.borrow_mut().as_mut() {
+            Some(cache) if cache.key == key && cache.glow.len() == self.glow.len() => {
+                self.glow.copy_from_slice(&cache.glow);
+                cache.owner = owner;
+                true
+            }
+            _ => false,
+        });
+        let strokes = std::mem::take(&mut self.strokes);
+        if !hit {
+            self.paint_strokes(strokes);
+            let glow = self.glow.clone();
+            RASTER_CACHE.with(|cache| *cache.borrow_mut() = Some(RasterCache { key, owner, glow, distance: None }));
+        }
+        self.cached = Some(owner);
+    }
+
+    /// Paints strokes into the glow. A pixel keeps the maximum strength of all strokes, which does not depend on order,
+    /// so bands of rows are rasterized in parallel with the same per-pixel arithmetic as one sequential pass.
+    fn paint_strokes(&mut self, strokes: Vec<Stroke>) {
         use rayon::prelude::*;
         let lightning = self.lightning;
-        let bounds = StrengthBounds::new(lightning, &self.strokes);
-        let strokes: Vec<(Stroke, StrokeReach)> = std::mem::take(&mut self.strokes).into_iter()
+        let bounds = StrengthBounds::new(lightning, &strokes);
+        let strokes: Vec<(Stroke, StrokeReach)> = strokes.into_iter()
             .filter_map(|stroke| stroke_reach(lightning, &bounds, stroke).map(|reach| (stroke, reach))).collect();
         let (width, height, lightning) = (self.width, self.height, self.lightning);
         if width == 0 || height == 0 { return; }
@@ -299,6 +357,18 @@ impl LightningPaint {
     /// Two-pass chamfer distance. The neighbour rows are folded in first as a branch-free pass the compiler vectorizes, then
     /// the in-row neighbour runs as the only serial chain. min is exact, so the result matches the textbook pass order bit for bit.
     fn distance_field(&self) -> Vec<f32> {
+        if let Some(owner) = self.cached {
+            let cached = RASTER_CACHE.with(|cache| cache.borrow().as_ref().filter(|cache| cache.owner == owner).and_then(|cache| cache.distance.clone()));
+            if let Some(distance) = cached { return distance; }
+        }
+        let distance = self.compute_distance_field();
+        if let Some(owner) = self.cached {
+            RASTER_CACHE.with(|cache| if let Some(cache) = cache.borrow_mut().as_mut().filter(|cache| cache.owner == owner) { cache.distance = Some(distance.clone()); });
+        }
+        distance
+    }
+
+    fn compute_distance_field(&self) -> Vec<f32> {
         let (width, height) = (self.width, self.height);
         let mut distance: Vec<f32> = self.glow.iter().map(|strength| if *strength > 0.25 { 0.0 } else { 10000.0 }).collect();
         if width == 0 || height == 0 { return distance; }
