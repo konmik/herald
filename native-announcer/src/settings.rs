@@ -241,7 +241,7 @@ impl Store {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub fn parse_time(text: &str, allow_midnight_end: bool) -> Result<u32, String> {
     let (hour, minute) = text.trim().split_once(':').ok_or("Use HH:MM for times.")?;
     let hour = hour.parse::<u32>().map_err(|_| "Use HH:MM for times.")?;
@@ -252,7 +252,7 @@ pub fn parse_time(text: &str, allow_midnight_end: bool) -> Result<u32, String> {
     Ok(hour * 60 + minute)
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub fn format_time(minute: u32) -> String { format!("{:02}:{:02}", minute / 60, minute % 60) }
 
 pub fn volume_gain(volume: u16) -> f64 {
