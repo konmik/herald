@@ -239,13 +239,14 @@ impl LightningPaint {
         if self.strokes.is_empty() { return; }
         use rayon::prelude::*;
         let lightning = self.lightning;
-        let strokes: Vec<(Stroke, StrokeReach)> = std::mem::take(&mut self.strokes).into_par_iter()
-            .filter_map(|stroke| stroke_reach(lightning, stroke).map(|reach| (stroke, reach))).collect();
+        let bounds = StrengthBounds::new(lightning, &self.strokes);
+        let strokes: Vec<(Stroke, StrokeReach)> = std::mem::take(&mut self.strokes).into_iter()
+            .filter_map(|stroke| stroke_reach(lightning, &bounds, stroke).map(|reach| (stroke, reach))).collect();
         let (width, height, lightning) = (self.width, self.height, self.lightning);
         self.glow.par_chunks_mut(RASTER_BAND_ROWS * width).enumerate().for_each(|(band, glow)| {
             let top = band * RASTER_BAND_ROWS;
             let rows = top..(top + RASTER_BAND_ROWS).min(height);
-            for (stroke, reach) in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, *stroke, reach); }
+            for (stroke, reach) in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, &bounds, *stroke, reach); }
         });
     }
 
@@ -886,37 +887,64 @@ fn stroke_strength(lightning: LightningSettings, stroke: Stroke, distance: f32) 
     (1.3 * (-distance.powi(2) / (core * taper).powi(2)).exp() + halo_strength * (-distance.powi(2) / (halo * taper)).exp()) * intensity
 }
 
-/// Number of distance bins in a stroke's strength bound table.
-const STRENGTH_BINS: usize = 32;
+/// Number of distance bins in the strength bound tables.
+const STRENGTH_BINS: usize = 64;
+/// Taper classes the bound tables are built for; a stroke uses the next wider class.
+const TAPER_CLASSES: usize = 64;
 
-/// Where a stroke can still change the glow. Strength only falls with distance (each term is a decreasing exp of the
-/// squared distance), so `bound[k]`, the strength at distance k * step, caps every pixel at distance k * step or more.
+/// Upper bounds of unit-intensity stroke strength by distance bin, shared by all strokes of one rasterization.
+/// Strength only falls with distance and only grows with taper (both exp terms widen), so `unit[q][k]`, the strength
+/// at distance k * step for the taper rounded up to class q, caps every pixel at distance k * step or more of any stroke
+/// in that class. Built in f64 and inflated by 0.1%, which dwarfs f32 rounding, so a bound is never below a value the
+/// f32 stroke arithmetic can produce.
+struct StrengthBounds {
+    max_taper: f32,
+    step: f32,
+    unit: Vec<[f32; STRENGTH_BINS + 1]>,
+}
+
+impl StrengthBounds {
+    fn new(lightning: LightningSettings, strokes: &[Stroke]) -> Self {
+        let max_taper = strokes.iter().map(|stroke| stroke.taper).fold(0.0_f32, f32::max);
+        let step = lightning.stroke_radius * max_taper.sqrt() / STRENGTH_BINS as f32;
+        let (core, halo, halo_strength) = (f64::from(lightning.core_width), f64::from(lightning.glow_spread), f64::from(lightning.glow_strength));
+        let unit = (0..=TAPER_CLASSES).map(|class| {
+            let taper = f64::from(max_taper) * class as f64 / TAPER_CLASSES as f64;
+            std::array::from_fn(|bin| {
+                if !(taper > 0.0) { return f32::INFINITY; }
+                let distance = bin as f64 * f64::from(step);
+                let strength = 1.3 * (-distance * distance / (core * taper).powi(2)).exp() + halo_strength * (-distance * distance / (halo * taper)).exp();
+                if strength.is_finite() { (strength * 1.001) as f32 } else { f32::INFINITY }
+            })
+        }).collect();
+        Self { max_taper, step, unit }
+    }
+
+    fn class(&self, taper: f32) -> usize {
+        if !(self.max_taper > 0.0) || !(taper > 0.0) { return 0; }
+        ((taper / self.max_taper * TAPER_CLASSES as f32).ceil() as usize + 1).min(TAPER_CLASSES)
+    }
+}
+
+/// Where a stroke can still change the glow.
 struct StrokeReach {
     /// Pixel distance past which nothing paints (0.015 threshold plus a pixel for rounding); infinity keeps the radius box.
     pixels: f32,
-    step: f32,
-    bound: [f32; STRENGTH_BINS + 1],
+    class: usize,
+    intensity: f32,
 }
 
 /// None when the stroke paints nothing at all.
-fn stroke_reach(lightning: LightningSettings, stroke: Stroke) -> Option<StrokeReach> {
-    let strength = |distance: f32| stroke_strength(lightning, stroke, distance);
-    let limit = lightning.stroke_radius * stroke.scale * stroke.taper.sqrt() / stroke.scale;
-    if !(strength(0.0) > 0.015) { return None; }
-    let pixels = if strength(limit) > 0.015 { f32::INFINITY } else {
-        let (mut inside, mut outside) = (0.0_f32, limit);
-        for _ in 0..24 {
-            let middle = (inside + outside) * 0.5;
-            if strength(middle) > 0.015 { inside = middle; } else { outside = middle; }
-        }
-        outside * stroke.scale + 0.4 + 1.0
-    };
-    let step = limit / STRENGTH_BINS as f32;
-    let bound = std::array::from_fn(|bin| strength(bin as f32 * step));
-    Some(StrokeReach { pixels, step, bound })
+fn stroke_reach(lightning: LightningSettings, bounds: &StrengthBounds, stroke: Stroke) -> Option<StrokeReach> {
+    if !(stroke_strength(lightning, stroke, 0.0) > 0.015) { return None; }
+    let class = bounds.class(stroke.taper);
+    let intensity = stroke.intensity * lightning.brightness;
+    let pixels = bounds.unit[class].iter().position(|unit| unit * intensity * 1.001 <= 0.015)
+        .map(|bin| bin as f32 * bounds.step * stroke.scale + 0.4 + 1.0).unwrap_or(f32::INFINITY);
+    Some(StrokeReach { pixels, class, intensity: intensity * 1.001 })
 }
 
-fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::Range<usize>, lightning: LightningSettings, stroke: Stroke, reach: &StrokeReach) {
+fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::Range<usize>, lightning: LightningSettings, bounds: &StrengthBounds, stroke: Stroke, reach: &StrokeReach) {
     let Stroke { from, to, scale, taper, .. } = stroke;
     let radius = lightning.stroke_radius * scale * taper.sqrt();
     let reach_squared = reach.pixels * reach.pixels;
@@ -929,17 +957,20 @@ fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::
     let dx = to[0] - from[0];
     let dy = to[1] - from[1];
     let squared = (dx * dx + dy * dy).max(0.001);
-    let per_step = if reach.step > 0.0 { 1.0 / reach.step } else { 0.0 };
+    let per_step = if bounds.step > 0.0 { 1.0 / bounds.step } else { 0.0 };
+    let unit = &bounds.unit[reach.class];
     for y in top..bottom {
         for x in left..right {
             let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
             let (offset_x, offset_y) = (x as f32 - from[0] - along * dx, y as f32 - from[1] - along * dy);
-            if offset_x * offset_x + offset_y * offset_y > reach_squared { continue; }
-            let distance = (offset_x.hypot(offset_y) - 0.4).max(0.0) / scale;
+            let offset_squared = offset_x * offset_x + offset_y * offset_y;
+            if offset_squared > reach_squared { continue; }
             let index = (y - rows.start) * width + x;
-            // One bin nearer than the pixel, so the bound's distance is never past the pixel's despite rounding.
-            let bin = ((distance * per_step) as usize).saturating_sub(1).min(STRENGTH_BINS);
-            if reach.bound[bin] <= glow[index] { continue; }
+            // sqrt stands in for hypot when picking the bound; one bin nearer absorbs their last-bit difference.
+            let near = (offset_squared.sqrt() - 0.4).max(0.0) / scale;
+            let bin = ((near * per_step) as usize).saturating_sub(1).min(STRENGTH_BINS);
+            if unit[bin] * reach.intensity <= glow[index] { continue; }
+            let distance = (offset_x.hypot(offset_y) - 0.4).max(0.0) / scale;
             let strength = stroke_strength(lightning, stroke, distance);
             if strength > 0.015 {
                 glow[index] = glow[index].max(strength);
