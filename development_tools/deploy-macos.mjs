@@ -374,7 +374,8 @@ async function registerClaude(payload, config, explicit) {
 }
 
 function codexState(env) {
-  const plugins = JSON.parse(output('codex', ['plugin', 'list', '--available', '--json'], { env }))
+  // The available list includes every curated plugin (about 2.6 MB), beyond spawnSync's 1 MB default.
+  const plugins = JSON.parse(output('codex', ['plugin', 'list', '--available', '--json'], { env, maxBuffer: 64 * 1024 * 1024 }))
   const entry = [...plugins.installed, ...plugins.available].find(plugin => plugin.pluginId === PLUGIN_ID)
   return { source: entry?.marketplaceSource?.source, installed: Boolean(entry?.installed), enabled: Boolean(entry?.enabled) }
 }
