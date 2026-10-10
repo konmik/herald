@@ -553,7 +553,20 @@ impl CardTemplate {
             draw_bubble(&mut buffer, width, height, scale, bottom, fill, None);
             buffer
         };
-        let [first, second] = TEMPLATE_PROBES.map(probe);
+        // Built on the first frame of a new card size, so the two probe paints and the scanline mask run concurrently.
+        let ((first, second), scanlines) = rayon::join(
+            || rayon::join(|| probe(TEMPLATE_PROBES[0]), || probe(TEMPLATE_PROBES[1])),
+            || {
+                let mut scanlines = Vec::new();
+                for y in 0..height {
+                    if (y as f32 / scale).floor() as usize % 2 != 0 { continue; }
+                    for x in 0..width {
+                        if bubble_contains(x as f32 / scale, y as f32 / scale, bottom) { scanlines.push((y * width + x) as u32); }
+                    }
+                }
+                scanlines
+            },
+        );
         let classes = first.iter().zip(&second).map(|(a, b)| match (*a, *b) {
             (0xff00ff, 0xff00ff) => 0,
             (0x080908, 0x080908) => 1,
@@ -561,13 +574,6 @@ impl CardTemplate {
             (a, b) if a == blend(TEMPLATE_PROBES[0], 0xffffff, 30) && b == blend(TEMPLATE_PROBES[1], 0xffffff, 30) => 3,
             other => panic!("Unclassified bubble pixel {other:x?}"),
         }).collect();
-        let mut scanlines = Vec::new();
-        for y in 0..height {
-            if (y as f32 / scale).floor() as usize % 2 != 0 { continue; }
-            for x in 0..width {
-                if bubble_contains(x as f32 / scale, y as f32 / scale, bottom) { scanlines.push((y * width + x) as u32); }
-            }
-        }
         Self { width, height, scale: scale.to_bits(), bottom: bottom.to_bits(), classes, scanlines }
     }
 
