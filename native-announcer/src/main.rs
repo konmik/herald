@@ -15,6 +15,8 @@ mod linux_surface;
 mod macos_surface;
 mod platform;
 mod private;
+mod profile;
+mod benchmark;
 mod render;
 mod state;
 mod settings;
@@ -158,9 +160,10 @@ impl Active {
 
 fn main() {
     let bridge_mode = std::env::args().skip(1).any(|argument| argument == "--bridge");
+    let benchmark_mode = std::env::args().skip(1).any(|argument| argument == "--benchmark-lightning");
     let result = if bridge_mode { run_bridge() } else { run() };
     if let Err(error) = result {
-        if bridge_mode {
+        if bridge_mode || benchmark_mode {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -241,6 +244,10 @@ fn run() -> Result<(), String> {
                     arguments.next().ok_or("Missing report path")?,
                 ))
             }
+            "--benchmark-lightning" => {
+                let output = PathBuf::from(arguments.next().ok_or("Missing benchmark output path")?);
+                return benchmark::run(&assets, &output, arguments.collect());
+            }
             "--snapshot" => {
                 snapshot = Some(PathBuf::from(
                     arguments.next().ok_or("Missing snapshot path")?,
@@ -261,6 +268,8 @@ fn run() -> Result<(), String> {
         return Err("Capture speech duration requires frame capture".into());
     }
     let mut frames = capture_directory.as_deref().map(capture::Frames::new).transpose()?;
+    let mut frame_log = profile::FrameLog::from_env("HERALD_FRAME_LOG");
+    let mut wake_late = 0.0_f64;
     let capture_lightning = capture_directory.as_ref().and_then(|_| std::env::var("HERALD_LIGHTNING_STYLE").ok())
         .map(|value| lightning::PRESETS.iter().find(|preset| preset.id == value).map(|preset| preset.settings).unwrap_or_default());
     private::directory(&data).map_err(|e| e.to_string())?;
@@ -381,6 +390,7 @@ fn run() -> Result<(), String> {
                 platform::refresh_card_input(&window);
                 let now = Instant::now();
                 if now < next_frame { return; }
+                wake_late = now.saturating_duration_since(next_frame).as_secs_f64() * 1000.0;
                 if test_seconds.is_some_and(|seconds| launched.elapsed() >= Duration::from_secs(seconds)) {
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -522,6 +532,7 @@ fn run() -> Result<(), String> {
                     #[cfg(not(target_os = "windows"))]
                     platform::show(&window);
                     window.request_redraw();
+                    if let Some(log) = &mut frame_log { log.reset(); }
                     shown += 1;
                     titles.push(renderer.title.clone());
                     if active.silent { muted_announcements += 1; }
@@ -607,10 +618,16 @@ fn run() -> Result<(), String> {
                                 platform::physical_bounds(&window, viewport, active.placement.scale)?;
                                 platform::card_region(&window, active.placement.rect);
                             }
-                            surface.resize(width, height).map_err(|e| e.to_string())?;
-                            let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
-                            buffer.copy_from_slice(&pixels);
-                            buffer.present().map_err(|e| e.to_string())?;
+                            profile::time(profile::Stage::Present, || -> Result<(), String> {
+                                surface.resize(width, height).map_err(|e| e.to_string())?;
+                                let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
+                                buffer.copy_from_slice(&pixels);
+                                buffer.present().map_err(|e| e.to_string())
+                            })?;
+                            if let Some(log) = &mut frame_log {
+                                let phase = render::announcement_phase(transition_time, active.end.is_some());
+                                log.record("announcement", frame_now, &format!("{phase:?}").to_lowercase(), wake_late);
+                            }
                             if changed_bounds {
                                 let previous_focus = platform::foreground();
                                 platform::show(&window);

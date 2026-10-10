@@ -46,6 +46,7 @@ pub(super) struct Preview {
     pub(super) error: Option<String>,
     pub(super) size: (f32, f32),
     scale: f32,
+    log: Option<crate::profile::FrameLog>,
 }
 
 impl Preview {
@@ -60,7 +61,7 @@ impl Preview {
             .spawn(move || run(worker_shared, assets, settings, scale)).map_err(|error| error.to_string())?;
         Ok(Self { shared, worker: Some(worker), driver: None, image: None, retired: None,
             character_id: String::new(), character_name: String::new(), phase: AnnouncementPhase::Leader, error: None,
-            size: (352.0, 336.0), scale })
+            size: (352.0, 336.0), scale, log: crate::profile::FrameLog::from_env("HERALD_PREVIEW_LOG") })
     }
 
     pub(super) fn update(&self, lightning: LightningSettings) {
@@ -91,6 +92,16 @@ impl Preview {
     }
 
     pub(super) fn receive(&mut self) -> bool {
+        let start = Instant::now();
+        let received = self.take_frame();
+        if received {
+            let phase = format!("{:?}", self.phase).to_lowercase();
+            if let Some(log) = &mut self.log { log.record("preview-ui", start, &phase, 0.0); }
+        }
+        received
+    }
+
+    fn take_frame(&mut self) -> bool {
         if self.retired.is_some() { return false; }
         let result = {
             let mut shared = self.shared.0.lock().unwrap();
@@ -207,8 +218,31 @@ impl Playback {
             else { None };
         let pixels = self.renderer.draw_scene(&self.scene, Some(self.video.frame()), interference, entrance);
         let origin = if entrance.is_some() { self.scene.canvas } else { self.scene.card.rect };
-        Frame { image: compose(&pixels, origin, self.stage), character_id: self.character_id.clone(),
+        Frame { image: crate::profile::time(crate::profile::Stage::Canvas, || compose(&pixels, origin, self.stage)), character_id: self.character_id.clone(),
             character_name: self.character_name.clone(), phase: announcement_phase(transition, closing) }
+    }
+}
+
+/// A seeded preview playback for `--benchmark-lightning`: the first bundled character and a fixed seed, so runs are comparable.
+pub(crate) struct BenchmarkPreview(Playback);
+
+impl BenchmarkPreview {
+    pub(crate) fn new(assets: &Path, settings: &Settings, scale: f32, seed: u32) -> Result<Self, String> {
+        let path = crate::benchmark::video_path(assets)?;
+        let mut playback = Playback::new(assets, settings, "", scale)?;
+        playback.video = Video::open(&path)?;
+        playback.video.advance(Duration::ZERO)?;
+        playback.seed = seed;
+        playback.scene = EntranceScene::new(playback.stage, playback.scene.card, seed, settings.lightning);
+        Ok(Self(playback))
+    }
+
+    pub(crate) fn cycle(&self) -> Duration { self.0.duration + TRANSITION_DURATION }
+
+    /// Renders the next frame `delta` after the previous one and returns it with its phase.
+    pub(crate) fn frame(&mut self, delta: Duration) -> (RgbaImage, AnnouncementPhase) {
+        let frame = self.0.frame(delta);
+        (frame.image, frame.phase)
     }
 }
 
@@ -232,6 +266,7 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Set
     let mut current: Option<Intent> = None;
     let mut failure = "Preview video is unavailable. Try Replay.".to_owned();
     let mut tick = Instant::now();
+    let mut log = crate::profile::FrameLog::from_env("HERALD_PREVIEW_LOG");
     loop {
         let intent = {
             let (lock, wake) = &*shared;
@@ -265,6 +300,7 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Set
         } else { Ok(()) };
         current = Some(intent);
         let frame = result.and_then(|_| playback.as_mut().map(|playback| playback.frame(delta)).ok_or_else(|| failure.clone()));
+        if let (Some(log), Ok(frame)) = (&mut log, &frame) { log.record("preview-worker", now, &format!("{:?}", frame.phase).to_lowercase(), 0.0); }
         let (lock, wake) = &*shared;
         let mut state = lock.lock().unwrap();
         if state.stop { break; }

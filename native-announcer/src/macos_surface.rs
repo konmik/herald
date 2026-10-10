@@ -64,13 +64,16 @@ fn argb(color: u32) -> u32 {
     if color == 0xff00ff { 0 } else { color | 0xff000000 }
 }
 
+/// The premultiplied ARGB copy handed to Core Animation, with the transparency key cleared.
+pub fn layer_pixels(pixels: &[u32]) -> Box<[u32]> { pixels.iter().map(|color| argb(*color)).collect() }
+
 impl Buffer<'_> {
     pub fn present(self) -> Result<(), String> {
         unsafe extern "C-unwind" fn release(_info: *mut c_void, data: NonNull<c_void>, size: usize) {
             drop(unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(data.cast::<u32>().as_ptr(), size / 4)) });
         }
         let surface = self.0;
-        let pixels: Box<[u32]> = surface.pixels.iter().map(|color| argb(*color)).collect();
+        let pixels = layer_pixels(&surface.pixels);
         let length = pixels.len() * 4;
         let provider = unsafe { CGDataProvider::with_data(ptr::null_mut(), Box::into_raw(pixels).cast(), length, Some(release)) }
             .ok_or("Could not wrap the announcement pixels.")?;

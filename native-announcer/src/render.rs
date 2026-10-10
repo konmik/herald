@@ -4,6 +4,7 @@ use image::RgbaImage;
 use std::time::Duration;
 use crate::settings::{FontPreference, Settings};
 use crate::lightning::LightningSettings;
+use crate::profile::{self, Stage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PhysicalRect {
@@ -64,6 +65,9 @@ fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32) -> Option<(u3
     }
     None
 }
+
+/// True while a holding-phase ambient burst is drawn, the frames that pay for Lightning while the card is held.
+pub fn ambient_active(elapsed: Duration, duration: Duration, seed: u32) -> bool { ambient_burst(elapsed, duration, seed).is_some() }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -219,7 +223,7 @@ impl LightningPaint {
     fn bolt(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, seed: u32, intensity: f32, reveal: f32) {
         let length = (to[0] - from[0]).hypot(to[1] - from[1]);
         let mut points = vec![from];
-        irregular_channel(from, to, seed, length * 0.16 * self.lightning.roughness, 3.0 * scale, &mut points);
+        profile::time(Stage::Geometry, || irregular_channel(from, to, seed, length * 0.16 * self.lightning.roughness, 3.0 * scale, &mut points));
         let visible = ((points.len() - 1) as f32 * reveal.clamp(0.0, 1.0)).ceil() as usize;
         let frequency = self.lightning.bolt_fork_spacing;
         for (index, pair) in points.windows(2).take(visible).enumerate() {
@@ -233,7 +237,7 @@ impl LightningPaint {
             let side = if random & 128 == 0 { -0.7 } else { 0.7 };
             let end = [pair[0][0] + (dx - dy * side) * fraction, pair[0][1] + (dy + dx * side) * fraction];
             let mut branch = vec![pair[0]];
-            irregular_channel(pair[0], end, random, length * 0.07, 2.5 * scale, &mut branch);
+            profile::time(Stage::Geometry, || irregular_channel(pair[0], end, random, length * 0.07, 2.5 * scale, &mut branch));
             for (index, segment) in branch.windows(2).enumerate() {
                 self.stroke(segment[0], segment[1], scale, 0.38 * (1.0 - index as f32 / branch.len() as f32 * 0.8), intensity * 0.75);
             }
@@ -292,12 +296,12 @@ impl LightningPaint {
 
     fn composite(self, buffer: &mut [u32]) {
         let LightningSettings { halo_color: halo, core_color: core, .. } = self.lightning;
-        for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
+        profile::time(Stage::Composite, || for (pixel, strength) in buffer.iter_mut().zip(self.glow) {
             if strength == 0.0 { continue; }
             let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
             let color = blend(halo, core, (strength.min(1.0).powi(3) * 255.0) as u32);
             *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
-        }
+        });
     }
 }
 
@@ -472,7 +476,7 @@ impl Renderer {
             None => false,
         };
         let mut coverage = (strike.is_some() || active).then(|| PaintCoverage { pixels: vec![false; width * height] });
-        draw_bubble(
+        profile::time(Stage::Bubble, || draw_bubble(
             buffer,
             width,
             height,
@@ -480,9 +484,9 @@ impl Renderer {
             logical_height - 152.0,
             video_background(image),
             coverage.as_mut(),
-        );
+        ));
         let title_y = logical_height - 188.0;
-        self.text(
+        profile::time(Stage::Text, || self.text(
             buffer,
             width,
             height,
@@ -495,7 +499,7 @@ impl Renderer {
                 color: 0xeef2f7,
                 max_height: title_y - 10.0,
             },
-        );
+        ));
         let mut title = self.title.clone();
         while title
             .chars()
@@ -512,7 +516,7 @@ impl Renderer {
                 .collect::<String>()
                 + "…";
         }
-        self.text(
+        profile::time(Stage::Text, || self.text(
             buffer,
             width,
             height,
@@ -525,8 +529,9 @@ impl Renderer {
                 color: 0x9daabd,
                 max_height: title_y + f32::from(self.title_preference.size) + 8.0,
             },
-        );
-        shade_bubble_scanlines(buffer, width, height, scale, logical_height - 152.0);
+        ));
+        profile::time(Stage::Scanlines, || shade_bubble_scanlines(buffer, width, height, scale, logical_height - 152.0));
+        let portrait = profile::enabled().then(std::time::Instant::now);
         let face_x = (188.0 * scale) as usize;
         let face_y = ((logical_height - 140.0) * scale) as usize;
         let face_size = (128.0 * scale) as usize;
@@ -634,12 +639,13 @@ impl Renderer {
                 }
             }
         }
+        if let Some(start) = portrait { profile::add(Stage::Portrait, start); }
         if let Some(coverage) = coverage {
-            if let Some(elapsed) = strike {
+            profile::time(Stage::Lightning, || if let Some(elapsed) = strike {
                 coverage.draw_entrance_lightning(buffer, width, height, scale, elapsed, self.impact.unwrap_or([187.5 * scale, height as f32 - 90.5 * scale]), self.lightning);
             } else if let Some(activity) = self.lightning_activity {
                 coverage.draw_activity(buffer, width, height, scale, activity, self.lightning);
-            }
+            });
         }
     }
 
@@ -655,14 +661,17 @@ impl Renderer {
         if entrance.is_none() { return pixels; }
         let canvas = scene.canvas;
         let canvas_width = canvas.width as usize;
-        let mut buffer = vec![0xff00ff; canvas_width * canvas.height as usize];
-        let x = (card.rect.x - canvas.x) as usize;
-        let y = (card.rect.y - canvas.y) as usize;
-        for row in 0..height {
-            buffer[(y + row) * canvas_width + x..(y + row) * canvas_width + x + width]
-                .copy_from_slice(&pixels[row * width..(row + 1) * width]);
-        }
-        if let Some(elapsed) = entrance { scene.draw_incoming_bolt(&mut buffer, elapsed); }
+        let mut buffer = profile::time(Stage::Canvas, || {
+            let mut buffer = vec![0xff00ff; canvas_width * canvas.height as usize];
+            let x = (card.rect.x - canvas.x) as usize;
+            let y = (card.rect.y - canvas.y) as usize;
+            for row in 0..height {
+                buffer[(y + row) * canvas_width + x..(y + row) * canvas_width + x + width]
+                    .copy_from_slice(&pixels[row * width..(row + 1) * width]);
+            }
+            buffer
+        });
+        if let Some(elapsed) = entrance { profile::time(Stage::Lightning, || scene.draw_incoming_bolt(&mut buffer, elapsed)); }
         buffer
     }
 
@@ -752,7 +761,7 @@ impl PaintCoverage {
             glow.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
             removal.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
         }
-        let distance = removal.distance_field();
+        let distance = profile::time(Stage::Distance, || removal.distance_field());
         let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
         let reach = consumption.powi(2) * width.max(height) as f32;
         for (index, pixel) in buffer.iter_mut().enumerate() {
@@ -775,6 +784,10 @@ impl PaintCoverage {
     }
 
     fn contours(&self, width: usize, height: usize) -> Vec<Vec<[f32; 2]>> {
+        profile::time(Stage::Contours, || self.trace_contours(width, height))
+    }
+
+    fn trace_contours(&self, width: usize, height: usize) -> Vec<Vec<[f32; 2]>> {
         let stride = width + 1;
         let mut edges = vec![0_u8; stride * (height + 1)];
         for y in 0..height {
