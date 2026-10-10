@@ -19,7 +19,7 @@ $metafile = Join-Path $OutputDirectory ('.herald-modules-' + [guid]::NewGuid() +
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     if ($PayloadDirectory) {
-        foreach ($directory in @('native-announcer', 'claude-plugin')) {
+        foreach ($directory in @('native-announcer', 'claude-plugin', 'codex-plugin')) {
             Get-PayloadFiles (Join-Path $PayloadDirectory $directory) | Out-Null
             Copy-Item -LiteralPath (Join-Path $PayloadDirectory $directory) -Destination (Join-Path $stage $directory) -Recurse
         }
@@ -37,6 +37,11 @@ try {
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "claude-plugin/$name") -Destination $destination -Recurse -Force
         }
+        foreach ($name in @('.codex-plugin/plugin.json', '.agents/plugins/marketplace.json', 'hooks/hooks.json', 'hooks/herald.mjs')) {
+            $destination = Join-Path $stage "codex-plugin/$name"
+            New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $root "codex-plugin/$name") -Destination $destination -Force
+        }
         $runtime = Join-Path $stage 'native-announcer'
         New-Item -ItemType Directory -Path "$runtime/bin", "$runtime/resources" -Force | Out-Null
         Copy-Item -LiteralPath "$target/$rustTarget/release/herald.exe" -Destination "$runtime/bin/herald-win32-$arch.exe"
@@ -45,7 +50,7 @@ try {
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "native-announcer/resources/$name") -Destination $destination -Recurse -Force
         }
-        Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage 'claude-plugin/native-announcer') -Recurse -Force
+        foreach ($plugin in @('claude-plugin', 'codex-plugin')) { Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage "$plugin/native-announcer") -Recurse -Force }
     }
     $package = Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     $exports = @{}

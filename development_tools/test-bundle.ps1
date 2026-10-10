@@ -59,8 +59,8 @@ try {
     $settingsBytes = [Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath))
     $payload = Join-Path $temporary 'payload'
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
-    $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json')
-    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) {
+    $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json') + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })
+    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer')) {
         $required += "$prefix/bin/herald-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
     }
     foreach ($file in $required) {
@@ -70,7 +70,9 @@ try {
     }
     '{"name":"herald","version":"0.3.0"}' | Set-Content "$payload/claude-plugin/.claude-plugin/plugin.json"
     '{"name":"herald-local"}' | Set-Content "$payload/claude-plugin/.claude-plugin/marketplace.json"
-    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
+    '{"name":"herald","version":"0.3.0"}' | Set-Content "$payload/codex-plugin/.codex-plugin/plugin.json"
+    '{"name":"herald-local"}' | Set-Content "$payload/codex-plugin/.agents/plugins/marketplace.json"
+    foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
     Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-plugin/hooks/register.ts') -Destination "$payload/claude-plugin/hooks/register.ts" -Force
     $zip = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $payload -OutputDirectory (Join-Path $temporary 'output')
     $bundle = Join-Path $temporary 'extracted'
@@ -216,6 +218,27 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-True (-not @($script:claudeCalls | Where-Object { $_ -like '*|remove|*' }).Count) 'Marketplace migration removed installed plugins'
     Assert-True ((Get-Content "$profile/plugins/known_marketplaces.json" -Raw | ConvertFrom-Json).unrelated.source.repo -eq 'keep/me') 'Marketplace migration changed unrelated registration data'
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful Claude registration changed native settings'
+    $oldCodexMarketplace = Join-Path $temporary 'old-codex-marketplace'
+    New-Item -ItemType Directory -Path "$oldCodexMarketplace/.codex-plugin" -Force | Out-Null
+    Copy-Item "$payload/codex-plugin/.codex-plugin/plugin.json" "$oldCodexMarketplace/.codex-plugin/plugin.json"
+    $script:codexCalls = [Collections.Generic.List[string]]::new()
+    $script:codexSource = $oldCodexMarketplace
+    function codex {
+        $script:codexCalls.Add(($args -join '|'))
+        if ($args[1] -eq 'list') {
+            $entry = @{ pluginId = $PluginId; installed = [bool]$script:codexSource; enabled = [bool]$script:codexSource; marketplaceSource = @{ source = $script:codexSource } }
+            @{ installed = @($entry); available = @() } | ConvertTo-Json -Depth 4
+        }
+        elseif ($args[1] -eq 'marketplace' -and $args[2] -eq 'remove') { $script:codexSource = $null }
+        elseif ($args[1] -eq 'marketplace' -and $args[2] -eq 'add') { $script:codexSource = $args[3] }
+        elseif ($args[1] -ne 'add') { throw 'Unexpected Codex command in bundle test' }
+        $global:LASTEXITCODE = 0
+    }
+    Register-CodexBundle $app
+    $codexSource = [IO.Path]::GetFullPath((Join-Path $app 'codex-plugin'))
+    Assert-True (($script:codexCalls | Where-Object { $_ -notlike 'plugin|list|*' }) -join ';' -ceq "plugin|marketplace|remove|herald-local;plugin|marketplace|add|$codexSource;plugin|add|$PluginId") 'Codex registration did not move the owned marketplace to the installed source'
+    $script:codexSource = Join-Path $temporary 'foreign-codex-marketplace'
+    Assert-Rejected { Register-CodexBundle $app } 'An unowned Codex marketplace was replaced'
     $openCode = Join-Path $temporary 'opencode'
     New-Item -ItemType Directory -Path $openCode | Out-Null
     $parentBun = [Environment]::GetEnvironmentVariable('BUN_BE_BUN', 'Process')
