@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod capture;
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 mod audio;
 mod bridge;
 mod characters;
@@ -169,12 +169,28 @@ fn main() {
     }
 }
 
+fn default_assets() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let directory = executable.parent().ok_or("Could not locate the native announcer directory")?;
+    Ok(bundled_assets(directory).unwrap_or_else(|| directory.join("../resources")))
+}
+
+/// Inside a macOS application bundle the executable lives in `Contents/MacOS` and its assets in `Contents/Resources`.
+fn bundled_assets(directory: &std::path::Path) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") || directory.file_name()? != "MacOS" { return None; }
+    let resources = directory.parent()?.join("Resources");
+    resources.join("characters.json").is_file().then_some(resources)
+}
+
+/// The installed `Herald Settings.app` runs this executable under the name `Herald Settings`, since Finder cannot pass `--settings`.
+fn macos_settings_bundle(executable: &std::path::Path) -> bool {
+    cfg!(target_os = "macos")
+        && executable.file_name().is_some_and(|name| name == "Herald Settings")
+        && executable.parent().and_then(|path| path.file_name()).is_some_and(|name| name == "MacOS")
+}
+
 fn run_bridge() -> Result<(), String> {
-    let mut assets = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("Could not locate the native announcer directory")?
-        .join("../resources");
+    let mut assets = default_assets()?;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -187,17 +203,13 @@ fn run_bridge() -> Result<(), String> {
 }
 
 fn run() -> Result<(), String> {
-    let mut assets = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .unwrap()
-        .join("../resources");
+    let mut assets = default_assets()?;
     let mut demo = None;
     let mut test_seconds = None;
     let mut report = None;
     let mut snapshot = None;
     let mut isolated = false;
-    let mut open_settings = false;
+    let mut open_settings = macos_settings_bundle(&std::env::current_exe().map_err(|e| e.to_string())?);
     let mut capture_directory = None;
     let mut capture_speech_seconds = None;
     let mut arguments = std::env::args().skip(1);
@@ -652,6 +664,23 @@ fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_application_bundles_find_resources_and_settings_mode() {
+        let root = std::env::temp_dir().join(format!("herald-bundle-test-{}", std::process::id()));
+        let contents = root.join("Herald Settings.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        assert_eq!(bundled_assets(&contents.join("MacOS")), None);
+        std::fs::create_dir_all(contents.join("Resources")).unwrap();
+        std::fs::write(contents.join("Resources/characters.json"), "{}").unwrap();
+        assert_eq!(bundled_assets(&contents.join("MacOS")), Some(contents.join("Resources")));
+        assert_eq!(bundled_assets(&root.join("native-announcer/bin")), None);
+        assert!(macos_settings_bundle(&contents.join("MacOS/Herald Settings")));
+        assert!(!macos_settings_bundle(&contents.join("MacOS/Herald")));
+        assert!(!macos_settings_bundle(&root.join("bin/Herald Settings")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn waits_for_speech_and_minimum_display_time() {

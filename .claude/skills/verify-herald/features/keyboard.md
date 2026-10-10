@@ -50,7 +50,7 @@ The automated path above does not prove every control or platform. Test these se
 - Open the video picker from the keyboard. Verify modal focus containment, Escape dismissal, and focus restoration. The helper covers the delete confirmation separately. Do not delete a user character during verification.
 - Trigger a validation error using disposable data. Confirm that its accessible text updates and can be read by a screen reader. Check meaningful names for fields and sliders.
 - Verify that the desktop's window-switching, workspace, tiling, and close shortcuts still work. Omarchy's stock bindings include Super+W, Super+arrows, Super+T, and Alt+Tab.
-- On macOS, first establish a supported settings build. Then verify Command+S, the system keyboard-navigation preference, native dialogs, and Command+Tab. Until that prerequisite is met, record macOS as unavailable rather than passed.
+- On macOS, `pnpm run test:settings:macos --feature keyboard` sends real key events to the owned debug window and verifies Command+S, Ctrl+Tab, Ctrl+Shift+Tab, Tab/Shift+Tab, Space, Escape and slider Home/End/arrows. It needs Accessibility and Screen Recording for the launching application (see the skill). Separately verify the system keyboard-navigation preference, native dialogs and Command+Tab. Without the permissions, record macOS as unverified rather than passed.
 
 Windows and macOS results are separate from a Linux pass. Do not infer file-picker focus, spoken screen-reader announcements, or complete list/dropdown behavior from the automated subset.
 

@@ -7,6 +7,12 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{output_devices, play_noise, play_pcm};
 
+#[cfg(target_os = "macos")]
+pub fn output_devices() -> Vec<OutputDevice> { Vec::new() }
+
+#[cfg(target_os = "macos")]
+pub fn play_noise(_path: &std::path::Path, _volume: u16, _selected: Option<&str>, _cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> { Ok(()) }
+
 #[derive(Clone, Debug)]
 pub struct OutputDevice {
     pub id: String,

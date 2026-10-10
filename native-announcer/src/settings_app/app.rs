@@ -9,9 +9,11 @@ mod lightning_preview;
 use keyboard::RevealFocused;
 #[cfg_attr(target_os = "windows", path = "instance.rs")]
 #[cfg_attr(target_os = "linux", path = "instance_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "instance_macos.rs")]
 mod instance;
 #[cfg_attr(target_os = "windows", path = "theme.rs")]
 #[cfg_attr(target_os = "linux", path = "theme_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "theme_linux.rs")]
 mod theme;
 #[cfg(target_os = "windows")]
 #[path = "dialogs_windows.rs"]
@@ -388,6 +390,8 @@ impl SettingsView {
                 if handle.update(cx, |_, window, app| {
                     weak.update(app, |view, cx| {
                         view.instance.activate_pending(window);
+                        #[cfg(target_os = "macos")]
+                        if view.instance.take_activation_request() { cx.activate(true); }
                         if view.theme_monitor.refresh(Some(window), cx) { cx.notify(); }
                     })
                 }).is_err() { break; }
@@ -1089,7 +1093,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     fn browse_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_character.clone() else { return; };
         let focus = window.focused(cx);
@@ -1125,7 +1129,7 @@ impl SettingsView {
         }).detach();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     fn open_my_voices(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         cx.open_url("https://elevenlabs.io/app/voice-lab");
     }
@@ -1142,6 +1146,14 @@ impl SettingsView {
                 .a11y_synthetic_children(|builder| builder.parent_node().set_live(gpui_kit::accesskit::Live::Polite))
                 .text_base().child(status))
             .child(div().child("Playback uses PulseAudio or PipeWire's PulseAudio compatibility service. Kitten voice downloads are Windows-only."))
+            .into_any_element()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn render_offline_voice(&self, _: &mut Context<Self>) -> AnyElement {
+        let status = "macOS offline speech uses the system voices.";
+        v_flex().w_full().gap_4()
+            .child(div().id("offline-status").role(gpui_kit::Role::Status).aria_label(status).text_base().child(status))
             .into_any_element()
     }
 
@@ -1733,6 +1745,9 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         keyboard::init(cx);
+        // macOS defaults to keeping an app alive without windows. Settings must
+        // exit on Close so its single-instance lock is released for reopening.
+        cx.set_quit_mode(gpui_kit::QuitMode::LastWindowClosed);
         let options = WindowOptions {
             app_id: Some("herald-settings".into()),
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
@@ -1747,6 +1762,9 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
         }) {
             Ok((handle, _view)) => {
                 let _ = handle.downcast::<Root>();
+                // A command-line launch does not make a macOS app frontmost.
+                #[cfg(target_os = "macos")]
+                cx.activate(true);
             }
             Err(error) => {
                 *launch_error_for_app.borrow_mut() = Some(error.to_string());

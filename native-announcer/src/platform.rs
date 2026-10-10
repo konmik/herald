@@ -270,7 +270,7 @@ impl Speech {
         settings.elevenlabs_api_key.is_none() && settings.volume > 0 && !settings.quiet_at(minute) && !meeting
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     fn preview() -> Self {
         Self::worker(false, false)
     }
@@ -566,18 +566,18 @@ impl Drop for Signal {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub struct Preview {
     cancelled: Arc<AtomicBool>,
     playback: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 fn preview_timeout(settings: &Settings) -> Duration {
     Duration::from_secs(30 + u64::from(settings.silent_sound_seconds))
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 impl Preview {
     pub fn start(data: PathBuf, settings: Settings, assets: PathBuf) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -620,7 +620,7 @@ impl Preview {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 impl Drop for Preview {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
@@ -628,7 +628,7 @@ impl Drop for Preview {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, assets: &Path) -> Result<(), String> {
     if stop.load(Ordering::Relaxed) { return Ok(()); }
     let mut speech = Speech::preview();

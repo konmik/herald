@@ -40,6 +40,24 @@ This starts the same executable with `--isolated --assets native-announcer/resou
 
 Every helper creates a unique `HERALD_DATA` directory under `$env:LOCALAPPDATA/Temp/opencode` and sets `HERALD_TTS` to the repo's prepared model. Settings windows are single-instance **per data directory**. Isolated playback binds an ephemeral localhost port; normal playback uses shared port 47863. Keep disposable instances separate from the default data directory. Independent scratch state permits side-by-side runs, but desktop focus and audible output are shared: run focus/audio checks one at a time.
 
+## macOS settings
+
+On macOS, run from the repository root in an interactive desktop session (not over SSH without a logged-in GUI):
+
+```bash
+cargo build --locked --manifest-path native-announcer/Cargo.toml
+pnpm run test:settings:macos:preflight
+pnpm run test:settings:macos
+```
+
+Requirements: Xcode command-line tools, Rust, `ffmpeg` on `PATH` (the non-Windows video decoder and the inline Lightning preview use it), Python 3 with pyobjc and Pillow (`python3 -m pip install --user -r development_tools/requirements-checks.txt`), and **Accessibility** and **Screen Recording** permission for the application that launches the command. That is the outermost app above the shell (Terminal, iTerm, an IDE or an agent host), not `python3`. The preflight names it. Restart that app after granting. Without the permissions the helper exits with code 2 and `proof.json` reports `blocked`; record macOS as unverified rather than passed.
+
+`development_tools/verify-macos-settings.py` launches `native-announcer/target/debug/herald --settings` with unique `HERALD_DATA`, waits for the `Herald settings` AX window with Apply and Close, and runs Doctor (owned PID and start time, executable path and SHA-256, no `errors.log`). It visits all seven pages and opens a character editor. It checks that a second launch exits, keeps one window and brings the existing one frontmost. It drives checkboxes, sliders, dropdowns, text and multiline fields, the silent Audio preview, Lightning presets, the five sliders and pixel motion in the inline preview, and Characters New/Delete with the confirmation. It also covers Command+S, Ctrl+Tab and other keyboard paths, Escape, resizing to 420×650, 420×360 and 1100×700 without horizontal overflow, Apply, Close discard, process exit on Close and reopening. Evidence goes to `temp/verification/macos-settings-*/` (`proof.json` per-feature results, `actions.json`, `cleanup.json`, PNG screenshots via `screencapture -l` and AX JSON snapshots). Cleanup terminates only owned PIDs whose start time still matches and removes only the scratch directory.
+
+Not covered on macOS: audible output, the native video picker, Open My Voices (browser), offline-voice installation, VoiceOver speech and Command+Tab desktop behavior, and Lightning preview worker teardown after leaving the tab. Use `--feature settings|controls|keyboard|layout|lightning|characters` to run one area.
+
+Observed macOS AX behavior the helper relies on: pages are `AXRadioButton` in the `Settings pages` tab group; headings report role `Heading`; dropdowns are `AXPopUpButton` whose press opens a virtualized in-window `AXList` (only visible rows exist); `AXFocusedUIElement` always returns the window, so focus is read from each element's `AXFocused`, which is reliable only while the window is key; AX sizes include the 32 pt title bar. Known findings, not macOS-specific: gpui-kit `Input` fields (Default voice ID, ElevenLabs key and voice ID, character name and video) expose no AX focus, so the helper types into them after a pointer click; at 420×360 content the compact sidebar and footer leave about 40 pt for the page (recorded as the non-fatal `compact-short-page-viewport` finding; 420×450 is fine). The inline Lightning preview only animates while the window is active.
+
 ## Doctor
 
 The helpers run one read-only Doctor gate before driving: the owned process is alive at the expected executable path, the expected controls or inbox exist, and there is no runtime error log. Settings Doctor also checks that the executable SHA256 has not changed. Each settings reopen repeats it.
