@@ -136,6 +136,8 @@ impl Pending {
 }
 
 const SPEECH_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wake interval while Lightning moves: entrance, exit and holding bursts aim for 120 frames per second.
+const ANIMATION_FRAME: Duration = Duration::from_micros(8_333);
 
 fn speech_readiness_timeout(settings: &settings::Settings) -> Duration {
     SPEECH_READY_TIMEOUT + Duration::from_secs(u64::from(settings.silent_sound_seconds))
@@ -145,6 +147,10 @@ impl Active {
     fn entrance_strike(&self, now: Instant) -> Option<Duration> {
         let elapsed = now.saturating_duration_since(self.started);
         (self.end.is_none() && elapsed < state::TRANSITION_DURATION).then_some(elapsed)
+    }
+
+    fn seed(&self) -> u32 {
+        self.notification.id.bytes().fold(self.notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)))
     }
 
     fn ready_to_end(&self, now: Instant) -> bool {
@@ -568,13 +574,14 @@ fn run() -> Result<(), String> {
                     passive_window_ok &= platform::passive_window(&window, false);
                 }
                 let interval = match &current {
-                    Presentation::Preparing(_) => 42,
-                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION => 16,
-                    Presentation::Playing(active) if active.end.is_some() => 16,
-                    Presentation::Playing(active) => ((1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33),
-                    Presentation::Idle => 250,
+                    Presentation::Preparing(_) => Duration::from_millis(42),
+                    Presentation::Playing(active) if active.started.elapsed() < state::TRANSITION_DURATION => ANIMATION_FRAME,
+                    Presentation::Playing(active) if active.end.is_some() => ANIMATION_FRAME,
+                    Presentation::Playing(active) if render::ambient_active(active.started.elapsed(), active.expires.duration_since(active.started), active.seed()) => ANIMATION_FRAME,
+                    Presentation::Playing(active) => Duration::from_millis(((1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33)),
+                    Presentation::Idle => Duration::from_millis(250),
                 };
-                next_frame = now + Duration::from_millis(interval);
+                next_frame = now + interval;
                 *control_flow = ControlFlow::WaitUntil(next_frame);
             }
             Event::RedrawRequested(_) => {
@@ -598,7 +605,7 @@ fn run() -> Result<(), String> {
                                 video_loops += video.loops - previous_loops;
                             }
                             renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
-                            let seed = active.notification.id.bytes().fold(active.notification.completed as u32, |seed, byte| state::noise_hash(seed ^ u32::from(byte)));
+                            let seed = active.seed();
                             renderer.lightning_activity = if active.end.is_some() {
                                 Some(render::LightningActivity::Closing(transition_time, seed))
                             } else if entrance_time.is_none() {

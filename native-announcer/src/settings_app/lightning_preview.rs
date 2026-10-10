@@ -273,6 +273,9 @@ fn delta_after_intent_change(delta: Duration, replay_changed: bool) -> Duration 
     if replay_changed { Duration::ZERO } else { delta }
 }
 
+/// Frame period of the preview worker, measured from the start of one frame to the next so render time does not stretch it.
+pub(super) const PREVIEW_FRAME: Duration = Duration::from_micros(8_333);
+
 fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Settings, scale: f32) {
     let mut playback: Option<Playback> = None;
     let mut current: Option<Intent> = None;
@@ -318,7 +321,8 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, assets: PathBuf, mut settings: Set
         if state.stop { break; }
         if state.intent.active && state.intent.revision == intent.revision { state.frame = Some((intent.revision, frame)); }
         if state.intent.revision == intent.revision {
-            let _ = wake.wait_timeout(state, Duration::from_millis(16)).unwrap();
+            let wait = (now + PREVIEW_FRAME).saturating_duration_since(Instant::now());
+            let _ = wake.wait_timeout(state, wait).unwrap();
         }
     }
 }
