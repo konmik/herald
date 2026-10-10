@@ -245,14 +245,14 @@ function Assert-ClaudeInstallation {
 
 function Get-OwnedAnnouncerDirectories {
     param([string]$ConfigDirectory)
-    $source = Get-ClaudeMarketplaceSource $ConfigDirectory
+    $source = if ($ConfigDirectory) { Get-ClaudeMarketplaceSource $ConfigDirectory }
     if ($source) {
         Join-Path $source 'native-announcer'
         $parent = Split-Path $source -Parent
         $package = Join-Path $parent 'package.json'
         if ((Test-Path -LiteralPath $package) -and (Get-Content -LiteralPath $package -Raw | ConvertFrom-Json).name -eq 'herald') { Join-Path $parent 'native-announcer' }
     }
-    foreach ($installation in @(Get-ClaudeInstallations $ConfigDirectory)) {
+    foreach ($installation in @(if ($ConfigDirectory) { Get-ClaudeInstallations $ConfigDirectory })) {
         Assert-ClaudeInstallation $installation.installPath $ConfigDirectory
         Join-Path $installation.installPath 'native-announcer'
     }
@@ -446,27 +446,31 @@ function Register-CodexBundle {
 
 function Register-BundleHosts {
     param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand, [string]$CodexHome)
-    $files = @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ }
+    $files = @()
+    if ($ClaudeConfigDirectory) { $files += @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ } }
     if ($CodexHome) { $files += Join-Path $CodexHome 'config.toml' }
     $files += Join-Path $ProgramsDirectory 'Herald settings.lnk'
     $snapshots = @($files | ForEach-Object {
         Assert-NoLinks $_
         @{ path = $_; bytes = if (Test-Path -LiteralPath $_) { [IO.File]::ReadAllBytes($_) } else { $null } }
     })
-    $previousCaches = @(Get-ClaudeInstallations $ClaudeConfigDirectory | ForEach-Object { [IO.Path]::GetFullPath($_.installPath) })
+    $previousCaches = @(if ($ClaudeConfigDirectory) { Get-ClaudeInstallations $ClaudeConfigDirectory | ForEach-Object { [IO.Path]::GetFullPath($_.installPath) } })
     $backups = [Collections.Generic.List[object]]::new()
     try {
-        Register-OpenCodeBundle $App $Configs {
+        $beforeWrite = {
             if ($BeforeRegistration) { & $BeforeRegistration }
-            Register-ClaudeBundle $App $ClaudeConfigDirectory -Backups $backups
+            if ($ClaudeConfigDirectory) { Register-ClaudeBundle $App $ClaudeConfigDirectory -Backups $backups }
             if ($CodexHome) { Register-CodexBundle $App }
-        } {
+        }
+        $afterWrite = {
             Install-SettingsShortcut $Binary $ProgramsDirectory
             if ($AfterRegistration) { & $AfterRegistration }
-        } -OpenCodeCommand $OpenCodeCommand
+        }
+        if ($Configs.Count) { Register-OpenCodeBundle $App $Configs $beforeWrite $afterWrite -OpenCodeCommand $OpenCodeCommand }
+        else { & $beforeWrite; & $afterWrite }
     } catch {
         $failure = $_
-        $newCaches = @(Get-ClaudeInstallations $ClaudeConfigDirectory | Where-Object { [IO.Path]::GetFullPath($_.installPath) -notin $previousCaches })
+        $newCaches = @(if ($ClaudeConfigDirectory) { Get-ClaudeInstallations $ClaudeConfigDirectory | Where-Object { [IO.Path]::GetFullPath($_.installPath) -notin $previousCaches } })
         foreach ($installation in $newCaches) {
             Assert-ClaudeInstallation $installation.installPath $ClaudeConfigDirectory
             Remove-DeploymentDirectory $installation.installPath
@@ -489,6 +493,16 @@ function Register-BundleHosts {
     foreach ($entry in $backups) { Remove-DeploymentDirectory $entry.backup }
 }
 
+function Get-BundleHostCommands {
+    $commands = @{}
+    foreach ($name in @('claude', 'codex', 'opencode')) {
+        $command = Get-Command $name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($command) { $commands[$name] = $command.Source }
+        else { Write-Warning "$name is not on PATH; skipping its plugin." }
+    }
+    return $commands
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }
 if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 on Windows is required' }
 Test-Bundle $Bundle | Out-Null
@@ -505,15 +519,19 @@ if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
     if (-not $CodexHome) { $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }
-    Get-Command claude -ErrorAction Stop | Out-Null
-    $openCodeCommand = @(Get-Command opencode -CommandType Application,ExternalScript -ErrorAction Stop | Select-Object -First 1).Source
-    if (-not $openCodeCommand) { throw 'OpenCode is required to register the plugin' }
-    Test-OpenCodeRuntime $openCodeCommand
-    Assert-NoLinks $OpenCodeConfigDirectory
-    New-Item -ItemType Directory -Path $OpenCodeConfigDirectory -Force | Out-Null
-    $configs = @(@('opencode.json', 'opencode.jsonc') | ForEach-Object { Join-Path $OpenCodeConfigDirectory $_ } | Where-Object { Test-Path -LiteralPath $_ })
-    if (-not $configs.Count) { $configs = @(Join-Path $OpenCodeConfigDirectory 'opencode.jsonc') }
-    foreach ($config in $configs) { Assert-NoLinks $config }
+    $commands = Get-BundleHostCommands
+    if (-not $commands.claude) { $ClaudeConfigDirectory = $null }
+    if (-not $commands.codex) { $CodexHome = $null }
+    $openCodeCommand = $commands.opencode
+    $configs = @()
+    if ($openCodeCommand) {
+        Test-OpenCodeRuntime $openCodeCommand
+        Assert-NoLinks $OpenCodeConfigDirectory
+        New-Item -ItemType Directory -Path $OpenCodeConfigDirectory -Force | Out-Null
+        $configs = @(@('opencode.json', 'opencode.jsonc') | ForEach-Object { Join-Path $OpenCodeConfigDirectory $_ } | Where-Object { Test-Path -LiteralPath $_ })
+        if (-not $configs.Count) { $configs = @(Join-Path $OpenCodeConfigDirectory 'opencode.jsonc') }
+        foreach ($config in $configs) { Assert-NoLinks $config }
+    }
     $oldConfig = $env:CLAUDE_CONFIG_DIR
     $stopped = @()
     try {
@@ -521,8 +539,11 @@ if (-not $SkipHostRegistration) {
         Register-BundleHosts $app $configs $ClaudeConfigDirectory $binary $ProgramsDirectory {
             $script:stopped = @(Stop-OwnedAnnouncers @(Get-OwnedAnnouncerDirectories $ClaudeConfigDirectory))
         } {
-            if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
-            else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes. Restart Claude and Codex sessions to load the installed hooks.' }
+            if ($openCodeCommand) {
+                if ($ReloadOpenCode) { Invoke-Checked 'opencode' @('api', 'post', '/api/location/reload') }
+                else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes.' }
+            }
+            if ($ClaudeConfigDirectory -or $CodexHome) { Write-Warning 'Restart installed Claude and Codex sessions to load the installed hooks.' }
         } -OpenCodeCommand $openCodeCommand -CodexHome $CodexHome
     } catch {
         foreach ($previous in $stopped) {
