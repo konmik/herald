@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { ANNOUNCEMENT_GRACE, createHerald } from '../hooks/herald.mjs'
 
 function fakeHost({ summary = 'The parser now handles empty files.', profile = { prompt: 'Summarize.', characterID: 'royal' } } = {}) {
@@ -38,6 +39,11 @@ async function runTask(host, herald, seconds) {
 }
 
 describe('codex hooks', () => {
+  test('registers only prompt and stop hooks', () => {
+    const config = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+    expect(Object.keys(config.hooks)).toEqual(['UserPromptSubmit', 'Stop'])
+  })
+
   test('titles an unnamed exec session after its project folder', async () => {
     const host = fakeHost()
     host.title = () => ''
@@ -50,8 +56,9 @@ describe('codex hooks', () => {
     const host = fakeHost()
     const herald = createHerald(host)
     await runTask(host, herald, 61)
-    expect(host.started).toEqual([['summarize', { sessionID: 's1', turnID: 't1', token: 'token-1', at: 1_061_000, model: 'gpt-6.1-sol', cwd: '/work' }]])
-    await herald.summarize(host.started[0][1])
+    expect(host.started).toEqual([['presence', { sessionID: 's1', pid: 4242 }], ['summarize', { sessionID: 's1', turnID: 't1', token: 'token-1', at: 1_061_000, model: 'gpt-6.1-sol', cwd: '/work' }]])
+    expect(host.read('s1').started).toBeUndefined()
+    await herald.summarize(host.started[1][1])
     expect(host.forks).toEqual([{ sessionID: 's1', prompt: 'Summarize.' }])
     expect(host.sent.at(-1)).toEqual({ type: 'notify', id: 'codex:s1:t1', sessionID: 'codex:s1', presenceSessionID: 'codex:s1', completed: 1_061_000, text: 'The parser now handles empty files.', title: 'Fix the parser', character: 'codex', characterID: 'royal', emotion: 'neutral' })
   })
@@ -59,7 +66,26 @@ describe('codex hooks', () => {
   test('stays silent for tasks shorter than a minute', async () => {
     const host = fakeHost()
     await runTask(host, createHerald(host), 59)
-    expect(host.started).toEqual([])
+    expect(host.started.map(([mode]) => mode)).toEqual(['presence'])
+    expect(host.read('s1').started).toBeUndefined()
+  })
+
+  test('duplicate stops do not start another summary', async () => {
+    const host = fakeHost()
+    const herald = createHerald(host)
+    await runTask(host, herald, 60)
+    await herald.hook(event('Stop', { last_assistant_message: 'Done.' }))
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toHaveLength(1)
+  })
+
+  test('a new prompt resets the task timer and restarts a finished keeper', async () => {
+    const host = fakeHost()
+    const herald = createHerald(host)
+    await runTask(host, herald, 59)
+    host.clock += 120_000
+    await runTask(host, herald, 59)
+    expect(host.started.map(([mode]) => mode)).toEqual(['presence', 'presence'])
+    expect(host.read('s1').pending).toBeUndefined()
   })
 
   test('a new prompt discards the queued announcement and cancels the summary in flight', async () => {
@@ -67,39 +93,49 @@ describe('codex hooks', () => {
     const herald = createHerald(host)
     await runTask(host, herald, 120)
     host.onFork = () => { herald.hook(event('UserPromptSubmit', { prompt: 'Next' })) }
-    await herald.summarize(host.started[0][1])
-    expect(host.sent.map(command => command.type)).toEqual(['discard', 'read-announcement-profile', 'discard'])
+    await herald.summarize(host.started[1][1])
+    expect(host.sent.map(command => command.type)).toEqual(['boot', 'discard', 'read-announcement-profile', 'boot', 'discard'])
     expect(host.sent.at(-1)).toEqual({ type: 'discard', sessionID: 'codex:s1', at: 1_120_000 })
   })
 
-  test('an interrupted turn is not announced', async () => {
+  test('a stop without an assistant message stays silent', async () => {
     const host = fakeHost()
     const herald = createHerald(host)
     await herald.hook(event('UserPromptSubmit', { prompt: 'Fix the parser' }))
     host.clock += 90_000
-    await herald.hook(event('Interrupt'))
-    await herald.hook(event('Stop', { last_assistant_message: 'Partial.' }))
-    expect(host.started).toEqual([])
+    await herald.hook(event('Stop'))
+    expect(host.started.map(([mode]) => mode)).toEqual(['presence'])
+    expect(host.read('s1').started).toBeUndefined()
   })
 
-  test('session start boots the announcer and starts one presence keeper', async () => {
+  test('prompts boot the announcer and reuse the presence keeper', async () => {
     const host = fakeHost()
     const herald = createHerald(host)
-    await herald.hook(event('SessionStart', { source: 'startup' }))
+    await herald.hook(event('UserPromptSubmit'))
     host.live.add(99)
-    await herald.hook(event('SessionStart', { source: 'resume' }))
+    await herald.hook(event('UserPromptSubmit'))
     expect(host.sent.slice(0, 2)).toEqual([{ type: 'boot' }, { type: 'discard', sessionID: 'codex:s1', at: 1_000_000 }])
     expect(host.started).toEqual([['presence', { sessionID: 's1', pid: 4242 }]])
   })
 
-  test('presence lasts while Codex runs and through the announcement grace period', async () => {
+  test('presence ends after a short task even while Codex stays open', async () => {
     const host = fakeHost()
     const herald = createHerald(host)
-    host.write('s1', { keeper: 7 })
+    host.write('s1', { keeper: 7, started: host.clock })
+    host.onSleep = () => herald.hook(event('Stop', { last_assistant_message: 'Done.' }))
+    await herald.presence({ sessionID: 's1', pid: 4242 })
+    expect(host.sent.filter(command => command.type === 'presence').map(command => command.sessionIDs)).toEqual([['codex:s1'], []])
+    expect(host.live.has(4242)).toBe(true)
+    expect(host.read('s1').keeper).toBeUndefined()
+  })
+
+  test('presence lasts through summary generation and the announcement grace period', async () => {
+    const host = fakeHost()
+    const herald = createHerald(host)
+    host.write('s1', { keeper: 7, pending: 'token-1' })
     host.onSleep = () => {
       if (host.clock === 1_004_000) {
-        host.live.delete(4242)
-        host.write('s1', { ...host.read('s1'), notified: host.clock })
+        host.write('s1', { ...host.read('s1'), pending: undefined, notified: host.clock })
       }
     }
     await herald.presence({ sessionID: 's1', pid: 4242 })
@@ -107,6 +143,16 @@ describe('codex hooks', () => {
     expect(presence.at(-2).sessionIDs).toEqual(['codex:s1'])
     expect(presence.at(-1).sessionIDs).toEqual([])
     expect(presence.at(-1).at - 1_004_000).toBe(ANNOUNCEMENT_GRACE)
+    expect(host.read('s1').keeper).toBeUndefined()
+  })
+
+  test('presence ends when Codex exits during a task', async () => {
+    const host = fakeHost()
+    const herald = createHerald(host)
+    host.write('s1', { keeper: 7, started: host.clock })
+    host.onSleep = () => host.live.delete(4242)
+    await herald.presence({ sessionID: 's1', pid: 4242 })
+    expect(host.sent.filter(command => command.type === 'presence').map(command => command.sessionIDs)).toEqual([['codex:s1'], []])
     expect(host.read('s1').keeper).toBeUndefined()
   })
 })
