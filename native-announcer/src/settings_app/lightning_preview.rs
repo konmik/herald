@@ -246,15 +246,27 @@ impl BenchmarkPreview {
     }
 }
 
+/// Places the scene pixels on the transparent stage as BGRA. Only the overlapping rectangle is converted, row by row in
+/// parallel; everything else stays the zeroed transparent fill, which is what a per-pixel bounds check would give.
 fn compose(pixels: &[u32], source: PhysicalRect, stage: PhysicalRect) -> RgbaImage {
-    RgbaImage::from_fn(stage.width, stage.height, |x, y| {
-        let x = x as i32 + stage.x - source.x;
-        let y = y as i32 + stage.y - source.y;
-        if x < 0 || y < 0 || x >= source.width as i32 || y >= source.height as i32 { return image::Rgba([0, 0, 0, 0]); }
-        let color = pixels[y as usize * source.width as usize + x as usize];
-        if color == 0xff00ff { image::Rgba([0, 0, 0, 0]) }
-        else { image::Rgba([color as u8, (color >> 8) as u8, (color >> 16) as u8, 255]) }
-    })
+    use rayon::prelude::*;
+    let (stage_width, stage_height) = (stage.width as usize, stage.height as usize);
+    let mut bytes = vec![0_u8; stage_width * stage_height * 4];
+    let left = (source.x - stage.x).clamp(0, stage.width as i32) as usize;
+    let right = (source.x + source.width as i32 - stage.x).clamp(0, stage.width as i32) as usize;
+    let top = (source.y - stage.y).clamp(0, stage.height as i32) as usize;
+    let bottom = (source.y + source.height as i32 - stage.y).clamp(0, stage.height as i32) as usize;
+    if left < right && top < bottom && stage_width > 0 {
+        bytes.par_chunks_mut(stage_width * 4).enumerate().skip(top).take(bottom - top).for_each(|(y, row)| {
+            let source_y = (y as i32 + stage.y - source.y) as usize;
+            let source_x = (left as i32 + stage.x - source.x) as usize;
+            let colors = &pixels[source_y * source.width as usize + source_x..][..right - left];
+            for (out, &color) in row[left * 4..right * 4].chunks_exact_mut(4).zip(colors) {
+                if color != 0xff00ff { out.copy_from_slice(&[color as u8, (color >> 8) as u8, (color >> 16) as u8, 255]); }
+            }
+        });
+    }
+    RgbaImage::from_raw(stage.width, stage.height, bytes).expect("stage buffer matches its size")
 }
 
 fn delta_after_intent_change(delta: Duration, replay_changed: bool) -> Duration {
