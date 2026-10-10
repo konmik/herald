@@ -532,7 +532,7 @@ fn layout_glyphs(font: &Font, block: &TextBlock<'_>, scale: f32) -> Vec<CachedGl
     }).collect()
 }
 
-/// The bubble's per-pixel paint, traced once per card size by running `draw_bubble` itself.
+/// The bubble's per-pixel paint, classified once per card size.
 struct CardTemplate {
     width: usize,
     height: usize,
@@ -544,36 +544,29 @@ struct CardTemplate {
     scanlines: Vec<u32>,
 }
 
-const TEMPLATE_PROBES: [u32; 2] = [0x123456, 0x654321];
-
 impl CardTemplate {
     fn new(width: usize, height: usize, scale: f32, bottom: f32) -> Self {
-        let probe = |fill: u32| {
-            let mut buffer = vec![0xff00ff; width * height];
-            draw_bubble(&mut buffer, width, height, scale, bottom, fill, None);
-            buffer
-        };
-        // Built on the first frame of a new card size, so the two probe paints and the scanline mask run concurrently.
-        let ((first, second), scanlines) = rayon::join(
-            || rayon::join(|| probe(TEMPLATE_PROBES[0]), || probe(TEMPLATE_PROBES[1])),
-            || {
-                let mut scanlines = Vec::new();
-                for y in 0..height {
-                    if (y as f32 / scale).floor() as usize % 2 != 0 { continue; }
-                    for x in 0..width {
-                        if bubble_contains(x as f32 / scale, y as f32 / scale, bottom) { scanlines.push((y * width + x) as u32); }
-                    }
+        use rayon::prelude::*;
+        let mut classes = vec![0; width * height];
+        let mut scanlines = vec![Vec::new(); height];
+        classes.par_chunks_mut(width.max(1)).zip(scanlines.par_iter_mut()).enumerate().for_each(|(y, (row, scanlines))| {
+            let y_position = y as f32 / scale;
+            let scanline = y_position.floor() as usize % 2 == 0;
+            for (x, class) in row.iter_mut().enumerate() {
+                let x_position = x as f32 / scale;
+                let outer = bubble_contains(x_position, y_position, bottom);
+                *class = u8::from(outer);
+                if rounded_contains(x_position, y_position, [8.0, 8.0, 312.0, bottom - 2.0], 18.0) {
+                    *class = if (26.0..294.0).contains(&x_position) && (bottom - 46.0..bottom - 45.0).contains(&y_position) { 3 } else { 2 };
                 }
-                scanlines
-            },
-        );
-        let classes = first.iter().zip(&second).map(|(a, b)| match (*a, *b) {
-            (0xff00ff, 0xff00ff) => 0,
-            (0x080908, 0x080908) => 1,
-            (a, b) if a == TEMPLATE_PROBES[0] && b == TEMPLATE_PROBES[1] => 2,
-            (a, b) if a == blend(TEMPLATE_PROBES[0], 0xffffff, 30) && b == blend(TEMPLATE_PROBES[1], 0xffffff, 30) => 3,
-            other => panic!("Unclassified bubble pixel {other:x?}"),
-        }).collect();
+                // The inner tail paints last, exactly as in draw_bubble.
+                if triangle_contains(x_position, y_position, [[239.0, bottom - 6.0], [265.0, bottom - 6.0], [252.0, bottom + 14.0]]) {
+                    *class = 2;
+                }
+                if scanline && outer { scanlines.push((y * width + x) as u32); }
+            }
+        });
+        let scanlines = scanlines.into_iter().flatten().collect();
         Self { width, height, scale: scale.to_bits(), bottom: bottom.to_bits(), classes, scanlines }
     }
 
@@ -1095,6 +1088,7 @@ fn draw_ambient_edges(coverage: &PaintCoverage, glow: &mut LightningPaint, scale
     }
 }
 
+#[cfg(test)]
 fn paint(buffer: &mut [u32], coverage: &mut Option<&mut PaintCoverage>, index: usize, color: u32) {
     buffer[index] = color;
     if let Some(coverage) = coverage { coverage.pixels[index] = true; }
@@ -1349,6 +1343,7 @@ fn bubble_contains(x: f32, y: f32, bottom: f32) -> bool {
         || rounded_contains(x, y, [6.0, 6.0, 314.0, bottom], 20.0)
 }
 
+#[cfg(test)]
 fn draw_bubble(
     buffer: &mut [u32],
     width: usize,
