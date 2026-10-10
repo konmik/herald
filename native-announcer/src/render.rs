@@ -736,8 +736,12 @@ impl PaintCoverage {
 
     fn draw_exit(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, seed: u32, lightning: LightningSettings) {
         let progress = (elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
+        let reach = consumption.powi(2) * width.max(height) as f32;
+        // The removal field only matters once consumption starts, and at full brightness it is the glow itself.
         let mut glow = LightningPaint::new(width, height, lightning);
-        let mut removal = LightningPaint::new(width, height, LightningSettings { brightness: 1.0, ..lightning });
+        let mut removal = (consumption > 0.0 && lightning.brightness != 1.0)
+            .then(|| LightningPaint::new(width, height, LightningSettings { brightness: 1.0, ..lightning }));
         let intensity = lightning.pulse_profile.exit(elapsed);
         for (index, contour) in self.contours(width, height).iter().enumerate() {
             for branch in 0..2 {
@@ -745,7 +749,7 @@ impl PaintCoverage {
                 let start = random as usize % contour.len();
                 let end = (start + (85.0 * scale) as usize) % contour.len();
                 glow.bolt(contour[start], contour[end], scale, random, 0.8, (progress / 0.16).min(1.0));
-                removal.bolt(contour[start], contour[end], scale, random, 0.8, (progress / 0.16).min(1.0));
+                if let Some(removal) = &mut removal { removal.bolt(contour[start], contour[end], scale, random, 0.8, (progress / 0.16).min(1.0)); }
             }
         }
         let bottom = height as f32;
@@ -759,21 +763,20 @@ impl PaintCoverage {
         ];
         for (index, (from, to)) in routes.into_iter().enumerate() {
             glow.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
-            removal.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0));
+            if let Some(removal) = &mut removal { removal.bolt(from, to, scale, seed ^ index as u32 * 7919, 1.2, ((progress - index as f32 * 0.025) / 0.28).clamp(0.0, 1.0)); }
         }
-        let distance = profile::time(Stage::Distance, || removal.distance_field());
-        let consumption = ((progress - 0.42) / 0.58).clamp(0.0, 1.0);
-        let reach = consumption.powi(2) * width.max(height) as f32;
+        let distance = (consumption > 0.0).then(|| profile::time(Stage::Distance, || removal.as_ref().unwrap_or(&glow).distance_field()));
         for (index, pixel) in buffer.iter_mut().enumerate() {
             if !self.pixels[index] { glow.glow[index] = 0.0; continue; }
-            if consumption > 0.0 && distance[index] < reach {
-                *pixel = 0xff00ff;
-                glow.glow[index] = 0.0;
-                continue;
-            }
-            let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
-            *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
-            if consumption > 0.0 {
+            // Before consumption the shade is zero, which leaves the pixel unchanged.
+            if let Some(distance) = &distance {
+                if distance[index] < reach {
+                    *pixel = 0xff00ff;
+                    glow.glow[index] = 0.0;
+                    continue;
+                }
+                let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
+                *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
                 let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
                 let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
                 glow.glow[index] = glow.glow[index].max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
