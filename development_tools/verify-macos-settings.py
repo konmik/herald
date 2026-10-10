@@ -863,6 +863,14 @@ class Session:
             crop = (int((panel["x"] - frame["x"]) * scale), int((panel["y"] - frame["y"]) * scale), int((panel["x"] - frame["x"] + panel["width"]) * scale), int((panel["y"] - frame["y"] + panel["height"]) * scale))
             diffs.append(sum(ImageStat.Stat(ImageChops.difference(a.crop(crop), b.crop(crop))).mean))
         assert any(d > 2 for d in diffs), f"The inline preview did not animate: {diffs}"
+        backdrop = []
+        for path in frames:
+            image = Image.open(path).convert("RGB")
+            scale = image.width / frame["width"]
+            at = lambda x, y: image.getpixel((int((panel["x"] - frame["x"] + x) * scale), int((panel["y"] - frame["y"] + y) * scale)))
+            # The card starts 16 pt into the stage and ends 64 pt above it; its bottom-left corner lies outside the bubble and portrait.
+            backdrop.append((at(6, 6), at(17, panel["height"] - 66)))
+        assert all(sum(abs(a - b) for a, b in zip(margin, card)) <= 8 for margin, card in backdrop), f"The inline preview draws an opaque rectangle behind the card: {backdrop}"
         # Presets drive all sliders, sliders return the preset to Custom.
         values = {ident: self.slider_value(ident) for ident in ["lightning-roughness", "lightning-brightness", "lightning-core-width", "lightning-glow-spread", "lightning-glow-strength"]}
         self.select("Lightning preset", "Storm")
@@ -879,7 +887,7 @@ class Session:
         wait_for(lambda: abs(self.saved()["lightning"]["roughness"] - self.slider_value("lightning-roughness")) < 0.011, "Lightning sliders did not persist.")
         assert len(self.windows_for(self.process.pid)) == 1, "The Lightning preview opened another native window."
         self.page("Audio")
-        self.record("lightning-inline-preview", True, [str(p.name) for p in frames], f"phases {sorted(phases)}, pixel diffs {[round(d, 1) for d in diffs]}")
+        self.record("lightning-inline-preview", True, [str(p.name) for p in frames], f"phases {sorted(phases)}, pixel diffs {[round(d, 1) for d in diffs]}, stage and card backdrop {backdrop[0]}")
         self.record("lightning-presets-and-sliders", True, ["lightning-edited.png", "settings.json"])
 
     def verify_characters(self):

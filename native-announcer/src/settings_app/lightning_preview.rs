@@ -327,6 +327,20 @@ mod tests {
     }
 
     #[test]
+    fn preview_card_backdrop_outside_the_bubble_and_portrait_is_transparent() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+        for scale in [1.0, 2.0] {
+            let mut playback = Playback::new(&assets, &Settings::default(), "", scale).unwrap();
+            let card = playback.scene.card.rect;
+            let pixels = playback.renderer.draw_scene(&playback.scene, Some(playback.video.frame()), 0.0, None);
+            let image = compose(&pixels, card, playback.stage);
+            for (x, y) in [(card.x + 1, card.y + 1), (card.x + 1, card.bottom() - 2)] {
+                assert_eq!(image.get_pixel(x as u32, y as u32).0[3], 0, "Opaque backdrop at ({x}, {y}) at scale {scale}");
+            }
+        }
+    }
+
+    #[test]
     fn bundled_selection_excludes_custom_files_and_replay_avoids_the_previous_character() {
         let root = std::env::temp_dir().join("opencode").join(format!("herald-lightning-pool-{}-{}", std::process::id(), crate::state::timestamp()));
         std::fs::create_dir_all(root.join("videos")).unwrap();
