@@ -842,7 +842,7 @@ impl SettingsView {
         }
         let driver = cx.spawn_in(window, async move |view, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(16)).await;
+                cx.background_executor().timer(lightning_preview::PREVIEW_FRAME).await;
                 let done = view.update_in(cx, |view, window, cx| {
                     let Some(preview) = &mut view.lightning_preview else { return true; };
                     if preview.receive() {
