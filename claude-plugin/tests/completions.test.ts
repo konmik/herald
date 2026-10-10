@@ -77,6 +77,7 @@ test('long main tasks fork the current conversation once', async ($, on) => {
   on('turn.complete', () => ({ text: '' }))
   on('model.fork', () => {
     forks++
+    expect(commands).toMatchObject([{ type: 'get-ready', sessionID: 'claude:main' }])
     return { value: { isAnswered: true, text: 'The tests passed.', usage } }
   })
   on('process.run', (_, e) => {
@@ -90,7 +91,7 @@ test('long main tasks fork the current conversation once', async ($, on) => {
   await $.turn.complete(event)
   await clock.settle()
   expect(forks).toBe(1)
-  expect(commands).toMatchObject([{ type: 'notify', sessionID: 'claude:main', text: 'The tests passed.', characterID: 'herald' }])
+  expect(commands).toMatchObject([{ type: 'get-ready', id: 'claude:main:long' }, { type: 'notify', id: 'claude:main:long', sessionID: 'claude:main', text: 'The tests passed.', characterID: 'herald' }])
 })
 
 test('custom Claude prompts are sent unchanged and reread without task data', async ($, on) => {
@@ -175,7 +176,7 @@ test('subagents stay silent until the main task finishes', async ($, on) => {
   expect(forks).toBe(1)
   expect(completions).toBe(0)
   expect(prompt).toBe(defaultPrompt)
-  expect(commands).toMatchObject([{ type: 'notify', sessionID: 'claude:main', text: 'The reviews and tests passed.' }])
+  expect(commands).toMatchObject([{ type: 'get-ready', sessionID: 'claude:main' }, { type: 'notify', sessionID: 'claude:main', text: 'The reviews and tests passed.' }])
 })
 
 test('a new user turn cancels a queued summary', async ($, on) => {

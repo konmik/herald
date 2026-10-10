@@ -129,6 +129,23 @@ async function fixture(stored?: unknown, minimumSeconds = 0) {
   return { sessions, session: client.session, active, shells, inbox, emit, child, start, finish, fail, notices, cleanup, snapshot: () => snapshot, noFinalReply: () => { finalReply = false }, paginate: () => { pageSize = 1 } }
 }
 
+test("sends get-ready before summary generation with the notification identity", async () => {
+  const f = await fixture()
+  const generate = spyOn(f.session, "generate").mockImplementation(async () => {
+    expect(commands.at(-1)).toMatchObject({ type: "get-ready", sessionID: "root", completed: 70_000 })
+    return { text: "Done." }
+  })
+  try {
+    await f.start()
+    await f.finish()
+    const ready = commands.find(command => command.type === "get-ready")!
+    expect(f.notices()[0]).toMatchObject({ id: ready.id, sessionID: ready.sessionID, completed: ready.completed })
+  } finally {
+    generate.mockRestore()
+    await f.cleanup()
+  }
+})
+
 test("cancels generation during readiness checking and allows the next summary", async () => {
   const f = await fixture()
   const context = f.session.context

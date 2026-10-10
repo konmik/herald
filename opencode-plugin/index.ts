@@ -24,8 +24,9 @@ export default Plugin.define({
       child.unref()
     }
     const completions = new Completions(
-      async (sessionID) => {
+      async (sessionID, _failed, id, completed) => {
         const profile = readAnnouncementProfile()
+        await send({ type: "get-ready", id, sessionID, completed })
         const result = await ctx.session.generate({
           sessionID,
           prompt: profile.prompt,

@@ -232,12 +232,53 @@ pub enum SpeechEvent {
 pub(crate) struct SpeechPlayback<'a> {
     gate: &'a SpeechGate,
     ready: &'a dyn Fn(),
+    warmup: Option<&'a Warmup>,
 }
 
 impl SpeechPlayback<'_> {
     pub(crate) fn begin(&self, cancelled: &AtomicBool) -> bool {
+        if let Some(warmup) = self.warmup {
+            if !warmup.ready.wait(cancelled) { return false; }
+        }
         (self.ready)();
-        self.gate.wait(cancelled)
+        let allowed = self.gate.wait(cancelled);
+        if let Some(warmup) = self.warmup { warmup.cancel(); }
+        allowed
+    }
+}
+
+pub struct Warmup {
+    ready: SpeechGate,
+    cancelled: AtomicBool,
+}
+
+impl Warmup {
+    pub fn start(settings: &Settings) -> Option<Arc<Self>> {
+        #[cfg(target_os = "windows")]
+        if settings.silent_sound_seconds > 0 {
+            let warmup = Arc::new(Self { ready: SpeechGate::new(), cancelled: AtomicBool::new(false) });
+            let worker = warmup.clone();
+            let settings = settings.clone();
+            std::thread::spawn(move || {
+                let silence = vec![0; 16000 * 120];
+                let start = crate::audio::SpeechStart::new(settings.silent_sound_seconds, || {
+                    worker.ready.release();
+                    true
+                });
+                if let Err(error) = crate::audio::play_pcm_with_start(&silence, 16000, &AtomicU16::new(0), settings.output_device.as_deref(), &worker.cancelled, Some(start)) {
+                    log(&data_directory(), format!("Warm-up: {error}"));
+                }
+                worker.cancel();
+            });
+            return Some(warmup);
+        }
+        let _ = settings;
+        None
+    }
+
+    pub fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::Relaxed) { crate::state::timing("warmup_stopped"); }
+        self.ready.cancel();
     }
 }
 
@@ -251,6 +292,7 @@ struct SpeechCommand {
     volume: Arc<AtomicU16>,
     cancelled: Arc<AtomicBool>,
     gate: Arc<SpeechGate>,
+    warmup: Option<Arc<Warmup>>,
 }
 
 pub struct Speech {
@@ -293,6 +335,7 @@ impl Speech {
                 volume,
                 cancelled,
                 gate,
+                warmup,
             } in commands
             {
                 if cancelled.load(Ordering::Relaxed) {
@@ -305,7 +348,7 @@ impl Speech {
                     crate::state::timing(format!("speech_ready id={ready_id}"));
                     let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone() });
                 };
-                let playback = SpeechPlayback { gate: &gate, ready: &ready };
+                let playback = SpeechPlayback { gate: &gate, ready: &ready, warmup: warmup.as_deref() };
                 let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback));
                 #[cfg(target_os = "windows")]
                 if !retain_engine || settings.elevenlabs_api_key.is_some() { crate::tts::release_engine(); }
@@ -325,6 +368,10 @@ impl Speech {
     }
 
     pub fn start(&mut self, text: &str, id: &str, character: &ResolvedCharacter, settings: &Settings) {
+        self.start_prepared(text, id, character, settings, None);
+    }
+
+    pub fn start_prepared(&mut self, text: &str, id: &str, character: &ResolvedCharacter, settings: &Settings, warmup: Option<Arc<Warmup>>) {
         self.cancel();
         self.set_volume(settings.volume);
         self.cancelled = Arc::new(AtomicBool::new(false));
@@ -336,10 +383,15 @@ impl Speech {
             voice: character.voice.clone(),
             source_character: character.source_character.clone(),
             local_speaker: character.local_speaker.clone(),
-            settings: settings.clone(),
+            settings: {
+                let mut settings = settings.clone();
+                if warmup.is_some() { settings.silent_sound_seconds = 0; }
+                settings
+            },
             volume: self.volume.clone(),
             cancelled: self.cancelled.clone(),
             gate,
+            warmup,
         });
     }
 
@@ -789,6 +841,40 @@ fn meeting_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_speech_waits_for_warmup_then_release_and_cancels_cleanly() {
+        for early in [true, false] {
+            let warmup = Arc::new(Warmup { ready: SpeechGate::new(), cancelled: AtomicBool::new(false) });
+            let gate = Arc::new(SpeechGate::new());
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            if !early { warmup.ready.release(); }
+            let worker_warmup = warmup.clone();
+            let worker_gate = gate.clone();
+            let worker = std::thread::spawn(move || {
+                let ready = || { ready_tx.send(()).unwrap(); };
+                let playback = SpeechPlayback { gate: &worker_gate, ready: &ready, warmup: Some(&worker_warmup) };
+                finished_tx.send(playback.begin(&AtomicBool::new(false))).unwrap();
+            });
+            if early {
+                assert!(ready_rx.recv_timeout(Duration::from_millis(50)).is_err());
+                warmup.ready.release();
+            }
+            ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            assert!(!warmup.cancelled.load(Ordering::Relaxed));
+            gate.release();
+            assert!(finished_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+            worker.join().unwrap();
+            assert!(warmup.cancelled.load(Ordering::Relaxed));
+        }
+        let warmup = Warmup { ready: SpeechGate::new(), cancelled: AtomicBool::new(false) };
+        warmup.cancel();
+        let ready = || panic!("Cancelled warm-up must not show the announcement");
+        let gate = SpeechGate::new();
+        assert!(!SpeechPlayback { gate: &gate, ready: &ready, warmup: Some(&warmup) }.begin(&AtomicBool::new(false)));
+    }
 
     #[test]
     fn remote_speech_does_not_preload_the_local_model() {

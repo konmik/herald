@@ -12,6 +12,7 @@ pub struct Notification {
     #[serde(default, rename = "presenceSessionID")]
     pub presence_session_id: String,
     pub completed: u64,
+    #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub title: String,
@@ -163,6 +164,8 @@ pub fn timing(message: impl std::fmt::Display) {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(crate) enum Command {
     Notify(Notification),
+    #[serde(rename = "get-ready")]
+    GetReady(Notification),
     Discard {
         #[serde(rename = "sessionID")]
         session_id: String,
@@ -184,6 +187,7 @@ pub(crate) enum Command {
 pub struct Inbox {
     pub data: PathBuf,
     pub queue: VecDeque<Notification>,
+    pub preparations: VecDeque<Notification>,
     received: VecDeque<String>,
     discarded: VecDeque<(String, u64)>,
     presence: HashMap<String, (Vec<String>, u64, u64)>,
@@ -207,6 +211,7 @@ impl Inbox {
                 .rev()
                 .collect(),
             received: VecDeque::new(),
+            preparations: VecDeque::new(),
             discarded: VecDeque::new(),
             presence: HashMap::new(),
         }
@@ -239,6 +244,15 @@ impl Inbox {
             now.saturating_sub(*at) < 6000
                 && (sessions.contains(owner) || sessions.contains(&notification.session_id))
         })
+    }
+
+    pub fn preparation_valid(&self, n: &Notification, now: u64) -> bool {
+        now.saturating_sub(n.completed) < 120_000 && self.is_open(n, now)
+            && !self.is_discarded(n)
+    }
+
+    pub fn is_discarded(&self, n: &Notification) -> bool {
+        self.discarded.iter().any(|(session, at)| session == &n.session_id && *at >= n.completed)
     }
 
     pub fn next(&mut self, now: u64) -> Option<Notification> {
@@ -279,7 +293,14 @@ impl Inbox {
                 }
             };
             match command {
+                Command::GetReady(n) => {
+                    if timestamp().saturating_sub(n.completed) < 120_000 && self.preparations.len() < 128 {
+                        timing(format!("get_ready id={}", n.id));
+                        self.preparations.push_back(n);
+                    }
+                }
                 Command::Notify(mut n) => {
+                    timing(format!("notification_received id={}", n.id));
                     if !self.received.contains(&n.id)
                         && !self
                             .discarded
@@ -356,6 +377,22 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_requires_presence_and_rejects_discarded_or_expired_requests() {
+        let data = test_directory();
+        let mut inbox = Inbox::new(data.clone());
+        let now = timestamp();
+        write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":["session"],"at":now}));
+        write_command(&data, "1", serde_json::json!({"type":"get-ready","id":"ready","sessionID":"session","completed":now}));
+        inbox.read(None);
+        let n = inbox.preparations.pop_front().unwrap();
+        assert!(inbox.preparation_valid(&n, now));
+        assert!(!inbox.preparation_valid(&n, now + 120_000));
+        inbox.discard("session".into(), now);
+        assert!(!inbox.preparation_valid(&n, now));
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn playback_requires_a_live_owner_and_stops_when_the_last_client_closes() {

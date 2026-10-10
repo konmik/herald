@@ -360,6 +360,7 @@ fn run() -> Result<(), String> {
         stop.clone(),
     );
     let mut current = Presentation::Idle;
+    let mut warmups = std::collections::HashMap::<String, (state::Notification, Arc<platform::Warmup>)>::new();
     let launched = Instant::now();
     let mut last_inbox = Instant::now() - Duration::from_secs(1);
     let mut next_frame = Instant::now();
@@ -389,6 +390,8 @@ fn run() -> Result<(), String> {
             | Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. }, .. } => *control_flow = ControlFlow::Exit,
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
                 speech.cancel(); signal.stop();
+                for (_, warmup) in warmups.values() { warmup.cancel(); }
+                warmups.clear();
                 if let Err(error) = current.restore(&window) { state::log(&data, error); *control_flow = ControlFlow::Exit; }
                 current = Presentation::Idle; inbox.save(None);
             }
@@ -407,6 +410,8 @@ fn run() -> Result<(), String> {
                     match settings_store.reload() {
                         Ok(true) => {
                             speech.set_volume(settings_store.current.volume);
+                            for (_, warmup) in warmups.values() { warmup.cancel(); }
+                            warmups.clear();
                             signal.stop();
                             if matches!(&current, Presentation::Idle) {
                                 renderer.set_preferences(&settings_store.current.announcement_body_font, &settings_store.current.announcement_title_font);
@@ -419,7 +424,7 @@ fn run() -> Result<(), String> {
                         let notification = current.notification().filter(|n| !demo_mode || n.session_id != "demo");
                         inbox.read(notification)
                     };
-                    if invalidated {
+                    if invalidated || matches!(&current, Presentation::Preparing(pending) if inbox.is_discarded(&pending.notification)) {
                         speech.cancel(); signal.stop();
                         if let Err(error) = current.restore(&window) { state::log(&data, error); *control_flow = ControlFlow::Exit; return; }
                         current = Presentation::Idle; inbox.save(None);
@@ -429,6 +434,18 @@ fn run() -> Result<(), String> {
                 let settings = &settings_store.current;
                 let local = chrono::Local::now();
                 let muted = meeting.muted(now) || platform::meeting_override(&data) || settings.quiet_at(local.hour() * 60 + local.minute()) || settings.volume == 0;
+                warmups.retain(|_, (notification, warmup)| {
+                    let keep = !muted && inbox.preparation_valid(notification, state::timestamp());
+                    if !keep { warmup.cancel(); }
+                    keep
+                });
+                for notification in inbox.preparations.drain(..).collect::<Vec<_>>() {
+                    if !muted && inbox.preparation_valid(&notification, state::timestamp()) && !warmups.contains_key(&notification.id) && warmups.len() < 128 {
+                        if let Some(warmup) = platform::Warmup::start(settings) {
+                            warmups.insert(notification.id.clone(), (notification, warmup));
+                        }
+                    }
+                }
                 let mut activation = None;
                 if muted {
                     if let Some(pending) = current.take_preparing(None) {
@@ -446,6 +463,7 @@ fn run() -> Result<(), String> {
                             }
                         }
                         SpeechEvent::Finished { id, result } => {
+                            if let Some((_, warmup)) = warmups.remove(&id) { warmup.cancel(); }
                             if let Some(pending) = current.take_preparing(Some(&id)) {
                                 if let Err(error) = result { state::log(&data, format!("Speech: {error}")); }
                                 speech.cancel();
@@ -529,7 +547,8 @@ fn run() -> Result<(), String> {
                         if muted {
                             activation = Some((pending, true));
                         } else {
-                            speech.start(&pending.notification.text, &pending.notification.id, &pending.character, settings);
+                            let warmup = warmups.get(&pending.notification.id).map(|(_, warmup)| warmup.clone());
+                            speech.start_prepared(&pending.notification.text, &pending.notification.id, &pending.character, settings, warmup);
                             speech_started += 1;
                             current = Presentation::Preparing(pending);
                         }
@@ -680,6 +699,7 @@ fn run() -> Result<(), String> {
                 }
             }
             Event::LoopDestroyed => {
+                for (_, warmup) in warmups.values() { warmup.cancel(); }
                 if let Err(error) = current.restore(&window) { state::log(&data, error); }
                 stop.store(true, Ordering::Relaxed); speech.cancel(); signal.stop();
                 if let Presentation::Playing(active) = &current { max_visible = max_visible.max(active.started.elapsed().as_secs_f64()); }
