@@ -318,6 +318,31 @@ fn fold_neighbour_row(row: &mut [f32], neighbour: &[f32]) {
     for x in 0..width - 1 { row[x] = row[x].min(neighbour[x + 1] + 1.414); }
 }
 
+/// Per-pixel constants of the curved portrait screen: where it samples the video and its scanline times vignette shade.
+#[derive(Clone, Copy)]
+struct PortraitTexel { warped: [f32; 2], shade: f32, inside: bool }
+
+/// Same arithmetic as evaluating the curvature per pixel each frame, done once per portrait size.
+fn portrait_warp(face_size: usize) -> Vec<PortraitTexel> {
+    let mut texels = Vec::with_capacity(face_size * face_size);
+    for y in 0..face_size {
+        let source_y = y * 128 / face_size;
+        for x in 0..face_size {
+            let horizontal = (x as f32 / face_size as f32 - 0.5) * 2.0;
+            let vertical = (y as f32 / face_size as f32 - 0.5) * 2.0;
+            let radius = horizontal * horizontal + vertical * vertical;
+            let curvature = 1.0 + radius * 0.065;
+            let warped_x = (horizontal * curvature + 1.0) * 63.5;
+            let warped_y = (vertical * curvature + 1.0) * 63.5;
+            let inside = (0.0..128.0).contains(&warped_x) && (0.0..128.0).contains(&warped_y);
+            let scanline = if source_y.is_multiple_of(2) { 0.82 } else { 1.0 };
+            let vignette = 1.0 - radius * 0.13;
+            texels.push(PortraitTexel { warped: [warped_x, warped_y], shade: scanline * vignette, inside });
+        }
+    }
+    texels
+}
+
 pub fn display_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut remaining = text;
@@ -352,6 +377,7 @@ pub struct Renderer {
     contour_cache: Option<(Vec<bool>, Contours)>,
     glyph_cache: std::cell::RefCell<std::collections::HashMap<TextKey, std::sync::Arc<Vec<CachedGlyph>>>>,
     template: Option<CardTemplate>,
+    portrait_warp: Option<(usize, Vec<PortraitTexel>)>,
 }
 
 /// Identifies one laid-out text block; its glyph rasters do not change between frames.
@@ -488,6 +514,7 @@ impl Renderer {
             contour_cache: None,
             glyph_cache: Default::default(),
             template: None,
+            portrait_warp: None,
         })
     }
 
@@ -678,6 +705,10 @@ impl Renderer {
             }
         }
         let scanline_phase = self.random() as usize % 3;
+        let warp = match self.portrait_warp.take() {
+            Some(warp) if warp.0 == face_size => warp,
+            _ => (face_size, portrait_warp(face_size)),
+        };
         for y in 0..face_size {
             let source_y = y * 128 / face_size;
             let row_offset = row_displacement[source_y];
@@ -688,13 +719,8 @@ impl Renderer {
                 let index = (face_y + y) * width + face_x + x;
                 buffer[index] = 0x0b0b09;
                 if let Some(coverage) = &mut coverage { coverage.pixels[index] = true; }
-                let horizontal = (x as f32 / face_size as f32 - 0.5) * 2.0;
-                let vertical = (y as f32 / face_size as f32 - 0.5) * 2.0;
-                let radius = horizontal * horizontal + vertical * vertical;
-                let curvature = 1.0 + radius * 0.065;
-                let warped_x = (horizontal * curvature + 1.0) * 63.5;
-                let warped_y = (vertical * curvature + 1.0) * 63.5;
-                if !(0.0..128.0).contains(&warped_x) || !(0.0..128.0).contains(&warped_y) {
+                let PortraitTexel { warped: [warped_x, warped_y], shade, inside } = warp.1[y * face_size + x];
+                if !inside {
                     buffer[index] = 0x080908;
                     continue;
                 }
@@ -716,13 +742,7 @@ impl Renderer {
                     + (background & 255) * 29)
                     / 256;
                 let faded = blend(background, luminance * 0x010101, 24);
-                let scanline = if source_y.is_multiple_of(2) {
-                    0.82
-                } else {
-                    1.0
-                };
-                let vignette = 1.0 - radius * 0.13;
-                let brightness = scanline * vignette * picture_flicker;
+                let brightness = shade * picture_flicker;
                 buffer[index] = multiply_color(faded, brightness);
                 let ambient_grain = self.random() & 255;
                 buffer[index] = blend(buffer[index], ambient_grain * 0x010101, 5);
@@ -751,6 +771,7 @@ impl Renderer {
                 }
             }
         }
+        self.portrait_warp = Some(warp);
         if let Some(start) = portrait { profile::add(Stage::Portrait, start); }
         if let Some(coverage) = coverage {
             if let Some((pixels, contours)) = &self.contour_cache {
