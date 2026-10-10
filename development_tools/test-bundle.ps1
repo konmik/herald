@@ -319,6 +319,42 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
     Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Host rollback left a cache backup'
     $script:mutateClaude = $false
+    & {
+        function Get-Command {
+            param($Name, $CommandType, $ErrorAction)
+            if ($Name -in $available) { [pscustomobject]@{ Source = "fixture-$Name" } }
+        }
+        function Register-ClaudeBundle { $calls.Add('claude') }
+        function Register-CodexBundle { $calls.Add('codex') }
+        function Register-OpenCodeBundle {
+            param($App, $Configs, $BeforeWrite, $AfterWrite, $OpenCodeCommand)
+            $calls.Add('opencode')
+            & $BeforeWrite
+            & $AfterWrite
+        }
+        function Get-ClaudeInstallations { }
+        function Install-SettingsShortcut { $calls.Add('shortcut') }
+        for ($mask = 0; $mask -lt 8; $mask++) {
+            $available = @()
+            if ($mask -band 1) { $available += 'claude' }
+            if ($mask -band 2) { $available += 'codex' }
+            if ($mask -band 4) { $available += 'opencode' }
+            $commands = Get-BundleHostCommands -WarningAction SilentlyContinue
+            Assert-True ($commands.Count -eq $available.Count) 'Host detection did not skip absent apps'
+            foreach ($name in $available) { Assert-True ($commands[$name] -eq "fixture-$name") 'Installed host command was not detected' }
+            $calls = [Collections.Generic.List[string]]::new()
+            $claudeProfile = if ($commands.claude) { Join-Path $temporary 'optional-claude' } else { $null }
+            $codexProfile = if ($commands.codex) { Join-Path $temporary 'optional-codex' } else { $null }
+            $hostConfigs = @(if ($commands.opencode) { Join-Path $temporary 'optional-opencode.jsonc' })
+            Register-BundleHosts $app $hostConfigs $claudeProfile $binary (Join-Path $temporary 'optional-programs') -OpenCodeCommand $commands.opencode -CodexHome $codexProfile
+            Assert-True ($calls.Count -eq $available.Count + 1) 'Optional host registration skipped an installed app or registered an absent app'
+            foreach ($name in $available) { Assert-True ($calls.Contains($name)) 'Installed host was not registered' }
+            Assert-True ($calls.Contains('shortcut')) 'Missing apps prevented installing the settings shortcut'
+        }
+        Assert-True (-not (Test-Path (Join-Path $temporary 'optional-claude'))) 'Absent Claude profile was created'
+        Assert-True (-not (Test-Path (Join-Path $temporary 'optional-codex'))) 'Absent Codex profile was created'
+        Assert-True (-not (Test-Path (Join-Path $temporary 'optional-opencode.jsonc'))) 'Absent OpenCode config was created'
+    }
     Rename-Item -LiteralPath $bundle -NewName 'source-unavailable'
     Remove-DeploymentDirectory $payload
     Test-Bundle $app | Out-Null
