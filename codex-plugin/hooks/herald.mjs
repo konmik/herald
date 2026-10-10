@@ -26,14 +26,11 @@ export function createHerald(host) {
     if (typeof sessionID !== 'string' || !sessionID) return
     const key = keyFor(sessionID)
     const at = host.now()
-    if (event.hook_event_name === 'SessionStart') {
+    if (event.hook_event_name === 'UserPromptSubmit') {
+      const state = update(sessionID, { started: at, token: host.uuid(), pending: undefined, notified: undefined })
       await host.bridge({ type: 'boot' })
       await host.bridge({ type: 'discard', sessionID: key, at })
-      const state = update(sessionID, { ended: false })
       if (!host.alive(state.keeper)) update(sessionID, { keeper: host.start(['presence', JSON.stringify({ sessionID, pid: host.parent })]) })
-    } else if (event.hook_event_name === 'UserPromptSubmit') {
-      update(sessionID, { started: at, token: host.uuid(), pending: undefined })
-      await host.bridge({ type: 'discard', sessionID: key, at })
     } else if (event.hook_event_name === 'Stop') {
       const state = host.read(sessionID)
       if (typeof state.started !== 'number' || state.pending) return
@@ -41,12 +38,8 @@ export function createHerald(host) {
         update(sessionID, { started: undefined })
         return
       }
-      update(sessionID, { pending: state.token })
+      update(sessionID, { started: undefined, pending: state.token })
       host.start(['summarize', JSON.stringify({ sessionID, turnID: event.turn_id, token: state.token, at, model: event.model, cwd: event.cwd })])
-    } else if (event.hook_event_name === 'Interrupt') {
-      update(sessionID, { started: undefined, token: host.uuid(), pending: undefined })
-    } else if (event.hook_event_name === 'SessionEnd') {
-      update(sessionID, { ended: true })
     }
   }
 
@@ -73,7 +66,7 @@ export function createHerald(host) {
     for (;;) {
       const state = host.read(job.sessionID)
       if (state.keeper !== host.pid) return
-      const open = !state.ended && host.alive(job.pid)
+      const open = typeof state.started === 'number' && host.alive(job.pid)
       const announcing = Boolean(state.pending) || host.now() - (state.notified ?? -Infinity) < ANNOUNCEMENT_GRACE
       if (!open && !announcing) break
       await host.bridge({ type: 'presence', clientID, sessionIDs: [key], sequence: ++sequence, at: host.now() })
