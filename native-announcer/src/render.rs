@@ -463,11 +463,7 @@ impl Renderer {
             image::imageops::resize(frame, 128, 128, image::imageops::FilterType::Triangle)
         });
         let image = resized.as_ref().or(image);
-        buffer.fill(if cfg!(any(target_os = "windows", target_os = "linux")) {
-            0xff00ff
-        } else {
-            0x1c1b16
-        });
+        buffer.fill(0xff00ff);
         let logical_height = height as f32 / scale;
         let strike = entrance.filter(|elapsed| !elapsed.is_zero() && *elapsed < crate::state::TRANSITION_DURATION);
         let active = match self.lightning_activity {
@@ -1722,14 +1718,7 @@ mod tests {
         assert_eq!(buffer[110 * 320 + 252], 0x141922);
         assert_eq!(buffer[111 * 320 + 252], 0x191f2a);
         assert_eq!(buffer[62 * 320 + 40], 0x2a2e36);
-        assert_eq!(
-            buffer[0],
-            if cfg!(any(target_os = "windows", target_os = "linux")) {
-                0xff00ff
-            } else {
-                0x1c1b16
-            }
-        );
+        assert_eq!(buffer[0], 0xff00ff);
         for (font, text, y, size, color, cutoff) in [
             (&renderer.body_font, renderer.text.as_str(), 26.0, renderer.body_preference.size, 0xeef2f7, 62.0),
             (&renderer.title_font, renderer.title.as_str(), 72.0, renderer.title_preference.size, 0x9daabd, 72.0 + f32::from(renderer.title_preference.size) + 8.0),
