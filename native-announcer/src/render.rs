@@ -1046,12 +1046,18 @@ fn raster_stroke(glow: &mut [f32], width: usize, height: usize, rows: std::ops::
     let per_step = if bounds.step > 0.0 { 1.0 / bounds.step } else { 0.0 };
     let unit = &bounds.unit[reach.class];
     for y in top..bottom {
+        let row_offset = y as f32 - from[1];
+        // Rounded along * dy stays between 0 and dy, so the vertical gap to that interval bounds every pixel distance.
+        let near = ((row_offset - row_offset.clamp(dy.min(0.0), dy.max(0.0))).abs() - 0.4).max(0.0) / scale;
+        let bin = ((near * per_step) as usize).saturating_sub(1).min(STRENGTH_BINS);
+        let upper = unit[bin] * reach.intensity;
         for x in left..right {
-            let along = (((x as f32 - from[0]) * dx + (y as f32 - from[1]) * dy) / squared).clamp(0.0, 1.0);
+            let index = (y - rows.start) * width + x;
+            if upper <= glow[index] { continue; }
+            let along = (((x as f32 - from[0]) * dx + row_offset * dy) / squared).clamp(0.0, 1.0);
             let (offset_x, offset_y) = (x as f32 - from[0] - along * dx, y as f32 - from[1] - along * dy);
             let offset_squared = offset_x * offset_x + offset_y * offset_y;
             if offset_squared > reach_squared { continue; }
-            let index = (y - rows.start) * width + x;
             // sqrt stands in for hypot when picking the bound; one bin nearer absorbs their last-bit difference.
             let near = (offset_squared.sqrt() - 0.4).max(0.0) / scale;
             let bin = ((near * per_step) as usize).saturating_sub(1).min(STRENGTH_BINS);
