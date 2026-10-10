@@ -219,6 +219,8 @@ struct Stroke {
 
 /// Rows per parallel raster band; each band applies every stroke clipped to its rows.
 const RASTER_BAND_ROWS: usize = 16;
+/// Rows per band when rasterizing strokes in parallel.
+const STROKE_BAND_ROWS: usize = 4;
 
 struct LightningPaint {
     width: usize,
@@ -243,10 +245,25 @@ impl LightningPaint {
         let strokes: Vec<(Stroke, StrokeReach)> = std::mem::take(&mut self.strokes).into_iter()
             .filter_map(|stroke| stroke_reach(lightning, &bounds, stroke).map(|reach| (stroke, reach))).collect();
         let (width, height, lightning) = (self.width, self.height, self.lightning);
-        self.glow.par_chunks_mut(RASTER_BAND_ROWS * width).enumerate().for_each(|(band, glow)| {
-            let top = band * RASTER_BAND_ROWS;
-            let rows = top..(top + RASTER_BAND_ROWS).min(height);
-            for (stroke, reach) in &strokes { raster_stroke(glow, width, height, rows.clone(), lightning, &bounds, *stroke, reach); }
+        if width == 0 || height == 0 { return; }
+        // Strokes crowd along the card edges, so thin bands keep the busiest rows from serializing one thread; each band
+        // only visits the strokes whose box reaches it.
+        let bands = height.div_ceil(STROKE_BAND_ROWS);
+        let mut members: Vec<Vec<u32>> = vec![Vec::new(); bands];
+        for (index, (stroke, reach)) in strokes.iter().enumerate() {
+            let extent = (lightning.stroke_radius * stroke.scale * stroke.taper.sqrt()).min(reach.pixels);
+            let top = ((stroke.from[1].min(stroke.to[1]) - extent).floor().max(0.0) as usize).min(height);
+            let bottom = ((stroke.from[1].max(stroke.to[1]) + extent).ceil().max(0.0) as usize).min(height);
+            if top >= bottom { continue; }
+            for band in top / STROKE_BAND_ROWS..bottom.div_ceil(STROKE_BAND_ROWS) { members[band].push(index as u32); }
+        }
+        self.glow.par_chunks_mut(STROKE_BAND_ROWS * width).zip(members.par_iter()).enumerate().for_each(|(band, (glow, members))| {
+            let top = band * STROKE_BAND_ROWS;
+            let rows = top..(top + STROKE_BAND_ROWS).min(height);
+            for &index in members {
+                let (stroke, reach) = &strokes[index as usize];
+                raster_stroke(glow, width, height, rows.clone(), lightning, &bounds, *stroke, reach);
+            }
         });
     }
 
