@@ -317,7 +317,9 @@ mod tests {
     }
 
     fn test_directory() -> PathBuf {
-        let path = std::env::temp_dir().join("opencode").join(format!("herald-bridge-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join("opencode").join(format!("herald-bridge-{}-{}-{unique}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
