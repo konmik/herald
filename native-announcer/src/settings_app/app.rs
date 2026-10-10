@@ -6,6 +6,7 @@ mod appearance;
 mod keyboard;
 #[path = "lightning_preview.rs"]
 mod lightning_preview;
+pub(crate) use lightning_preview::BenchmarkPreview;
 use keyboard::RevealFocused;
 #[cfg_attr(target_os = "windows", path = "instance.rs")]
 #[cfg_attr(target_os = "linux", path = "instance_linux.rs")]

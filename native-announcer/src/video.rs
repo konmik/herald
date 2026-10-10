@@ -59,7 +59,7 @@ impl Video {
             return Ok(());
         }
         let Some(decoder) = self.decoder.as_mut() else { return Ok(()); };
-        match decoder.read(&mut self.frame) {
+        match crate::profile::time(crate::profile::Stage::Video, || decoder.read(&mut self.frame)) {
             Ok(looped) => self.loops += looped as u64,
             Err(error) => {
                 self.decoder = None;

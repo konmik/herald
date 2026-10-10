@@ -8,3 +8,6 @@ mod app;
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use app::run;
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+pub(crate) use app::BenchmarkPreview;
