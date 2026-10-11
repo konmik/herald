@@ -1762,15 +1762,22 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
             app_id: Some("herald-settings".into()),
             window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
             titlebar: Some(gpui_kit::TitlebarOptions { title: Some("Herald settings".into()), ..Default::default() }),
+            show: !cfg!(target_os = "windows"),
             ..WindowOptions::default()
         };
         match gpui_kit::open_window(options, cx, |window, cx| {
-            if let Err(error) = instance.register(window) {
-                *launch_error_for_app.borrow_mut() = Some(error);
-            }
             cx.new(|cx| SettingsView::new(data, assets, settings, instance.clone(), window, cx))
         }) {
             Ok((handle, view)) => {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if let Err(error) = instance.register(window) {
+                        *launch_error_for_app.borrow_mut() = Some(error);
+                        cx.quit();
+                    } else {
+                        #[cfg(target_os = "windows")]
+                        window.activate_window();
+                    }
+                });
                 let _ = handle.downcast::<Root>();
                 let view = view.downgrade();
                 cx.on_action({
