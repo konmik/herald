@@ -13,7 +13,10 @@ param(
     [int]$WarmupSeconds = 5,
     [ValidateRange(1, 3600)]
     [int]$SampleSeconds = 10,
-    [string]$TtsDirectory
+    [string]$TtsDirectory,
+    [ValidateSet('Settings', 'Announcer')]
+    [string]$Mode = 'Settings',
+    [switch]$Muted
 )
 
 $ErrorActionPreference = 'Stop'
@@ -230,6 +233,7 @@ function Get-ExecutableInfo {
     return [pscustomobject][ordered]@{
         path = [IO.Path]::GetFullPath($file.FullName)
         hash = $hash.Hash.ToUpperInvariant()
+        size = $file.Length
     }
 }
 
@@ -383,35 +387,59 @@ function Invoke-SettingsMemoryRun {
         $startInfo.CreateNoWindow = $true
         $startInfo.Environment['HERALD_DATA'] = $DataDirectory
         $startInfo.Environment['HERALD_TTS'] = if ($TtsDirectory) { $TtsDirectory } else { Join-Path $Assets 'tts/kitten-nano-en-v0_8-int8' }
-        $startInfo.ArgumentList.Add('--settings')
+        if ($Mode -eq 'Settings') {
+            $startInfo.ArgumentList.Add('--settings')
+        } else {
+            Write-JsonFile -Path (Join-Path $DataDirectory 'settings.json') -Value @{ quietMode = [bool]$Muted; scheduleEnabled = $false; volume = 35 }
+            Write-JsonFile -Path (Join-Path $DataDirectory 'meeting.json') -Value @{ active = $false; updated = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000 }
+            $startInfo.ArgumentList.Add('--isolated')
+            $startInfo.ArgumentList.Add('--test-seconds')
+            $startInfo.ArgumentList.Add([string]($WarmupSeconds + $SampleSeconds + 8))
+            $startInfo.ArgumentList.Add('--report')
+            $startInfo.ArgumentList.Add((Join-Path $DataDirectory 'report.json'))
+        }
         $startInfo.ArgumentList.Add('--assets')
         $startInfo.ArgumentList.Add($Assets)
         $process = [Diagnostics.Process]::Start($startInfo)
         if ($null -eq $process) { throw 'The settings process did not start.' }
         $record['pid'] = [int]$process.Id
-        $window = Wait-ForSettingsWindow -Process $process
+        if ($Mode -eq 'Settings') {
+            $window = Wait-ForSettingsWindow -Process $process
+        } else {
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+            while (-not (Test-Path -LiteralPath (Join-Path $DataDirectory 'inbox'))) {
+                if ($process.HasExited -or [DateTimeOffset]::UtcNow -ge $deadline) { throw 'Isolated announcer did not initialize its inbox.' }
+                Assert-NoErrorLog -DataDirectory $DataDirectory
+                Start-Sleep -Milliseconds 100
+            }
+        }
         $runningPath = Get-ProcessExecutablePath -Process $process
         $record['processExecutablePath'] = $runningPath
         if (-not (Test-SamePath -Left $runningPath -Right $Executable.path)) { throw "Running executable path did not match the requested path: $runningPath" }
         $runningHash = (Get-FileHash -LiteralPath $runningPath -Algorithm SHA256).Hash.ToUpperInvariant()
         $record['processExecutableHash'] = $runningHash
         if ($runningHash -ne $Executable.hash) { throw 'Running executable hash changed after launch.' }
-        $record['windowTitle'] = [HeraldSettingsMemoryNative]::GetWindowTitle($window)
-        if ($record['windowTitle'] -ne 'Herald settings') { throw "Unexpected settings window title: $($record['windowTitle'])" }
+        if ($Mode -eq 'Settings') {
+            $record['windowTitle'] = [HeraldSettingsMemoryNative]::GetWindowTitle($window)
+            if ($record['windowTitle'] -ne 'Herald settings') { throw "Unexpected settings window title: $($record['windowTitle'])" }
+        }
         Assert-NoErrorLog -DataDirectory $DataDirectory
         $record['childProcessCount'] = Get-ChildProcessCount -ParentId $process.Id
         $warmupDeadline = [DateTimeOffset]::UtcNow.AddSeconds($WarmupSeconds)
         while ([DateTimeOffset]::UtcNow -lt $warmupDeadline) {
             if ($process.HasExited) { throw "Settings process exited during warmup with exit code $($process.ExitCode)." }
             $process.Refresh()
-            if (-not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was no longer visible during warmup.' }
+            if ($Mode -eq 'Settings' -and -not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was no longer visible during warmup.' }
             Assert-NoErrorLog -DataDirectory $DataDirectory
             Start-Sleep -Milliseconds 100
         }
         if ($process.HasExited) { throw "Settings process exited before sampling with exit code $($process.ExitCode)." }
         $process.Refresh()
-        if (-not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was not visible at the start of sampling.' }
+        if ($Mode -eq 'Settings' -and -not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was not visible at the start of sampling.' }
         $record['loadedModules'] = @($process.Modules | ForEach-Object { $_.ModuleName })
+        $record['speechLibraries'] = @($process.Modules | Where-Object ModuleName -In @('onnxruntime.dll', 'sherpa-onnx-c-api.dll') | ForEach-Object {
+            [pscustomobject]@{ path = $_.FileName; sha256 = (Get-FileHash -LiteralPath $_.FileName -Algorithm SHA256).Hash }
+        })
         $process.Refresh()
         $cpuStart = $process.TotalProcessorTime
         $sampleStart = [Diagnostics.Stopwatch]::GetTimestamp()
@@ -419,7 +447,7 @@ function Invoke-SettingsMemoryRun {
         while ([DateTimeOffset]::UtcNow -lt $sampleDeadline) {
             if ($process.HasExited) { throw "Settings process exited during sampling with exit code $($process.ExitCode)." }
             $process.Refresh()
-            if (-not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was no longer visible during sampling.' }
+            if ($Mode -eq 'Settings' -and -not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was no longer visible during sampling.' }
             $capturedAt = [DateTimeOffset]::UtcNow.ToString('o')
             [void]$workingSetSamples.Add([pscustomobject][ordered]@{
                 capturedAt = $capturedAt
@@ -438,7 +466,8 @@ function Invoke-SettingsMemoryRun {
         $process.Refresh()
         $cpuEnd = $process.TotalProcessorTime
         $sampledWallSeconds = ([Diagnostics.Stopwatch]::GetTimestamp() - $sampleStart) / [double][Diagnostics.Stopwatch]::Frequency
-        if (-not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was not visible at the end of sampling.' }
+        if ($Mode -eq 'Settings' -and -not [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { throw 'The owned Herald settings window was not visible at the end of sampling.' }
+        if ($Mode -eq 'Announcer' -and -not $Muted -and -not @($process.Modules | Where-Object ModuleName -Like '*onnxruntime*').Count) { throw 'The idle announcer did not load its offline speech runtime.' }
         Assert-NoErrorLog -DataDirectory $DataDirectory
         $record['childProcessCountAtEnd'] = Get-ChildProcessCount -ParentId $process.Id
         $record['committedAddressSpaceAtEnd'] = [HeraldSettingsMemoryNative]::ReadCommittedAddressSpace($process.Handle)
@@ -482,7 +511,7 @@ function Invoke-SettingsMemoryRun {
             }
             if ($running) {
                 try {
-                    $closeTarget = if ($window -ne [IntPtr]::Zero -and [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { $window } else { [HeraldSettingsMemoryNative]::FindSettingsWindow($process.Id) }
+                    $closeTarget = if ($Mode -eq 'Announcer') { [IntPtr]::Zero } elseif ($window -ne [IntPtr]::Zero -and [HeraldSettingsMemoryNative]::IsOwnedVisibleSettingsWindow($window, $process.Id)) { $window } else { [HeraldSettingsMemoryNative]::FindSettingsWindow($process.Id) }
                     if ($closeTarget -ne [IntPtr]::Zero) {
                         if (-not [HeraldSettingsMemoryNative]::RequestClose($closeTarget)) {
                             $processCleanupSuccess = $false
@@ -517,6 +546,12 @@ function Invoke-SettingsMemoryRun {
                 foreach ($message in @(Get-ErrorLogMessages -DataDirectory $DataDirectory)) { Add-RunError -Errors $errors -Message $message }
             } catch {
                 Add-RunError -Errors $errors -Message "Could not inspect errors.log during cleanup: $($_.Exception.Message)"
+            }
+            if ($Mode -eq 'Announcer') {
+                if ($forcedKill -or -not $process.HasExited -or $process.ExitCode -ne 0) { Add-RunError -Errors $errors -Message 'Announcer did not exit normally.' }
+                $reportPath = Join-Path $DataDirectory 'report.json'
+                if (Test-Path -LiteralPath $reportPath) { $record['playbackReport'] = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json }
+                else { Add-RunError -Errors $errors -Message 'Announcer did not write its playback report.' }
             }
             try { $process.Dispose() } catch { $processCleanupSuccess = $false; Add-RunError -Errors $errors -Message "Could not release process handle: $($_.Exception.Message)" }
         }
@@ -616,7 +651,7 @@ function New-Summary {
     $status = if (-not [string]::IsNullOrEmpty($FatalError)) { 'failed' } elseif ($failedRuns -gt 0 -or -not $CleanupSuccess) { 'inconclusive' } elseif ($HasTreatment) { 'complete' } else { 'baseline-only' }
     return [pscustomobject][ordered]@{
         schemaVersion = 1
-        benchmark = 'settings-memory'
+        benchmark = "$($Mode.ToLowerInvariant())-memory"
         status = $status
         rawEvidence = $RawPath
         summaryEvidence = $SummaryPath
@@ -632,7 +667,7 @@ function New-Summary {
             memoryCounters = @('Process.WorkingSet64', 'Process.PrivateMemorySize64')
             sampleIntervalMilliseconds = 500
             units = 'bytes'
-            phase = 'Idle settings window after warmup'
+            phase = if ($Mode -eq 'Announcer') { "Idle announcer after warmup; muted=$Muted" } else { 'Idle settings window after warmup' }
             peakDefinition = 'Maximum sampled counter after warmup, not lifetime peak'
             gpuVramIncluded = $false
         }
@@ -652,10 +687,26 @@ $hasTreatment = -not [string]::IsNullOrWhiteSpace($Treatment)
 $treatmentInfo = if ($hasTreatment) { Get-ExecutableInfo -Path $Treatment } else { $null }
 $executableByVariant = @{ baseline = $baselineInfo }
 if ($hasTreatment) { $executableByVariant.treatment = $treatmentInfo }
+if ($Mode -eq 'Announcer' -and -not $Muted) {
+    $runtimeHashes = @()
+    foreach ($executable in $executableByVariant.Values) {
+        $runtimeHashes += ,@(@('onnxruntime.dll', 'sherpa-onnx-c-api.dll') | ForEach-Object {
+            (Get-FileHash -LiteralPath (Join-Path (Split-Path $executable.path -Parent) $_) -Algorithm SHA256 -ErrorAction Stop).Hash
+        })
+    }
+    if ($hasTreatment -and ($runtimeHashes[0] -join ',') -ne ($runtimeHashes[1] -join ',')) { throw 'Both announcers must use identical speech DLLs.' }
+}
+$modelAssets = @()
+if ($Mode -eq 'Announcer' -and -not $Muted) {
+    $modelDirectory = if ($TtsDirectory) { [IO.Path]::GetFullPath($TtsDirectory) } else { Join-Path $assets 'tts/kitten-nano-en-v0_8-int8' }
+    $modelAssets = @(Get-ChildItem -LiteralPath $modelDirectory -Recurse -File -ErrorAction Stop | Sort-Object FullName | ForEach-Object {
+        [pscustomobject]@{ path = $_.FullName; size = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+    })
+}
 
 $evidenceRoot = [IO.Path]::GetFullPath($Evidence)
 New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
-$runName = 'settings-memory-{0}-{1}' -f [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), ([guid]::NewGuid().ToString('N'))
+$runName = '{0}-memory-{1}-{2}' -f $Mode.ToLowerInvariant(), [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), ([guid]::NewGuid().ToString('N'))
 $evidenceDirectory = Join-Path $evidenceRoot $runName
 New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
 $rawPath = Join-Path $evidenceDirectory 'raw.json'
@@ -676,7 +727,7 @@ try {
     $machineBefore = Get-MachineSnapshot
     for ($repetition = 1; $repetition -le $Runs; $repetition++) {
         if ($hasTreatment) {
-            $variantOrder = @('baseline', 'treatment')
+            $variantOrder = if ($repetition % 2 -eq 1) { @('baseline', 'treatment') } else { @('treatment', 'baseline') }
         } else {
             $variantOrder = @('baseline')
         }
@@ -712,7 +763,7 @@ try {
     $fatalMessage = if ($null -ne $fatalException) { $fatalException.Message } else { $null }
     $rawPayload = [pscustomobject][ordered]@{
         schemaVersion = 1
-        benchmark = 'settings-memory'
+        benchmark = "$($Mode.ToLowerInvariant())-memory"
         startedAt = $benchmarkStartedAt.ToString('o')
         finishedAt = [DateTimeOffset]::UtcNow.ToString('o')
         parameters = [pscustomobject][ordered]@{
@@ -724,6 +775,9 @@ try {
             warmupSeconds = $WarmupSeconds
             sampleSeconds = $SampleSeconds
             assets = $assets
+            mode = $Mode
+            muted = [bool]$Muted
+            modelAssets = $modelAssets
         }
         executables = [pscustomobject][ordered]@{
             baseline = $baselineInfo
@@ -739,7 +793,7 @@ try {
             memoryCounters = @('Process.WorkingSet64', 'Process.PrivateMemorySize64')
             sampleIntervalMilliseconds = 500
             units = 'bytes'
-            phase = 'Idle settings window after warmup'
+            phase = if ($Mode -eq 'Announcer') { "Idle announcer after warmup; muted=$Muted" } else { 'Idle settings window after warmup' }
             peakDefinition = 'Maximum sampled counter after warmup, not lifetime peak'
             wholeProcess = $true
             gpuVramIncluded = $false
