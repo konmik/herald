@@ -7,7 +7,8 @@ Run tools from the repository root. Package-script entry points are in [package.
 | Tool | Purpose |
 | --- | --- |
 | [setup-checks.ps1](setup-checks.ps1) | Install locked JavaScript dependencies and the Python test environment. |
-| [check.ps1](check.ps1) | Run lint, plugin tests, type checks, asset checks, tooling tests and Rust tests. |
+| [check.ps1](check.ps1) | Run lint, the test layout check, plugin tests, type checks, asset checks, tooling tests and Rust tests. |
+| [check-test-layout.mjs](check-test-layout.mjs) | `pnpm run lint:tests`: fail when a Rust test or inline test module sits in `native-announcer/src`, a test module is not declared with its mirrored `#[path]`, or a `native-announcer/unit_tests/` file is declared by no module (its tests would never run). Tested by [tests/test-layout.test.mjs](tests/test-layout.test.mjs). |
 | [build-announcer.mjs](build-announcer.mjs) | Build the native executable and copy it into the checkout's `native-announcer/bin/`. |
 | [install-linux-menu.mjs](install-linux-menu.mjs) | Install the Herald Settings application entry; Linux native builds run this automatically. |
 | [build-bundle.ps1](build-bundle.ps1) | Build or repackage a Windows release ZIP without replacing the checkout executable. |

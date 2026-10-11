@@ -3,6 +3,7 @@ Push-Location (Split-Path $PSScriptRoot -Parent)
 try {
     foreach ($arguments in @(
         @('run', 'lint'),
+        @('run', 'lint:tests'),
         @('run', 'test'),
         @('run', 'test:claude'),
         @('run', 'typecheck'),
