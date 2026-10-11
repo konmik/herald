@@ -3,11 +3,20 @@ use gpui_kit::base::StyledExt;
 use gpui_kit::{div, px, AnyElement, App, IntoElement, ParentElement, RenderOnce, ScrollHandle, SharedString, Window};
 use std::{cell::Cell, rc::Rc};
 
-gpui_kit::actions!(herald_settings, [Apply, NextPage, PreviousPage, NextField, PreviousField, NextItem, PreviousItem, FirstItem, LastItem, FirstChoice, LastChoice, Activate, Increase, Decrease, Minimum, Maximum]);
+gpui_kit::actions!(herald_settings, [Apply, NextPage, PreviousPage, NextField, PreviousField, NextItem, PreviousItem, FirstItem, LastItem, FirstChoice, LastChoice, Activate, Increase, Decrease, Minimum, Maximum, Quit, CloseWindow]);
 
 pub fn init(cx: &mut App) {
+    cx.bind_keys(bindings());
+}
+
+/// The macOS menu bar; GPUI apps start with an empty application menu.
+pub fn menus() -> Vec<gpui_kit::Menu> {
+    Vec::new()
+}
+
+fn bindings() -> Vec<gpui_kit::KeyBinding> {
     use gpui_kit::KeyBinding;
-    cx.bind_keys([
+    vec![
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-s", Apply, Some("HeraldSettings")),
         #[cfg(target_os = "macos")]
@@ -39,7 +48,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", Decrease, Some("HeraldSlider")),
         KeyBinding::new("home", Minimum, Some("HeraldSlider")),
         KeyBinding::new("end", Maximum, Some("HeraldSlider")),
-    ]);
+    ]
 }
 
 // Kit 0.7.1 labels its textarea frame, but focuses an inner editor with no
@@ -216,4 +225,24 @@ mod tests {
         assert_eq!(node.label(), Some("Summary prompt"));
         assert_eq!(node.value(), Some("First line\nSecond line"));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quit_and_close_window_have_macos_shortcuts_and_menu_items() {
+        use super::{bindings, menus, CloseWindow, Quit};
+        use gpui_kit::{Action, KeyBinding, MenuItem};
+        let bindings = bindings();
+        let bound = |keys: &str, action: &dyn Action| bindings.iter().any(|binding| {
+            binding.keystrokes() == KeyBinding::new(keys, Quit, None).keystrokes() && binding.action().partial_eq(action)
+        });
+        assert!(bound("cmd-q", &Quit), "Cmd-Q must quit");
+        assert!(bound("cmd-w", &CloseWindow), "Cmd-W must close the window");
+        let items: Vec<(String, Box<dyn Action>)> = menus().into_iter().flat_map(|menu| menu.items).filter_map(|item| match item {
+            MenuItem::Action { name, action, .. } => Some((name.to_string(), action)),
+            _ => None,
+        }).collect();
+        assert!(items.iter().any(|(name, action)| name == "Quit Herald Settings" && action.partial_eq(&Quit)), "the app menu must offer Quit");
+        assert!(items.iter().any(|(name, action)| name == "Close Window" && action.partial_eq(&CloseWindow)), "the menu bar must offer Close Window");
+    }
+
 }
