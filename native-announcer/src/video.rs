@@ -264,11 +264,25 @@ mod native {
     }
 }
 
+/// Finder, the Dock and Launchpad start macOS apps with PATH=/usr/bin:/bin:/usr/sbin:/sbin,
+/// so the package-manager directories that hold ffmpeg are searched after PATH.
+#[cfg(not(target_os = "windows"))]
+const PROGRAM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
+
 /// Find an executable on PATH, then in `fallback` directories.
 #[cfg(not(target_os = "windows"))]
 fn find_program(name: &str, path: Option<&std::ffi::OsStr>, fallback: &[&Path]) -> Option<PathBuf> {
-    let _ = fallback;
-    path.into_iter().flat_map(std::env::split_paths).map(|directory| directory.join(name)).find(|candidate| is_executable(candidate))
+    path.into_iter().flat_map(std::env::split_paths)
+        .chain(fallback.iter().map(|directory| directory.to_path_buf()))
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ffmpeg() -> Result<PathBuf, String> {
+    let fallback = PROGRAM_DIRECTORIES.map(Path::new);
+    find_program("ffmpeg", std::env::var_os("PATH").as_deref(), &fallback)
+        .ok_or_else(|| format!("ffmpeg was not found on PATH or in {}. Install it, for example with `brew install ffmpeg`.", PROGRAM_DIRECTORIES.join(", ")))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -295,7 +309,7 @@ impl Decoder {
 
     fn open(path: &Path) -> Result<Self, String> {
         use std::process::{Command, Stdio};
-        let mut child = Command::new("ffmpeg")
+        let mut child = Command::new(ffmpeg()?)
             .args([
                 "-nostdin",
                 "-loglevel",
