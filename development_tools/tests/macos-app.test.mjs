@@ -4,26 +4,27 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
-import { APPS, BUNDLE_ID, backupName, infoPlist, isAnnouncer, macArch, ownedExecutable, parseArguments } from '../deploy-macos.mjs'
+import { APP, BUNDLE_ID, HELPER, HELPER_PATH, LEGACY_SETTINGS, backupName, bundleOf, infoPlist, isAnnouncer, macArch, ownedExecutable, parseArguments } from '../deploy-macos.mjs'
 
-test('application bundles keep the announcer out of the Dock and open Settings by name', () => {
-  const [announcer, settings] = APPS
-  assert.deepEqual([announcer.name, settings.name], ['Herald', 'Herald Settings'])
-  assert.equal(settings.identifier, `${BUNDLE_ID}.settings`)
-  const background = infoPlist({ ...announcer, version: '1.2.3' })
-  assert.match(background, /<key>CFBundleExecutable<\/key>\n {2}<string>Herald<\/string>/)
-  assert.match(background, /<key>LSUIElement<\/key>\n {2}<true\/>/)
-  assert.match(background, /NSAppleEventsUsageDescription/)
-  const regular = infoPlist({ ...settings, version: '1.2.3' })
-  assert.match(regular, /<string>Herald Settings<\/string>/)
-  assert.doesNotMatch(regular, /LSUIElement/)
+test('Herald.app opens Settings in the Dock and carries the announcer as a background helper', () => {
+  assert.deepEqual([APP.name, APP.identifier], ['Herald', BUNDLE_ID])
+  assert.deepEqual([HELPER.name, HELPER.identifier], ['Herald Announcer', `${BUNDLE_ID}.announcer`])
+  assert.equal(HELPER_PATH, 'Contents/Helpers/Herald Announcer.app')
+  assert.deepEqual([LEGACY_SETTINGS.name, LEGACY_SETTINGS.identifier], ['Herald Settings', `${BUNDLE_ID}.settings`])
+  const main = infoPlist({ ...APP, version: '1.2.3' })
+  assert.match(main, /<key>CFBundleExecutable<\/key>\n {2}<string>Herald<\/string>/)
+  assert.doesNotMatch(main, /LSUIElement/)
+  const helper = infoPlist({ ...HELPER, version: '1.2.3' })
+  assert.match(helper, /<key>CFBundleExecutable<\/key>\n {2}<string>Herald Announcer<\/string>/)
+  assert.match(helper, /<key>LSUIElement<\/key>\n {2}<true\/>/)
+  assert.match(helper, /NSAppleEventsUsageDescription/)
   assert.match(infoPlist({ name: 'A & <B>', identifier: 'x', version: '1' }), /A &amp; &lt;B&gt;/)
 })
 
 test('property lists are valid', { skip: process.platform !== 'darwin' }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'herald-plist-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  for (const app of APPS) {
+  for (const app of [APP, HELPER]) {
     const path = join(directory, `${app.name}.plist`)
     await writeFile(path, infoPlist({ ...app, version: '0.3.0' }))
     assert.equal(spawnSync('plutil', ['-lint', path]).status, 0)
@@ -44,10 +45,19 @@ test('options, architectures and process ownership', () => {
   assert.equal(macArch('arm64'), 'arm64')
   assert.throws(() => macArch('ia32'), /Unsupported/)
   const announcer = resolve('/Applications/Herald.app')
-  assert.ok(ownedExecutable(resolve('/Applications/Herald.app/Contents/MacOS/Herald'), [announcer]))
+  assert.ok(ownedExecutable(resolve('/Applications/Herald.app/Contents/Helpers/Herald Announcer.app/Contents/MacOS/Herald Announcer'), [announcer]))
   assert.ok(!ownedExecutable(resolve('/Applications/Herald.app.old/Contents/MacOS/Herald'), [announcer]))
-  assert.ok(isAnnouncer({ executable: '/Applications/Herald.app/Contents/MacOS/Herald', args: '/Applications/Herald.app/Contents/MacOS/Herald' }))
+  assert.equal(bundleOf('/Applications/Herald.app/Contents/Helpers/Herald Announcer.app/Contents/MacOS/Herald Announcer'), '/Applications/Herald.app/Contents/Helpers/Herald Announcer.app')
+  assert.equal(bundleOf('/x/bin/herald-darwin-x64'), undefined)
+  // The same path is the announcer in the old Herald.app and Settings in the new one; the bundle's LSUIElement decides.
+  const main = '/Applications/Herald.app/Contents/MacOS/Herald'
+  assert.ok(isAnnouncer({ executable: main, args: main, background: true }))
+  assert.ok(!isAnnouncer({ executable: main, args: main, background: false }))
+  const helper = '/Applications/Herald.app/Contents/Helpers/Herald Announcer.app/Contents/MacOS/Herald Announcer'
+  assert.ok(isAnnouncer({ executable: helper, args: helper, background: true }))
+  assert.ok(isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --assets /x' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --settings' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --bridge --assets /x' }))
-  assert.ok(!isAnnouncer({ executable: '/Applications/Herald Settings.app/Contents/MacOS/Herald Settings', args: '/Applications/Herald Settings.app/Contents/MacOS/Herald Settings' }))
+  const legacy = '/Applications/Herald Settings.app/Contents/MacOS/Herald Settings'
+  assert.ok(!isAnnouncer({ executable: legacy, args: legacy, background: false }))
 })

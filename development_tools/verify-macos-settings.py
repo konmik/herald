@@ -932,7 +932,7 @@ class Session:
         if path == "close button":
             perform(attribute(self.window, "AXCloseButton"), "AXPress")
         elif path == "menu Quit":
-            perform(self.menu_item("Quit Herald Settings"), "AXPress")
+            perform(self.menu_item("Quit Herald"), "AXPress")
         else:
             self.focus_window()
             self.press(path[-1].lower(), "cmd")

@@ -13,7 +13,7 @@ pub fn init(cx: &mut App) {
 pub fn menus() -> Vec<gpui_kit::Menu> {
     use gpui_kit::{Menu, MenuItem};
     vec![
-        Menu::new("Herald Settings").items([MenuItem::action("Quit Herald Settings", Quit)]),
+        Menu::new("Herald").items([MenuItem::action("Quit Herald", Quit)]),
         Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]),
     ]
 }
@@ -250,7 +250,7 @@ mod tests {
             MenuItem::Action { name, action, .. } => Some((name.to_string(), action)),
             _ => None,
         }).collect();
-        assert!(items.iter().any(|(name, action)| name == "Quit Herald Settings" && action.partial_eq(&Quit)), "the app menu must offer Quit");
+        assert!(items.iter().any(|(name, action)| name == "Quit Herald" && action.partial_eq(&Quit)), "the app menu must offer Quit");
         assert!(items.iter().any(|(name, action)| name == "Close Window" && action.partial_eq(&CloseWindow)), "the menu bar must offer Close Window");
     }
 

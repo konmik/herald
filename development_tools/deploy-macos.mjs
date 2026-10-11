@@ -1,4 +1,4 @@
-// Build a release Herald payload, install Herald.app and Herald Settings.app, register the Claude, Codex and OpenCode plugins and restart the announcer.
+// Build a release Herald payload, install Herald.app (Settings, with the announcer as a helper app), register the Claude, Codex and OpenCode plugins and restart the announcer.
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -10,11 +10,12 @@ import { fileURLToPath } from 'node:url'
 export const BUNDLE_ID = 'io.github.konmik.herald'
 export const PLUGIN_ID = 'herald@herald-local'
 export const CODEX_PLUGIN_FILES = ['.codex-plugin/plugin.json', '.agents/plugins/marketplace.json', 'hooks/hooks.json', 'hooks/herald.mjs']
-// Herald.app runs the announcer outside the Dock; Herald Settings.app is the Settings entry, like the Linux menu item.
-export const APPS = [
-  { name: 'Herald', identifier: BUNDLE_ID, background: true, payload: true },
-  { name: 'Herald Settings', identifier: `${BUNDLE_ID}.settings`, background: false, payload: false },
-]
+// Herald.app opens Settings, like the Linux menu item; the announcer runs outside the Dock as a helper inside it.
+export const APP = { name: 'Herald', identifier: BUNDLE_ID, background: false }
+export const HELPER = { name: 'Herald Announcer', identifier: `${BUNDLE_ID}.announcer`, background: true }
+export const HELPER_PATH = 'Contents/Helpers/Herald Announcer.app'
+// Earlier deployments installed Settings as a separate application.
+export const LEGACY_SETTINGS = { name: 'Herald Settings', identifier: `${BUNDLE_ID}.settings` }
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 
@@ -73,9 +74,19 @@ export function ownedExecutable(executable, directories) {
   return directories.some(directory => executable.startsWith(resolve(directory) + sep))
 }
 
-/** Announcers are stopped before replacement; Settings windows and short bridge calls are left alone. */
-export function isAnnouncer({ executable, args }) {
-  return !/(^|\s)--(settings|bridge)(\s|$)/.test(args) && !executable.endsWith('/MacOS/Herald Settings')
+/** The innermost application bundle whose `Contents/MacOS` holds this executable. */
+export function bundleOf(executable) {
+  return executable.match(/^(.*\.app)\/Contents\/MacOS\/[^/]+$/)?.[1]
+}
+
+/**
+ * Announcers are stopped before replacement; Settings windows and short bridge calls are left alone.
+ * A bundled executable is an announcer exactly when its bundle is a background (LSUIElement) app:
+ * `Herald.app/Contents/MacOS/Herald` was the announcer before the merge and is Settings after it.
+ */
+export function isAnnouncer({ executable, args, background }) {
+  if (bundleOf(executable)) return background === true
+  return !/(^|\s)--(settings|bridge)(\s|$)/.test(args)
 }
 
 function run(command, args, options = {}) {
@@ -232,23 +243,35 @@ async function makeIcon(stage) {
   return icon
 }
 
-async function makeApplication(stage, app, { binary, icon, payload, version }) {
-  const bundle = join(stage, `${app.name}.app`)
+async function makeBundle(bundle, app, { binary, icon, version }) {
   const contents = join(bundle, 'Contents')
   await mkdir(join(contents, 'MacOS'), { recursive: true })
   await mkdir(join(contents, 'Resources'), { recursive: true })
   await writeFile(join(contents, 'Info.plist'), infoPlist({ ...app, version }))
   await writeFile(join(contents, 'PkgInfo'), 'APPL????')
   await copyFile(binary, join(contents, 'MacOS', app.name))
-  // Contents/Resources is the default asset folder of a bundled executable.
+  await copyFile(icon, join(contents, 'Resources/herald.icns'))
+  output('plutil', ['-lint', join(contents, 'Info.plist')])
+  return contents
+}
+
+async function makeApplication(stage, { binary, icon, payload, version }) {
+  const bundle = join(stage, `${APP.name}.app`)
+  const contents = await makeBundle(bundle, APP, { binary, icon, version })
+  // Contents/Resources is the default asset folder of a bundled executable; the helper reads the same folder.
   await copyFile(join(root, 'native-announcer/resources/characters.json'), join(contents, 'Resources/characters.json'))
   await cp(join(root, 'native-announcer/resources/videos'), join(contents, 'Resources/videos'), { recursive: true })
-  await copyFile(icon, join(contents, 'Resources/herald.icns'))
-  if (app.payload) await cp(payload, join(contents, 'Resources/herald'), { recursive: true })
-  output('plutil', ['-lint', join(contents, 'Info.plist')])
-  output('codesign', ['--force', '--deep', '--sign', '-', bundle])
+  await cp(payload, join(contents, 'Resources/herald'), { recursive: true })
+  const helper = join(bundle, HELPER_PATH)
+  await makeBundle(helper, HELPER, { binary, icon, version })
+  output('codesign', ['--force', '--sign', '-', helper])
+  output('codesign', ['--force', '--sign', '-', bundle])
   output('codesign', ['--verify', '--deep', '--strict', bundle])
   return bundle
+}
+
+function background(bundle) {
+  return spawnSync('plutil', ['-extract', 'LSUIElement', 'raw', join(bundle, 'Contents/Info.plist')], { encoding: 'utf8' }).stdout.trim() === 'true'
 }
 
 function bundleIdentifier(bundle) {
@@ -256,10 +279,12 @@ function bundleIdentifier(bundle) {
   return result.status === 0 ? result.stdout.trim() : undefined
 }
 
-async function installApplication(source, applications, app) {
+async function installApplication(source, applications, app, backupDirectory) {
   const destination = join(applications, `${app.name}.app`)
   await assertNoLinks(destination)
   if (existsSync(destination) && bundleIdentifier(destination) !== app.identifier) throw new Error(`Refusing to replace an application Herald did not install: ${destination}`)
+  // Keep the last standalone announcer, which this install replaces with Settings plus a helper.
+  if (existsSync(destination) && !existsSync(join(destination, HELPER_PATH))) run('ditto', [destination, join(backupDirectory, `${app.name}.app`)])
   const incoming = join(applications, `.herald-stage-${randomUUID()}.app`)
   const backup = join(applications, `.herald-backup-${randomUUID()}.app`)
   run('ditto', [source, incoming])
@@ -284,24 +309,42 @@ function heraldProcesses() {
     const pid = Number(match[1])
     const open = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], { encoding: 'utf8' }).stdout ?? ''
     const executable = open.split('\n').find(entry => entry.startsWith('n'))?.slice(1)
-    if (executable) result.push({ pid, executable, args: match[2] })
+    const bundle = bundleOf(executable ?? '')
+    if (executable) result.push({ pid, executable, args: match[2], background: bundle ? background(bundle) : undefined })
   }
   return result
 }
 
-async function stopOwnedAnnouncers(directories) {
+async function stopProcesses(select) {
   const stopped = []
   for (const candidate of heraldProcesses()) {
-    if (!ownedExecutable(candidate.executable, directories) || !isAnnouncer(candidate)) continue
+    if (!select(candidate)) continue
     process.kill(candidate.pid, 'SIGTERM')
     for (let attempt = 0; ; attempt++) {
       try { process.kill(candidate.pid, 0) } catch { break }
-      if (attempt === 100) throw new Error(`Announcer process ${candidate.pid} did not stop`)
+      if (attempt === 100) throw new Error(`Herald process ${candidate.pid} did not stop`)
       await new Promise(done => setTimeout(done, 100))
     }
     stopped.push(candidate)
   }
   return stopped
+}
+
+function stopOwnedAnnouncers(directories) {
+  return stopProcesses(candidate => ownedExecutable(candidate.executable, directories) && isAnnouncer(candidate))
+}
+
+/** Remove the earlier separate Settings application when Herald installed it, after stopping it and keeping a copy. */
+async function removeLegacySettings(applications, backupDirectory) {
+  const bundle = join(applications, `${LEGACY_SETTINGS.name}.app`)
+  if (!existsSync(bundle)) return 'absent'
+  await assertNoLinks(bundle)
+  if (bundleIdentifier(bundle) !== LEGACY_SETTINGS.identifier) return `kept: ${bundle} was not installed by Herald`
+  const stopped = await stopProcesses(candidate => ownedExecutable(candidate.executable, [bundle]))
+  run('ditto', [bundle, join(backupDirectory, `${LEGACY_SETTINGS.name}.app`)])
+  spawnSync('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', ['-u', bundle], { stdio: 'ignore' })
+  await rm(bundle, { recursive: true, force: true })
+  return { removed: bundle, stopped: stopped.map(entry => entry.pid) }
 }
 
 async function readJson(path) {
@@ -427,7 +470,7 @@ async function main() {
   const codex = options.hosts && hasCommand('codex')
   const openCode = options.hosts && hasCommand('opencode')
   if (options.dryRun) {
-    console.log(JSON.stringify({ applications: APPS.map(app => join(options.applications, `${app.name}.app`)), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, codexHome: codex ? codexHome : null, openCodeConfig: openCode ? openCodeConfig : null, checks: options.checks, start: options.start }, null, 2))
+    console.log(JSON.stringify({ applications: [join(options.applications, `${APP.name}.app`)], announcer: join(options.applications, `${APP.name}.app`, HELPER_PATH), legacySettings: join(options.applications, `${LEGACY_SETTINGS.name}.app`), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, codexHome: codex ? codexHome : null, openCodeConfig: openCode ? openCodeConfig : null, checks: options.checks, start: options.start }, null, 2))
     return
   }
   if (options.checks) {
@@ -444,20 +487,21 @@ async function main() {
     await sealPayload(payload, arch, BUNDLE_ID)
     await verifyPayload(payload, arch)
     const icon = await makeIcon(stage)
-    const bundles = []
-    for (const app of APPS) bundles.push([app, await makeApplication(join(stage, 'apps'), app, { binary, icon, payload, version })])
+    const bundle = await makeApplication(join(stage, 'apps'), { binary, icon, payload, version })
+    const backupDirectory = join(root, 'temp/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
+    await mkdir(backupDirectory, { recursive: true })
+    summary.backups = backupDirectory
     const installedPayload = join(options.applications, 'Herald.app/Contents/Resources/herald')
     const previous = claude ? await claudeState(claudeConfig) : { installations: [] }
-    const owned = [join(root, 'native-announcer'), join(root, 'claude-plugin'), ...APPS.map(app => join(options.applications, `${app.name}.app`)), ...(previous.source ? [previous.source, dirname(previous.source)] : []), ...previous.installations.map(entry => entry.installPath), join(codexHome, 'plugins/cache/herald-local')]
+    const owned = [join(root, 'native-announcer'), join(root, 'claude-plugin'), join(options.applications, `${APP.name}.app`), join(options.applications, `${LEGACY_SETTINGS.name}.app`), ...(previous.source ? [previous.source, dirname(previous.source)] : []), ...previous.installations.map(entry => entry.installPath), join(codexHome, 'plugins/cache/herald-local')]
     summary.stopped = await stopOwnedAnnouncers(owned)
-    for (const [app, bundle] of bundles) summary.applications.push(await installApplication(bundle, options.applications, app))
+    summary.applications.push(await installApplication(bundle, options.applications, APP, backupDirectory))
+    summary.legacySettings = await removeLegacySettings(options.applications, backupDirectory)
     await verifyPayload(installedPayload, arch)
     summary.payload = installedPayload
     if (options.hosts) {
-      const backupDirectory = join(root, 'temp/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
       const watched = [...['settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json'].map(name => join(claudeConfig, name)), ...(codex ? [join(codexHome, 'config.toml')] : []), ...(openCode ? ['opencode.json', 'opencode.jsonc'].map(name => join(openCodeConfig, name)) : [])]
       const snapshots = await snapshot(watched, backupDirectory)
-      summary.backups = backupDirectory
       try {
         summary.claude = claude ? await registerClaude(installedPayload, claudeConfig, Boolean(options.claudeConfig || process.env.CLAUDE_CONFIG_DIR)) : 'skipped: claude is not on PATH'
         summary.codex = codex ? await registerCodex(installedPayload, codexHome, Boolean(options.codexHome || process.env.CODEX_HOME)) : 'skipped: codex is not on PATH'
@@ -468,8 +512,9 @@ async function main() {
       }
     }
     if (options.start) {
-      run('open', ['-g', join(options.applications, 'Herald.app')])
-      summary.started = join(options.applications, 'Herald.app')
+      const announcer = join(options.applications, `${APP.name}.app`, HELPER_PATH)
+      run('open', ['-g', announcer])
+      summary.started = announcer
     }
   } finally {
     await rm(stage, { recursive: true, force: true })

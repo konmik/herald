@@ -190,16 +190,23 @@ fn default_assets() -> Result<PathBuf, String> {
 }
 
 /// Inside a macOS application bundle the executable lives in `Contents/MacOS` and its assets in `Contents/Resources`.
+/// The announcer helper (`Herald.app/Contents/Helpers/Herald Announcer.app`) uses the main application's Resources.
 fn bundled_assets(directory: &std::path::Path) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") || directory.file_name()? != "MacOS" { return None; }
-    let resources = directory.parent()?.join("Resources");
+    let contents = directory.parent()?;
+    let resources = contents.join("Resources");
+    if resources.join("characters.json").is_file() { return Some(resources); }
+    let helpers = contents.parent()?.parent()?;
+    if helpers.file_name()? != "Helpers" { return None; }
+    let resources = helpers.parent()?.join("Resources");
     resources.join("characters.json").is_file().then_some(resources)
 }
 
-/// The installed `Herald Settings.app` runs this executable under the name `Herald Settings`, since Finder cannot pass `--settings`.
+/// The installed `Herald.app` opens Settings, since Finder cannot pass `--settings`; its announcer helper runs as `Herald Announcer`.
+/// `Herald Settings` is the executable name of the earlier separate Settings application.
 fn macos_settings_bundle(executable: &std::path::Path) -> bool {
     cfg!(target_os = "macos")
-        && executable.file_name().is_some_and(|name| name == "Herald Settings")
+        && executable.file_name().is_some_and(|name| name == "Herald" || name == "Herald Settings")
         && executable.parent().and_then(|path| path.file_name()).is_some_and(|name| name == "MacOS")
 }
 
@@ -729,6 +736,21 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn macos_announcer_helper_uses_the_main_application_resources_and_stays_an_announcer() {
+        let root = std::env::temp_dir().join(format!("herald-helper-test-{}", std::process::id()));
+        let main = root.join("Herald.app/Contents");
+        let helper = main.join("Helpers/Herald Announcer.app/Contents");
+        std::fs::create_dir_all(helper.join("MacOS")).unwrap();
+        std::fs::create_dir_all(main.join("Resources")).unwrap();
+        std::fs::write(main.join("Resources/characters.json"), "{}").unwrap();
+        assert_eq!(bundled_assets(&helper.join("MacOS")), Some(main.join("Resources")));
+        assert!(macos_settings_bundle(&main.join("MacOS/Herald")));
+        assert!(!macos_settings_bundle(&helper.join("MacOS/Herald Announcer")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn macos_application_bundles_find_resources_and_settings_mode() {
         let root = std::env::temp_dir().join(format!("herald-bundle-test-{}", std::process::id()));
         let contents = root.join("Herald Settings.app/Contents");
@@ -739,7 +761,6 @@ mod tests {
         assert_eq!(bundled_assets(&contents.join("MacOS")), Some(contents.join("Resources")));
         assert_eq!(bundled_assets(&root.join("native-announcer/bin")), None);
         assert!(macos_settings_bundle(&contents.join("MacOS/Herald Settings")));
-        assert!(!macos_settings_bundle(&contents.join("MacOS/Herald")));
         assert!(!macos_settings_bundle(&root.join("bin/Herald Settings")));
         std::fs::remove_dir_all(root).unwrap();
     }
