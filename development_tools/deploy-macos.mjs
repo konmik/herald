@@ -347,6 +347,15 @@ async function removeLegacySettings(applications, backupDirectory) {
   return { removed: bundle, stopped: stopped.map(entry => entry.pid) }
 }
 
+function verifyInstalledSettings(bundle) {
+  const evidence = join(root, 'temp/verification', `macos-installed-${randomUUID()}`)
+  const result = spawnSync('python3', [join(root, 'development_tools/verify-macos-settings.py'), '--feature', 'lightning', '--binary', join(bundle, 'Contents/MacOS', APP.name), '--evidence', evidence], { stdio: ['ignore', 'ignore', 'inherit'] })
+  // Exit 2 means macOS has not granted Accessibility or Screen Recording to this terminal.
+  if (result.status === 2) return `skipped: Accessibility or Screen Recording is not granted (${evidence})`
+  if (result.status !== 0) throw new Error(`The installed Settings failed verification; see ${join(evidence, 'proof.json')}`)
+  return `passed: Lightning presets play in ${bundle} (${evidence})`
+}
+
 async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')) } catch (error) { if (error.code === 'ENOENT') return undefined; throw error }
 }
@@ -511,6 +520,8 @@ async function main() {
         throw error
       }
     }
+    // Check the installed layout as Finder starts it: bundled resources and a minimal PATH.
+    if (options.checks) summary.verification = verifyInstalledSettings(join(options.applications, `${APP.name}.app`))
     if (options.start) {
       const announcer = join(options.applications, `${APP.name}.app`, HELPER_PATH)
       run('open', ['-g', announcer])
