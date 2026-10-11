@@ -29,7 +29,7 @@ except ImportError as error:  # pragma: no cover - environment check
     sys.exit(f"pyobjc is required: python3 -m pip install --user pyobjc-framework-Quartz pyobjc-framework-ApplicationServices ({error})")
 
 PAGES = ["Characters", "Audio", "Quiet hours", "Speech service", "Offline voice", "Announcements", "Lightning"]
-FEATURES = ["settings", "controls", "keyboard", "layout", "lightning", "characters"]
+FEATURES = ["settings", "controls", "keyboard", "layout", "lightning", "characters", "quit"]
 BUTTON_ROLES = {"AXButton"}
 PAGE_ROLES = {"AXRadioButton"}
 CHECK_ROLES = {"AXCheckBox"}
@@ -41,7 +41,7 @@ ITEM_ROLES = {"AXStaticText", "AXRow", "AXCell"}
 HEADING_ROLES = {"AXHeading", "Heading"}  # accesskit_macos reports headings as "Heading"
 
 KEYCODES = {
-    "a": 0, "s": 1, "w": 13, "tab": 48, "space": 49, "return": 36, "escape": 53,
+    "a": 0, "s": 1, "w": 13, "q": 12, "tab": 48, "space": 49, "return": 36, "escape": 53,
     "left": 123, "right": 124, "down": 125, "up": 126, "home": 115, "end": 119, "delete": 51,
 }
 MODIFIERS = {
@@ -913,6 +913,55 @@ class Session:
         wait_for(lambda: not any(c.get("name") == "macOS verification" for c in self.saved()["characters"].values()), "Deleting the character did not persist.")
         self.snapshot("characters-deleted")
         self.record("characters", True, ["characters-new.png", "characters-confirm.png", "characters-deleted.png"], "Video picker not opened (native file dialog).")
+
+    def menu_item(self, title):
+        def search(element, depth=0):
+            if depth > 4:
+                return None
+            for child in attribute(element, "AXChildren") or []:
+                if attribute(child, "AXRole") == "AXMenuItem" and attribute(child, "AXTitle") == title:
+                    return child
+                found = search(child, depth + 1)
+                if found is not None:
+                    return found
+            return None
+        return wait_for(lambda: search(attribute(self.app, "AXMenuBar")), f"The menu bar has no '{title}' item.")
+
+    def quit_by(self, path):
+        pid = self.process.pid
+        if path == "close button":
+            perform(attribute(self.window, "AXCloseButton"), "AXPress")
+        elif path == "menu Quit":
+            perform(self.menu_item("Quit Herald Settings"), "AXPress")
+        else:
+            self.focus_window()
+            self.press(path[-1].lower(), "cmd")
+        wait_for(lambda: self.process.poll() is not None, f"{path} did not exit the settings process.", timeout=10)
+        self.act("quit", path=path, pid=pid, exitCode=self.process.returncode)
+        assert self.process.returncode == 0, f"Settings exited with {self.process.returncode} after {path}."
+        assert not self.windows_for(pid), f"A window outlived the process after {path}."
+
+    def verify_quit(self):
+        exits = []
+        for path in ["close button", "Cmd-W", "Cmd-Q", "menu Quit"]:
+            self.quit_by(path)
+            exits.append(path)
+            self.launch("quit-" + path.lower().replace(" ", "-"))
+        self.page("Lightning")
+        wait_for(lambda: "·" in (attribute(self.need(ident="lightning-preview-info"), "AXValue") or name(self.need(ident="lightning-preview-info")) or ""), "The inline Lightning preview did not start.")
+        self.quit_by("Cmd-Q")
+        exits.append("Cmd-Q during the Lightning preview")
+        self.launch("quit-lightning")
+        self.page("Audio")
+        # A 0% preview never starts, so play at 1% (an unsaved draft value).
+        perform(self.need(ident="volume"), "AXIncrement")
+        wait_for(lambda: self.slider_value("volume") == 1, "Volume did not move to 1%.")
+        self.click(self.need(ident="preview"))
+        wait_for(lambda: name(self.need(ident="preview")) == "Stop example", "The 1% voice preview did not start.")
+        self.quit_by("close button")
+        exits.append("close button during the voice preview")
+        self.launch("quit-voice")
+        self.record("quit-paths", True, ["actions.json"], "Each path exited with status 0 and no window left: " + ", ".join(exits) + ". Dock Quit needs the app bundle and is checked on the deployed app.")
 
     # ---------- driver ----------
     def run(self):
