@@ -5,7 +5,9 @@ const viewed = new Map<string, number>()
 const expansion = new Map<string, boolean>()
 const completed = new Set<string>()
 const started = new Map<string, number>()
-const background = new Map<string, boolean>()
+type BackgroundTasks = { native: Set<string>; stop: Set<string> }
+const background = new Map<string, BackgroundTasks>()
+const terminalTaskStatuses = new Set(['completed', 'failed', 'killed', 'stopped', 'cancelled'])
 const sessions = new Set<string>()
 let editTimer: Timer | undefined
 let sessionTitle = ''
@@ -85,18 +87,50 @@ async function keyFor($: EngineInterface, agentId?: string) {
   return agentId ? root + ':' + agentId : root
 }
 
+function addBackgroundTask(key: string, taskID: string) {
+  let tasks = background.get(key)
+  if (!tasks) {
+    tasks = { native: new Set(), stop: new Set() }
+    background.set(key, tasks)
+  }
+  tasks.native.add(taskID)
+}
+
+function removeBackgroundTask(key: string, taskID: string) {
+  const tasks = background.get(key)
+  if (!tasks) return
+  tasks.native.delete(taskID)
+  tasks.stop.delete(taskID)
+  if (tasks.native.size === 0 && tasks.stop.size === 0) background.delete(key)
+}
+
+function hasRegisteredBackgroundTasks(key: string) {
+  const tasks = background.get(key)
+  return tasks != null && (tasks.native.size > 0 || tasks.stop.size > 0)
+}
+
+function terminalTaskID(text: string) {
+  const taskID = /<task-id>\s*([^<]+?)\s*<\/task-id>/.exec(text)?.[1]?.trim()
+  const status = /<status>\s*([^<]+?)\s*<\/status>/.exec(text)?.[1]?.trim()
+  return taskID && status && terminalTaskStatuses.has(status) ? taskID : undefined
+}
+
 async function discard($: EngineInterface, agentId?: string) {
   const key = await keyFor($, agentId)
+  const token = pending.get(key)
   const at = await $.clock.now()
-  viewed.set(key, at)
-  if (viewed.size > 2048) viewed.delete(viewed.keys().next().value!)
-  pending.delete(key)
+  if (pending.get(key) === token) {
+    viewed.set(key, at)
+    if (viewed.size > 2048) viewed.delete(viewed.keys().next().value!)
+    pending.delete(key)
+  }
   await bridge($, { type: 'discard', sessionID: key, at })
 }
 
-async function resetTask($: EngineInterface) {
+async function resetTask($: EngineInterface, startedKey: string, startedAt: number) {
   pending.clear()
   started.clear()
+  started.set(startedKey, startedAt)
   const root = await keyFor($)
   await discard($)
   for (const key of sessions) {
@@ -104,31 +138,57 @@ async function resetTask($: EngineInterface) {
   }
 }
 
+async function hasBackgroundWork($: EngineInterface, key: string) {
+  if (hasRegisteredBackgroundTasks(key)) return true
+  const agents = await $.agent.list()
+  return hasRegisteredBackgroundTasks(key) || agents.some((agent) => agent.status === 'pending' || agent.status === 'running' || agent.status === 'waiting')
+}
+
 async function announce($: EngineInterface, event: TurnCompleteInput, key: string, at: number, token: object) {
   if (pending.get(key) !== token) return
-  if (background.get(key)) {
+  const initialBackgroundWork = await hasBackgroundWork($, key)
+  if (pending.get(key) !== token) return
+  if (initialBackgroundWork) {
     pending.delete(key)
     return
   }
   const profile = await announcementProfile($)
   if (pending.get(key) !== token) return
-  if (background.get(key)) {
+  const presenceSessionID = await keyFor($)
+  if (pending.get(key) !== token) return
+  await bridge($, { type: 'get-ready', id: key + ':' + event.turnId, sessionID: key, presenceSessionID, completed: at })
+  if (pending.get(key) !== token) return
+  const beforeForkBackgroundWork = await hasBackgroundWork($, key)
+  if (pending.get(key) !== token) return
+  if (beforeForkBackgroundWork) {
     pending.delete(key)
     return
   }
-  await bridge($, { type: 'get-ready', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at })
-  if (pending.get(key) !== token) return
   const reply = await $.model.fork({ prompt: profile.prompt })
   if (pending.get(key) !== token) return
-  pending.delete(key)
-  started.delete(key)
+  const afterForkBackgroundWork = await hasBackgroundWork($, key)
+  if (pending.get(key) !== token) return
+  if (afterForkBackgroundWork) {
+    pending.delete(key)
+    return
+  }
   if (!reply.isAnswered) {
+    pending.delete(key)
+    started.delete(key)
     await $.ui.log('Voice summary unavailable: ' + reply.reason)
     return
   }
   const text = reply.text.replace(/\s+/g, ' ').trim()
-  if (!text || (viewed.get(key) ?? -1) >= at) return
-  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: await keyFor($), completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', characterID: profile.characterID, emotion: 'neutral' })
+  if (!text || (viewed.get(key) ?? -1) >= at) {
+    pending.delete(key)
+    started.delete(key)
+    return
+  }
+  const notificationPresenceSessionID = await keyFor($)
+  if (pending.get(key) !== token) return
+  pending.delete(key)
+  started.delete(key)
+  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: notificationPresenceSessionID, completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', characterID: profile.characterID, emotion: 'neutral' })
 }
 
 export const register: Register = (on) => {
@@ -155,10 +215,24 @@ export const register: Register = (on) => {
     return next(e)
   }).catch(async ($, e, next) => next(e))
 
+  on('prompt.submit', async ($, e, next) => {
+    editTimer?.cancel()
+    if (e.origin.kind === 'task-notification') {
+      const key = await keyFor($)
+      pending.delete(key)
+      const taskID = terminalTaskID(e.text)
+      if (taskID) removeBackgroundTask(key, taskID)
+    } else {
+      const key = await keyFor($)
+      const at = await $.clock.now()
+      await resetTask($, key, at)
+    }
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
     const key = await keyFor($)
-    if (e.text || !started.has(key)) {
-      await resetTask($)
+    if (!started.has(key)) {
       started.set(key, await $.clock.now())
     } else {
       await discard($)
@@ -167,9 +241,38 @@ export const register: Register = (on) => {
   })
 
   on('classic.Stop', async ($, e, next) => {
-    background.set(await keyFor($), (e.background_tasks ?? []).some((task) => task.type !== 'monitor' && ['running', 'pending'].includes(task.status)))
+    if (e.agent_id != null) return next(e)
+    const key = await keyFor($)
+    const tasks = (e.background_tasks ?? []).filter((task) => task.type !== 'monitor' && ['running', 'pending'].includes(task.status)).map((task) => task.id)
+    background.set(key, { native: background.get(key)?.native ?? new Set(), stop: new Set(tasks) })
     return next(e)
   }).catch(async ($, e, next) => next(e))
+
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.agentId != null) return next(e)
+    const result = await next(e)
+    if (result.isError === true || !result.result) return result
+    const taskID = result.result.backgroundTaskId
+    if (taskID && !result.result.backgroundEndsWithFinalResponse) addBackgroundTask(await keyFor($), taskID)
+    return result
+  })
+
+  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+    if (e.agentId != null) return next(e)
+    const result = await next(e)
+    if (result.isError === true || !result.result) return result
+    const taskID = result.result.backgroundTaskId
+    if (taskID && !result.result.backgroundEndsWithFinalResponse) addBackgroundTask(await keyFor($), taskID)
+    return result
+  })
+
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    if (e.agentId != null) return next(e)
+    const result = await next(e)
+    if (result.isError === true || !result.result) return result
+    removeBackgroundTask(await keyFor($), result.result.task_id)
+    return result
+  })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
@@ -184,15 +287,28 @@ export const register: Register = (on) => {
       return result
     }
     if (!started.has(key)) started.set(key, at - e.durationMs)
-    if (background.get(key)) return result
+    const token = {}
+    pending.set(key, token)
+    let hasWork = false
+    try {
+      hasWork = await hasBackgroundWork($, key)
+    } catch (error) {
+      if (pending.get(key) === token) pending.delete(key)
+      await $.ui.log('Voice summary failed: ' + String(error))
+      return result
+    }
+    if (pending.get(key) !== token) return result
+    if (hasWork) {
+      pending.delete(key)
+      return result
+    }
     if (at - started.get(key)! < 60000) {
+      pending.delete(key)
       started.delete(key)
       return result
     }
     completed.add(e.turnId)
     if (completed.size > 2048) completed.delete(completed.values().next().value!)
-    const token = {}
-    pending.set(key, token)
     $.clock.after(0, async () => {
       try {
         await announce($, e, key, at, token)
