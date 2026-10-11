@@ -264,6 +264,19 @@ mod native {
     }
 }
 
+/// Find an executable on PATH, then in `fallback` directories.
+#[cfg(not(target_os = "windows"))]
+fn find_program(name: &str, path: Option<&std::ffi::OsStr>, fallback: &[&Path]) -> Option<PathBuf> {
+    let _ = fallback;
+    path.into_iter().flat_map(std::env::split_paths).map(|directory| directory.join(name)).find(|candidate| is_executable(candidate))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 #[cfg(not(target_os = "windows"))]
 struct Decoder {
     child: std::process::Child,
@@ -331,6 +344,25 @@ impl Drop for Decoder {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn ffmpeg_is_found_outside_the_minimal_path_of_a_finder_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("herald-ffmpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let program = directory.join("ffmpeg");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Finder, the Dock and Launchpad start apps with this PATH, which misses Homebrew.
+        let finder = std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(super::find_program("ffmpeg", Some(finder), &[directory.as_path()]), Some(program.clone()));
+        assert_eq!(super::find_program("ffmpeg", None, &[directory.as_path()]), Some(program.clone()));
+        let on_path = std::env::join_paths([directory.as_path()]).unwrap();
+        assert_eq!(super::find_program("ffmpeg", Some(&on_path), &[]), Some(program));
+        assert_eq!(super::find_program("ffmpeg", Some(finder), &[]), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     use super::*;
 
     #[test]
