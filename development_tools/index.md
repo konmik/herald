@@ -52,6 +52,7 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [verify-announcer.ps1](verify-announcer.ps1) | Checkout-binary playback checks. |
 | [verify-settings.ps1](verify-settings.ps1) | Legacy Win32 baseline checks; does not drive the GPUI settings window. |
 | [verify-settings-gpui.ps1](verify-settings-gpui.ps1) | Drive the GPUI settings window through Windows UI Automation and preserve persistence, navigation and screenshot evidence. |
+| [verify-settings-startup.ps1](verify-settings-startup.ps1) | Check the first visible settings frame against a controlled background and preserve pixel samples. |
 | [verify-settings-layout.ps1](verify-settings-layout.ps1) | Legacy Win32 baseline layout checks. |
 | [verify-settings-theme.ps1](verify-settings-theme.ps1) | Legacy Win32 baseline theme checks. |
 | [verify-settings-status.ps1](verify-settings-status.ps1) | Legacy Win32 baseline status checks. |

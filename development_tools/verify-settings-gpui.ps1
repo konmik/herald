@@ -1593,6 +1593,8 @@ try {
     $script:emptyEnvironment = $emptyEnvironment
     $binaryHash = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash
     $script:binaryHash = $binaryHash
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-settings-startup.ps1') -Binary $binaryPath -Evidence (Join-Path $evidencePath 'startup')
+    if ($LASTEXITCODE -ne 0) { throw 'The first visible settings frame failed verification.' }
     $fixture = [ordered]@{
         quietMode = $false
         scheduleEnabled = $false
