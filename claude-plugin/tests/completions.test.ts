@@ -410,6 +410,51 @@ test('a new user turn cancels pending child summaries', async ($, on) => {
   expect(commands.some((command) => command.type === 'discard' && command.sessionID === 'claude:child-reset')).toBe(true)
 })
 
+for (const initialDuration of [30000, 70000]) {
+  test(`live background agents defer announcements after a ${initialDuration}ms first turn`, async ($, on) => {
+    const clock = mock.clock(on, { now: 100000 })
+    const notifications: Array<{ type: string; sessionID?: string; text?: string }> = []
+    let forks = 0
+    let agentStatus: 'pending' | 'running' | 'waiting' | null = 'pending'
+    on('session.id', () => ({ value: 'live-background-agents' }))
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    on('turn.complete', () => ({ text: '' }))
+    on('agent.list', () => ({ value: agentStatus === null ? [] : [{ id: 'review', description: 'Review', type: 'general-purpose', status: agentStatus }] }))
+    on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'The final main result.', usage } } })
+    on('process.run', (_, e) => {
+      const command = bridgeCommand(e.init?.stdin)
+      if (command.type === 'notify') notifications.push({ type: command.type, sessionID: command.sessionID, text: command.text })
+      return { value: runResult(e.init?.stdin) }
+    })
+    await $.turn.start({ turnId: 'launch', text: 'Start the review.' })
+    await clock.advance(initialDuration)
+    await $.turn.complete({ turnId: 'launch', answer: 'The review is running.', durationMs: initialDuration, isAborted: false, reason: 'answer', usage })
+    await clock.settle()
+    expect(forks).toBe(0)
+    expect(notifications).toEqual([])
+    await clock.advance(31000)
+    agentStatus = 'running'
+    await $.turn.start({ turnId: 'wakeup', text: '' })
+    await $.turn.complete({ turnId: 'wakeup', answer: 'The review is still running.', durationMs: 1000, isAborted: false, reason: 'answer', usage })
+    await clock.settle()
+    expect(forks).toBe(0)
+    expect(notifications).toEqual([])
+    agentStatus = 'waiting'
+    await $.turn.start({ turnId: 'waiting', text: '' })
+    await $.turn.complete({ turnId: 'waiting', answer: 'The review is waiting.', durationMs: 1000, isAborted: false, reason: 'answer', usage })
+    await clock.settle()
+    expect(forks).toBe(0)
+    expect(notifications).toEqual([])
+    agentStatus = null
+    await $.turn.complete({ turnId: 'review-result', agentId: 'review', answer: 'The review finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
+    await $.turn.start({ turnId: 'final', text: '' })
+    await $.turn.complete({ turnId: 'final', answer: 'The review finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    expect(forks).toBe(1)
+    expect(notifications).toEqual([{ type: 'notify', sessionID: 'claude:live-background-agents', text: 'The final main result.' }])
+  })
+}
+
 test('background shell work defers announcement and counts the whole task', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
   const commands: Array<{ type: string }> = []
