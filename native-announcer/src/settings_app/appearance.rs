@@ -58,8 +58,11 @@ mod tests {
     use super::*;
 
     fn data_directory() -> std::path::PathBuf {
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        // Parallel tests can read the same clock value, so a counter keeps their directories apart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let data = std::env::temp_dir().join(format!("herald-appearance-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(&data).unwrap();
         data
     }
