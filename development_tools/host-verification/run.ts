@@ -18,8 +18,21 @@ type ProofRow = {
   hasConfiguredPrompt?: boolean
   prompt?: string
   result?: { isAnswered: boolean }
-  event?: { agentId?: string; type?: string; created?: number; data?: { sessionID?: string } }
+  event?: { agentId?: string; type?: string; created?: number; data?: { sessionID?: string }; origin?: { kind?: string } }
+  origin?: { kind?: string }
+  agents?: { id: string; status: string }[]
+  command?: { type?: string; sessionID?: string }
   background?: { status: string; type?: string }[]
+}
+type ClaudeStreamRow = {
+  type?: string
+  subtype?: string
+  task_id?: string
+  agent_id?: string
+  is_backgrounded?: boolean
+  status?: string
+  summary?: string
+  tasks?: { task_id?: string }[]
 }
 type AnnouncementHistoryEntry = { sessionID: string; id: string; text: string }
 async function readJsonLines<T>(path: string): Promise<T[]> {
@@ -27,7 +40,28 @@ async function readJsonLines<T>(path: string): Promise<T[]> {
   return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map((line) => JSON.parse(line))
 }
 const readHostProof = () => readJsonLines<ProofRow>(proof)
+const readClaudeTranscript = () => readJsonLines<ClaudeStreamRow>(join(evidence, "transcript.jsonl"))
 const readAnnouncementHistory = () => readJsonLines<AnnouncementHistoryEntry>(join(scratch, "data/history.jsonl"))
+const mainResult = (row: ClaudeStreamRow) => row.type === "result" && row.agent_id == null
+const terminalTaskNotification = (row: ClaudeStreamRow, taskID: string) => row.type === "system" && row.subtype === "task_notification" && row.task_id === taskID && row.status != null && !["pending", "running"].includes(row.status) && typeof row.summary === "string" && row.summary.trim() !== ""
+function nativeBackgroundEvidence(rows: ClaudeStreamRow[]) {
+  const starts = rows.flatMap((row, index) => row.type === "system" && row.subtype === "task_started" && row.is_backgrounded === true && row.task_id ? [{ index, taskID: row.task_id }] : [])
+  if (!starts.length) return undefined
+  const first = starts[0]!
+  const latest = starts[starts.length - 1]!
+  const firstMainResultIndex = rows.findIndex((row, index) => index > first.index && mainResult(row))
+  const activeIndex = rows.findIndex((row, index) => index < (firstMainResultIndex < 0 ? rows.length : firstMainResultIndex) && row.type === "system" && row.subtype === "background_tasks_changed" && row.tasks?.some((task) => task.task_id === first.taskID))
+  const firstTerminalIndex = rows.findIndex((row, index) => index > first.index && terminalTaskNotification(row, first.taskID))
+  const latestTerminalIndex = rows.findIndex((row, index) => index > latest.index && terminalTaskNotification(row, latest.taskID))
+  const lastMainResultIndex = rows.findLastIndex(mainResult)
+  return { first, latest, firstMainResultIndex, activeIndex, firstTerminalIndex, latestTerminalIndex, lastMainResultIndex }
+}
+function assertNoEarlyAnnouncement(rows: ProofRow[]) {
+  assert.equal(rows.filter((row) => ["fork", "fork.start"].includes(row.type)).length, 0, "Claude forked while background work was running")
+  assert.equal(rows.filter((row) => ["bridge", "bridge.start"].includes(row.type) && row.command?.type === "notify").length, 0, "Claude announced while background work was running")
+}
+const stopWithBackground = (row: ProofRow) => row.type === "stop" && row.background?.some((job) => ["running", "pending"].includes(job.status)) === true
+const stopAfterBackground = (row: ProofRow) => row.type === "stop" && row.background != null && row.background.length === 0
 async function verifyPlaybackFinished() {
   const report = await readFile(join(evidence, "report.json"), "utf8").then((text) => JSON.parse(text)).catch(() => undefined)
   if (!report || report.finished < 1) return false
@@ -143,32 +177,52 @@ try {
     const prompt = (text: string) => process.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n")
     try {
       prompt(backgroundPrompt)
-      await waitForEvidence("background work in real Claude Stop hook", async () => {
+      const waiting = await waitForEvidence("background task launch and idle main", async () => {
         if (process.exitCode !== null) throw new Error("Claude exited before verification completed; inspect host-errors.txt")
-        const rows = await readHostProof()
-        assert.equal(rows.filter((row) => row.type === "fork").length, 0, "Claude forked while background work was running")
-        return rows.find((row) => row.type === "stop" && row.background?.some((job) => ["running", "pending"].includes(job.status)))
+        const [rows, transcript] = await Promise.all([readHostProof(), readClaudeTranscript()])
+        assertNoEarlyAnnouncement(rows)
+        const lifecycle = nativeBackgroundEvidence(transcript)
+        const mainComplete = rows.find((row) => row.type === "turn.complete" && !row.event?.agentId)
+        const nativeActive = lifecycle && lifecycle.firstMainResultIndex >= 0 && lifecycle.activeIndex >= 0 && lifecycle.activeIndex < lifecycle.firstMainResultIndex && (lifecycle.firstTerminalIndex < 0 || lifecycle.firstTerminalIndex > lifecycle.firstMainResultIndex)
+        const legacyActive = mainComplete && rows.some((row) => stopWithBackground(row) && row.at <= mainComplete.at)
+        if (!mainComplete || (!nativeActive && !legacyActive)) return undefined
+        return { lifecycle, legacyActive }
       })
-      await log({ action: "background-stop", sessionID })
+      await log({ action: "idle-with-background-work", sessionID, state: waiting })
       if (scenario === "CancelRestart") {
         prompt("Cancel the original background job using TaskStop or the shell's stop control. Then start a new background shell running pwsh -NoProfile -Command \"Start-Sleep -Seconds 65\". Give a final reply saying Restarted. When that command finishes, reply Restarted work finished. Do not read or edit files.")
         await log({ action: "cancel-and-restart", sessionID })
       }
       await waitForEvidence("Claude fork and rendered main announcement", async () => {
-        const rows = await readHostProof()
+        const [rows, transcript] = await Promise.all([readHostProof(), readClaudeTranscript()])
+        const lifecycle = nativeBackgroundEvidence(transcript)
         const fork = rows.filter((row) => row.type === "fork")
+        const forkStarts = rows.filter((row) => row.type === "fork.start")
         assert.equal(rows.filter((row) => row.type === "standalone").length, 0, "Standalone model generation replaced the conversation fork")
         assert.ok(fork.length <= 1, "More than one summary was generated")
+        const final = rows.findLast((row) => row.type === "turn.complete" && !row.event?.agentId)
+        if (final) for (const summary of [...fork, ...forkStarts]) assert.ok(summary.at >= final.at, "Fork ran before the main final report")
         const shown = await readAnnouncementHistory()
         if (!shown.length) return undefined
         assert.equal(shown.length, 1)
         assert.equal(shown[0].sessionID, "claude:" + sessionID)
         assert.equal(fork.length, 1)
+        assert.equal(forkStarts.length, 1)
         assert.equal(fork[0].sessionID, sessionID)
+        assert.equal(forkStarts[0].sessionID, sessionID)
         assert.equal(fork[0].result?.isAnswered, true)
         if (summaryMarker) assert.equal(fork[0].prompt?.includes(summaryMarker), true, "Claude did not use the saved summary prompt")
-        const final = rows.findLast((row) => row.type === "turn.complete" && !row.event?.agentId)
-        assert.ok(final && fork[0].at >= final.at, "Fork ran before the main final report")
+        assert.ok(final)
+        const legacyActive = rows.find(stopWithBackground)
+        const legacyFinished = legacyActive && rows.find((row) => row.at > legacyActive.at && stopAfterBackground(row))
+        const nativeFinished = lifecycle && lifecycle.latestTerminalIndex >= 0 && lifecycle.lastMainResultIndex > lifecycle.latestTerminalIndex
+        assert.ok(nativeFinished || (legacyFinished && final.at > legacyFinished.at), "Background task did not finish before the final main reply")
+        const notifications = rows.filter((row) => row.type === "bridge" && row.command?.type === "notify")
+        const notificationStarts = rows.filter((row) => row.type === "bridge.start" && row.command?.type === "notify")
+        assert.equal(notifications.length, 1, "Expected one native announcement")
+        assert.equal(notificationStarts.length, 1, "Expected one native announcement start")
+        assert.ok(notificationStarts[0]!.at >= final.at, "Announcement started before the main final report")
+        assert.ok(notifications[0]!.at >= final.at, "Announcement ran before the main final report")
         if (!(await verifyPlaybackFinished())) return undefined
         return shown
       })

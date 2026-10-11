@@ -10,8 +10,13 @@ export const register: Register = (on) => {
     await record($, { type: 'turn.start', event: e })
     return next(e)
   })
+  on('prompt.submit', async ($, e, next) => {
+    await record($, { type: 'prompt.submit', origin: e.origin, event: e })
+    return next(e)
+  })
   on('turn.complete', async ($, e, next) => {
-    await record($, { type: 'turn.complete', event: e })
+    const agents = e.agentId == null ? await $.agent.list() : undefined
+    await record($, { type: 'turn.complete', event: e, ...(agents ? { agents } : {}) })
     return next(e)
   })
   on('classic.Stop', async ($, e, next) => {
@@ -19,6 +24,7 @@ export const register: Register = (on) => {
     return next(e)
   })
   on('model.fork', async ($, e, next) => {
+    await record($, { type: 'fork.start', prompt: e.prompt })
     const result = await next(e)
     await record($, { type: 'fork', prompt: e.prompt, result: result.value, denied: result.deny })
     return result
@@ -28,9 +34,11 @@ export const register: Register = (on) => {
     return next(e)
   })
   on('process.run', async ($, e, next) => {
+    const command = e.argv.includes('--bridge') && e.init?.stdin ? JSON.parse(e.init.stdin) : undefined
+    if (command?.type === 'notify') await record($, { type: 'bridge.start', command })
     const result = await next(e)
-    if (e.argv.includes('--bridge') && e.init?.stdin) {
-      await record($, { type: 'bridge', command: JSON.parse(e.init.stdin), exitCode: result.value?.exitCode, denied: result.deny })
+    if (command) {
+      await record($, { type: 'bridge', command, exitCode: result.value?.exitCode, denied: result.deny })
     }
     return result
   })

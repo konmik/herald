@@ -33,6 +33,11 @@ if ($HostName -eq 'OpenCode' -and (-not $Model -or -not $Model.Contains('/'))) {
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
 New-Item -ItemType Directory -Path $evidencePath | Out-Null
 $native = $null
+$nativeStarted = $null
+$nativeExpectedPath = $null
+$nativeCloseRequested = $false
+$nativeQueueId = $null
+$nativeWindowHandle = [IntPtr]::Zero
 $driver = $null
 $oldData = $env:HERALD_DATA
 $transcribing = $false
@@ -68,6 +73,8 @@ try {
     else { $launch.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '360', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $launch.ArgumentList.Add($argument) }
     $native = [Diagnostics.Process]::Start($launch)
+    $nativeExpectedPath = [IO.Path]::GetFullPath($binary)
+    $nativeStarted = $native.StartTime
     @{ pid = $native.Id; started = $native.StartTime.ToUniversalTime().ToString('o'); binary = $binary; sha256 = (Get-FileHash $binary).Hash; data = "$scratch/data"; host = $HostName; scenario = $Scenario } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'instance.json')
     $run = [Diagnostics.ProcessStartInfo]::new((Get-Command bun).Source)
     $run.UseShellExecute = $false
@@ -86,7 +93,54 @@ try {
     $driver = [Diagnostics.Process]::Start($run)
     $started = [DateTime]::UtcNow
     while (-not $driver.WaitForExit(1000)) {
-        if ($native.HasExited) { throw 'Isolated companion exited before the host test finished' }
+        if (-not $nativeQueueId) { $native.Refresh() }
+        if ($native.HasExited) {
+            if (-not $nativeCloseRequested) { throw 'Isolated companion exited before the host test finished' }
+        } elseif (-not $nativeCloseRequested) {
+            $historyPath = Join-Path $scratch 'data/history.jsonl'
+            $queuePath = Join-Path $scratch 'data/queue.json'
+            $history = $null
+            $queue = $null
+            $filesRead = $false
+            if ((Test-Path -LiteralPath $historyPath) -and (Test-Path -LiteralPath $queuePath)) {
+                try {
+                    $history = @(Get-Content -LiteralPath $historyPath | ForEach-Object { if ($_.Trim()) { $_ | ConvertFrom-Json } })
+                    $queue = @(Get-Content -LiteralPath $queuePath -Raw | ConvertFrom-Json)
+                    $filesRead = $true
+                } catch {
+                    $history = $null
+                    $queue = $null
+                }
+            }
+            if ($filesRead) {
+                $historyIds = @($history | ForEach-Object { [string]$_.id })
+                $activeHistory = @($queue | Where-Object { $historyIds -contains [string]$_.id } | Select-Object -First 1)
+                if ($activeHistory -and -not $nativeQueueId) {
+                    $nativeWindowHandle = $native.MainWindowHandle
+                    $nativeQueueId = [string]$activeHistory[0].id
+                }
+                if ($nativeQueueId -and @($queue).Count -eq 0) {
+                    if ($native.HasExited) { throw 'Isolated companion exited before its owned playback could close' }
+                    $actualPath = [IO.Path]::GetFullPath($native.Path)
+                    if (-not [String]::Equals($actualPath, $nativeExpectedPath, [StringComparison]::OrdinalIgnoreCase) -or $native.StartTime -ne $nativeStarted) { throw 'Refusing to close a native process that is not the owned isolated companion' }
+                    $closed = if ($nativeWindowHandle -ne [IntPtr]::Zero) { $native.CloseMainWindow() } else { $false }
+                    if (-not $closed) {
+                        $ownedProcess = Get-Process -Id $native.Id -ErrorAction Stop
+                        try {
+                            $ownedProcess.Refresh()
+                            if ($ownedProcess.HasExited) { throw 'Isolated companion exited before its owned playback could close' }
+                            $ownedPath = [IO.Path]::GetFullPath($ownedProcess.Path)
+                            if (-not [String]::Equals($ownedPath, $nativeExpectedPath, [StringComparison]::OrdinalIgnoreCase) -or $ownedProcess.StartTime -ne $nativeStarted) { throw 'Refusing to close a native process that is not the owned isolated companion' }
+                            $closed = $ownedProcess.CloseMainWindow()
+                        } finally {
+                            $ownedProcess.Dispose()
+                        }
+                    }
+                    if (-not $closed) { throw 'Could not close the owned isolated companion window' }
+                    $nativeCloseRequested = $true
+                }
+            }
+        }
         $actions = Join-Path $evidencePath 'actions.jsonl'
         if ($HostName -eq 'OpenCode' -and (Test-Path $actions)) {
             $created = Get-Content $actions | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object action -EQ 'created' | Select-Object -First 1
