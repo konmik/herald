@@ -13,7 +13,7 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 if (-not $PSCmdlet.ShouldProcess($InstallDirectory, 'Test, build a release bundle and install Herald')) { return }
 Push-Location $Repository
 try {
-    Invoke-Checked 'pnpm' @('run', 'check')
+    Invoke-Checked 'npm' @('run', 'check')
     Invoke-Checked 'claude' @('plugin', 'validate', (Join-Path $Repository 'claude-plugin'))
     $zip = & "$PSScriptRoot/build-bundle.ps1"
     $zip = @($zip)[-1]

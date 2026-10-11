@@ -22,8 +22,7 @@ mkdirSync(out, { recursive: true })
 
 const build = spawnSync('cargo', ['build', '--release', '--locked', '--manifest-path', join(crate, 'Cargo.toml')], { stdio: 'inherit' })
 if (build.status !== 0) process.exit(build.status ?? 1)
-const settingsBinary = join(crate, 'target/release/herald-settings')
-const announcerBinary = join(crate, 'target/release/herald')
+const binary = join(crate, 'target/release/herald')
 const assets = join(crate, 'resources')
 
 const percentile = (sorted, p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)] : NaN
@@ -36,7 +35,7 @@ const f = value => Number.isFinite(value) ? value.toFixed(2) : '-'
 
 function bench(extra, name) {
   const file = join(out, `${name}.json`)
-  const result = spawnSync(settingsBinary, ['--assets', assets, '--benchmark-lightning', file, '--cycles', cycles, '--scale', scale, '--fps', fps, ...extra], { stdio: 'inherit', env: { ...process.env, HERALD_DATA: join(out, 'data') } })
+  const result = spawnSync(binary, ['--assets', assets, '--benchmark-lightning', file, '--cycles', cycles, '--scale', scale, '--fps', fps, ...extra], { stdio: 'inherit', env: { ...process.env, HERALD_DATA: join(out, 'data') } })
   if (result.status !== 0) throw new Error(`benchmark ${name} failed with ${result.status}`)
   return JSON.parse(readFileSync(file, 'utf8'))
 }
@@ -124,7 +123,7 @@ if (live || liveOnly) {
   writeFileSync(join(data, 'settings.json'), JSON.stringify({ volume: 0 }))
   const log = join(out, 'live-frames.jsonl')
   rmSync(log, { force: true })
-  const result = spawnSync(announcerBinary, ['--announcer', '--isolated', '--demo', 'claude', '--test-seconds', String(liveSeconds), '--assets', assets],
+  const result = spawnSync(binary, ['--isolated', '--demo', 'claude', '--test-seconds', String(liveSeconds), '--assets', assets],
     { stdio: 'inherit', env: { ...process.env, HERALD_DATA: data, HERALD_FRAME_LOG: log } })
   say(`\n## Live announcer run (${liveSeconds}s, exit ${result.status})`)
   if (existsSync(log)) {
@@ -137,7 +136,7 @@ if (live || liveOnly) {
   // Live preview run: the Settings window's inline Lightning preview, worker frames and frames the UI took.
   const previewLog = join(out, 'live-preview.jsonl')
   rmSync(previewLog, { force: true })
-  const preview = spawnSync('python3', [join(root, 'development_tools/benchmark-lightning-preview.py'), settingsBinary, assets, previewLog, String(liveSeconds)], { stdio: 'inherit' })
+  const preview = spawnSync('python3', [join(root, 'development_tools/benchmark-lightning-preview.py'), binary, assets, previewLog, String(liveSeconds)], { stdio: 'inherit' })
   say(`\n## Live Settings preview run (${liveSeconds}s, exit ${preview.status})`)
   if (existsSync(previewLog)) {
     const frames = readFileSync(previewLog, 'utf8').trim().split('\n').map(line => JSON.parse(line))

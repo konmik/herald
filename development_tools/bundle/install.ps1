@@ -73,7 +73,7 @@ function Test-Bundle {
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "native-announcer/bin/herald-settings-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-settings-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-settings-win32-$architecture.exe") + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-win32-$architecture.exe") + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
     }
     foreach ($obsolete in @('claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
@@ -259,21 +259,13 @@ function Get-OwnedAnnouncerDirectories {
     if ($CodexHome) { Join-Path $CodexHome 'plugins/cache/herald-local/herald' }
 }
 
-function Test-AnnouncerProcess {
-    param([string]$Name, [string]$CommandLine)
-    if ($CommandLine -match '(?:^|[\s"])--bridge(?:$|[\s"])') { return $false }
-    $modes = [regex]::Matches($CommandLine, '(?:^|[\s"])--(settings|announcer)(?=$|[\s"])')
-    if ($modes.Count) { return $modes[$modes.Count - 1].Groups[1].Value -eq 'announcer' }
-    return $Name -notlike 'herald-settings*'
-}
-
 function Stop-OwnedAnnouncers {
     param([string[]]$Directories)
     $prefixes = @($Directories | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar })
     if (-not $prefixes.Count) { return }
     foreach ($process in Get-CimInstance Win32_Process -Filter "Name LIKE 'herald%.exe'") {
         if (-not $process.ExecutablePath -or -not @($prefixes | Where-Object { $process.ExecutablePath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count) { continue }
-        if (-not (Test-AnnouncerProcess $process.Name $process.CommandLine)) { continue }
+        if ($process.CommandLine -match '(?:^|[\s"])--settings(?:$|[\s"])') { continue }
         $handle = Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
         if (-not $handle -or $handle.HasExited -or $handle.Path -ne $process.ExecutablePath) { continue }
         $binary = $handle.Path
@@ -523,7 +515,6 @@ try {
 $app = Install-Payload $Bundle $InstallDirectory -LockHeld
 $manifest = Test-Bundle $app
 $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
-$settingsBinary = Join-Path $app "native-announcer/bin/herald-settings-win32-$($manifest.arch).exe"
 if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
     if (-not $CodexHome) { $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' } }
@@ -545,7 +536,7 @@ if (-not $SkipHostRegistration) {
     $stopped = @()
     try {
         $env:CLAUDE_CONFIG_DIR = $ClaudeConfigDirectory
-        Register-BundleHosts $app $configs $ClaudeConfigDirectory $settingsBinary $ProgramsDirectory {
+        Register-BundleHosts $app $configs $ClaudeConfigDirectory $binary $ProgramsDirectory {
             $script:stopped = @(Stop-OwnedAnnouncers @(Get-OwnedAnnouncerDirectories $ClaudeConfigDirectory))
         } {
             if ($openCodeCommand) {
@@ -557,7 +548,7 @@ if (-not $SkipHostRegistration) {
     } catch {
         foreach ($previous in $stopped) {
             if (Test-Path -LiteralPath $previous.binary) {
-                try { Start-Process -FilePath $previous.binary -ArgumentList @('--announcer', '--assets', ('"' + $previous.assets + '"')) -WindowStyle Hidden | Out-Null }
+                try { Start-Process -FilePath $previous.binary -ArgumentList @('--assets', ('"' + $previous.assets + '"')) -WindowStyle Hidden | Out-Null }
                 catch { Write-Warning "Could not restore announcer playback: $_" }
             }
         }

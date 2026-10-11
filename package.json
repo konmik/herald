@@ -29,7 +29,6 @@
     "test:settings": "pwsh -NoProfile -File development_tools/verify-settings-gpui.ps1",
     "test:characters": "pwsh -NoProfile -File development_tools/verify-settings-gpui.ps1 -Feature Characters",
     "benchmark:settings": "pwsh -NoProfile -File development_tools/benchmark-settings-memory.ps1",
-    "benchmark:announcer": "pwsh -NoProfile -File development_tools/benchmark-settings-memory.ps1 -Mode Announcer",
     "benchmark:lightning": "node development_tools/benchmark-lightning.mjs",
     "test:assets": "node --test development_tools/tests/assets.test.mjs development_tools/tests/linux-menu.test.mjs development_tools/tests/macos-app.test.mjs",
     "install:linux-menu": "node development_tools/install-linux-menu.mjs",

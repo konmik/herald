@@ -141,7 +141,7 @@ def main():
     parser.add_argument("--scroll-helper", help="Wayland pointer helper accepting x, y, screen width, screen height, and wheel steps")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    binary = root / "native-announcer/bin" / f"herald-settings-linux-{'arm64' if os.uname().machine == 'aarch64' else 'x64'}"
+    binary = root / "native-announcer/bin" / f"herald-linux-{'arm64' if os.uname().machine == 'aarch64' else 'x64'}"
     original_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     previous_accessibility = accessibility_status(connection)

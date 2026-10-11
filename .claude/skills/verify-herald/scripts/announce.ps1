@@ -1,11 +1,10 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture, [switch]$CaptureFrames, [switch]$SettingsRuntime)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture, [switch]$CaptureFrames)
 $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-announcement-' + [guid]::NewGuid())
 $binary = Join-Path $root 'native-announcer/target/debug/herald.exe'
-if ($SettingsRuntime) { $binary = Join-Path $root 'native-announcer/target/debug/herald-settings.exe' }
 $assets = Join-Path $root 'native-announcer/resources'
 $toolNode = 'node'
 if ($AppDirectory) {
@@ -14,8 +13,7 @@ if ($AppDirectory) {
     if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
-    $binaryName = if ($SettingsRuntime) { "herald-settings-win32-$architecture.exe" } else { "herald-win32-$architecture.exe" }
-    $binary = Join-Path $runtimeDirectory "native-announcer/bin/$binaryName"
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-win32-$architecture.exe"
     $assets = Join-Path $runtimeDirectory 'native-announcer/resources'
 }
 $process = $null
@@ -82,13 +80,12 @@ try {
     if ($SpeechFixture) { $info.Environment['ELEVENLABS_API_BASE_URL'] = Get-Content $addressFile -Raw }
     if ($AppDirectory) { $info.Environment.Remove('HERALD_TTS') | Out-Null }
     else { $info.Environment['HERALD_TTS'] = Join-Path $root 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8' }
-    if ($SettingsRuntime) { $info.ArgumentList.Add('--announcer') }
     foreach ($argument in @('--isolated', '--assets', $assets, '--test-seconds', '35', '--report', (Join-Path $evidencePath 'report.json'), '--snapshot', (Join-Path $evidencePath 'render.png'))) { $info.ArgumentList.Add($argument) }
     if ($CaptureFrames) {
         $info.ArgumentList.Add('--capture-frames')
         $info.ArgumentList.Add((Join-Path $evidencePath 'frames'))
     }
-    Write-Output "Launch: $binary $($info.ArgumentList -join ' '); data=$scratch; speech=$Speech; meeting=$Meeting; quiet=$Quiet"
+    Write-Output "Launch: $binary --isolated; data=$scratch; speech=$Speech; meeting=$Meeting; quiet=$Quiet"
     $process = [Diagnostics.Process]::Start($info)
     $hash = (Get-FileHash $binary).Hash
     @{ pid = $process.Id; started = $process.StartTime.ToUniversalTime().ToString('o'); binary = $binary; sha256 = $hash; data = $scratch; entry = 'production bridge transport' } | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'instance.json')

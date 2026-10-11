@@ -10,14 +10,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
-$binary = Join-Path $root 'native-announcer/target/debug/herald-settings.exe'
+$binary = Join-Path $root 'native-announcer/target/debug/herald.exe'
 if ($AppDirectory) {
     $AppDirectory = [IO.Path]::GetFullPath($AppDirectory)
     $runtimeDirectory = if ($Runtime -eq 'Claude') { Join-Path $AppDirectory 'claude-plugin' } else { $AppDirectory }
     if ($Runtime -eq 'Claude' -and $ClaudePluginDirectory) { $runtimeDirectory = [IO.Path]::GetFullPath($ClaudePluginDirectory) }
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($architecture -notin @('x64', 'arm64')) { throw 'Unsupported Windows architecture' }
-    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-settings-win32-$architecture.exe"
+    $binary = Join-Path $runtimeDirectory "native-announcer/bin/herald-win32-$architecture.exe"
 }
 $evidencePath = [IO.Path]::GetFullPath($Evidence, $root)
 $scratch = Join-Path $env:LOCALAPPDATA ('Temp/opencode/herald-verify-' + [guid]::NewGuid())

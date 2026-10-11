@@ -24,14 +24,12 @@ if (code !== 0) process.exit(code ?? 1)
 const directory = join(root, 'native-announcer', 'bin')
 await mkdir(directory, { recursive: true })
 const suffix = process.platform === 'win32' ? '.exe' : ''
+const binary = join(directory, `herald-${process.platform}-${process.arch}${suffix}`)
 const target = process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'native-announcer', 'target')
-for (const name of ['herald', 'herald-settings']) {
-  const binary = join(directory, `${name}-${process.platform}-${process.arch}${suffix}`)
-  const destination = process.platform === 'linux' ? `${binary}.new-${process.pid}` : binary
-  await copyFile(join(target, release ? 'release' : 'debug', `${name}${suffix}`), destination)
-  await chmod(destination, 0o755)
-  if (destination !== binary) await rename(destination, binary)
-  await chmod(binary, 0o755)
-  console.log(binary)
-}
+const destination = process.platform === 'linux' ? `${binary}.new-${process.pid}` : binary
+await copyFile(join(target, release ? 'release' : 'debug', `herald${suffix}`), destination)
+await chmod(destination, 0o755)
+if (destination !== binary) await rename(destination, binary)
+await chmod(binary, 0o755)
 if (process.platform === 'linux') console.log(await installLinuxMenu(root))
+console.log(binary)

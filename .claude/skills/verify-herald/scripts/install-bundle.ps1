@@ -48,10 +48,9 @@ try {
     $marketplace = Get-Content -LiteralPath (Join-Path $profile 'plugins/known_marketplaces.json') -Raw | ConvertFrom-Json
     if ($marketplace.'herald-local'.source.path -ne (Join-Path $app 'claude-plugin')) { throw 'Claude marketplace does not use the installed source' }
     $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
-    $settingsBinary = Join-Path $app "native-announcer/bin/herald-settings-win32-$($manifest.arch).exe"
-    Install-SettingsShortcut $settingsBinary $programs
+    Install-SettingsShortcut $binary $programs
     $shortcut = Read-NativeShortcut (Join-Path $programs 'Herald settings.lnk')
-    if ($shortcut.TargetPath -ne $settingsBinary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
+    if ($shortcut.TargetPath -ne $binary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
     Invoke-Checked 'claude' @('plugin', 'marketplace', 'add', (Join-Path $root 'claude-plugin'), '--scope', 'user')
     $blockedPrograms = Join-Path $scratch 'blocked-programs'
     New-Item -ItemType Directory -Path $blockedPrograms | Out-Null
@@ -62,16 +61,14 @@ try {
     foreach ($path in $rollbackPaths) { $rollbackBytes[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
     $cacheBefore = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
     $rejected = $false
-    try { Register-BundleHosts $app @($config) $profile $settingsBinary $blockedPrograms } catch { $rejected = $true }
+    try { Register-BundleHosts $app @($config) $profile $binary $blockedPrograms } catch { $rejected = $true }
     if (-not $rejected) { throw 'An unrelated shortcut did not reject real host registration' }
     foreach ($path in $rollbackPaths) {
         if ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -cne $rollbackBytes[$path]) { throw "Real host rollback changed $path" }
     }
     $cacheAfter = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
     if (@(Compare-Object $cacheBefore $cacheAfter).Count) { throw 'Real host rollback changed the previous cache' }
-    Register-BundleHosts $app @($config) $profile $settingsBinary $programs
-    $registeredShortcut = Read-NativeShortcut (Join-Path $programs 'Herald settings.lnk')
-    if ($registeredShortcut.TargetPath -ne $settingsBinary) { throw 'Host registration replaced the Settings shortcut target' }
+    Register-BundleHosts $app @($config) $profile $binary $programs
     Remove-DeploymentDirectory $extract
     if (Test-Path -LiteralPath (Join-Path $app 'node_modules')) { throw 'Installed package must not contain checkout dependencies' }
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'boot-bundle.ps1') -AppDirectory $app -Evidence (Join-Path $evidencePath 'opencode-bootstrap')
