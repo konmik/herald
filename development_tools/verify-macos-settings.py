@@ -188,7 +188,8 @@ class Session:
         Path("/tmp/opencode").mkdir(exist_ok=True)
         self.data = Path(tempfile.mkdtemp(prefix="herald-settings-", dir="/tmp/opencode"))
         self.settings_path = self.data / "settings.json"
-        self.env = dict(os.environ, HERALD_DATA=str(self.data))
+        # Finder, the Dock and Launchpad start apps with this PATH; tools found only through a shell PATH break there.
+        self.env = dict(os.environ, HERALD_DATA=str(self.data), PATH="/usr/bin:/bin:/usr/sbin:/sbin")
         self.env.pop("HERALD_TTS", None)
         self.log = (self.evidence / "runtime.log").open("w")
         self.actions = []
@@ -255,7 +256,10 @@ class Session:
 
     def launch(self, role):
         before = self.saved_bytes()
-        self.process = subprocess.Popen([str(self.binary), "--settings", "--assets", str(self.assets)], env=self.env, stdout=self.log, stderr=self.log, stdin=subprocess.DEVNULL, start_new_session=True)
+        # An installed Herald.app reads its own Contents/Resources, so it is verified without --assets.
+        bundled = self.binary.parent.name == "MacOS" and self.binary.parent.parent.parent.suffix == ".app"
+        command = [str(self.binary), "--settings"] + ([] if bundled else ["--assets", str(self.assets)])
+        self.process = subprocess.Popen(command, env=self.env, stdout=self.log, stderr=self.log, stdin=subprocess.DEVNULL, start_new_session=True)
         record = wait_for(lambda: self.identity(self.process.pid), "The settings process did not start.")
         self.owned.append(record)
         native = wait_for(lambda: self.windows_for(self.process.pid), "The settings process did not open an on-screen window.")
@@ -871,6 +875,19 @@ class Session:
             # The card starts 16 pt into the stage and ends 64 pt above it; its bottom-left corner lies outside the bubble and portrait.
             backdrop.append((at(6, 6), at(17, panel["height"] - 66)))
         assert all(sum(abs(a - b) for a, b in zip(margin, card)) <= 8 for margin, card in backdrop), f"The inline preview draws an opaque rectangle behind the card: {backdrop}"
+        # Every preset must play in the stage, not show an error such as a missing decoder.
+        played = {}
+        for preset in ["Original", "Storm", "Electric", "Plasma"]:
+            self.select("Lightning preset", preset)
+            wait_for(lambda: "·" in (info() or ""), f"The {preset} preview did not play: {info()}")
+            first = Image.open(self.snapshot(f"lightning-{preset.lower()}-0")).convert("RGB")
+            time.sleep(0.6)
+            shots = [first, Image.open(self.snapshot(f"lightning-{preset.lower()}-1")).convert("RGB")]
+            scale = shots[0].width / frame["width"]
+            box = (int((panel["x"] - frame["x"]) * scale), int((panel["y"] - frame["y"]) * scale), int((panel["x"] - frame["x"] + panel["width"]) * scale), int((panel["y"] - frame["y"] + panel["height"]) * scale))
+            played[preset] = round(sum(ImageStat.Stat(ImageChops.difference(shots[0].crop(box), shots[1].crop(box))).mean), 1)
+            assert played[preset] > 2, f"The {preset} preview did not animate: {played[preset]}"
+        self.record("lightning-every-preset-plays", True, [f"lightning-{preset.lower()}-0.png" for preset in played], f"pixel diffs {played}")
         # Presets drive all sliders, sliders return the preset to Custom.
         values = {ident: self.slider_value(ident) for ident in ["lightning-roughness", "lightning-brightness", "lightning-core-width", "lightning-glow-spread", "lightning-glow-strength"]}
         self.select("Lightning preset", "Storm")
