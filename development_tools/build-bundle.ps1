@@ -52,10 +52,15 @@ try {
         }
         foreach ($plugin in @('claude-plugin', 'codex-plugin')) { Copy-Item -LiteralPath $runtime -Destination (Join-Path $stage "$plugin/native-announcer") -Recurse -Force }
     }
+    $piSource = Join-Path $(if ($PayloadDirectory) { $PayloadDirectory } else { $root }) 'pi-plugin'
+    Get-PayloadFiles $piSource | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $stage 'pi-plugin') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $piSource 'index.ts') -Destination (Join-Path $stage 'pi-plugin/index.ts')
+    Get-ChildItem -LiteralPath $piSource -Filter '*.mjs' -File | Copy-Item -Destination (Join-Path $stage 'pi-plugin')
     $package = Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     $exports = @{}
     foreach ($entry in $package.exports.PSObject.Properties) { $exports[$entry.Name] = $entry.Value -replace '\.ts$', '.js' }
-    @{ name = $package.name; version = $package.version; type = 'module'; private = $true; exports = $exports } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $stage 'package.json') -Encoding utf8NoBOM
+    @{ name = $package.name; version = $package.version; type = 'module'; private = $true; exports = $exports; pi = $package.pi } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $stage 'package.json') -Encoding utf8NoBOM
     $output = Join-Path $stage 'opencode-plugin'
     $licenseDirectory = Join-Path $stage 'licenses/javascript'
     Invoke-Checked 'bun' @('build', (Join-Path $root 'opencode-plugin/index.ts'), '--target', 'bun', '--format', 'esm', '--minify', '--outdir', $output, "--metafile=$metafile") | Out-Host
@@ -68,6 +73,8 @@ try {
     '{"schemaVersion":1}' | Set-Content (Join-Path $stage 'claude-plugin/.claude-plugin/packaged.json') -Encoding utf8NoBOM
     foreach ($name in @('install.ps1', 'shortcut.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "bundle/$name") -Destination (Join-Path $stage $name) -Force }
     Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', "--outfile=$(Join-Path $stage 'register-opencode.mjs')", "--metafile=$metafile") | Out-Host
+    Copy-BundledLicenses $metafile $root $licenseDirectory
+    Invoke-Checked 'bun' @('build', (Join-Path $PSScriptRoot 'bundle/register-pi.mjs'), '--main-fields', 'module', '--main-fields', 'main', '--target', 'node', '--format', 'esm', '--minify', "--outfile=$(Join-Path $stage 'register-pi.mjs')", "--metafile=$metafile") | Out-Host
     Copy-BundledLicenses $metafile $root $licenseDirectory
     $package = Get-Content (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
     $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) { 'X64' { 'x64' } 'Arm64' { 'arm64' } default { throw 'Unsupported architecture' } }

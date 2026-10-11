@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { piAgentDirectory, registerPi } from './bundle/register-pi.mjs'
 
 export const BUNDLE_ID = 'io.github.konmik.herald'
 export const PLUGIN_ID = 'herald@herald-local'
@@ -59,6 +60,7 @@ export function parseArguments(argv) {
     else if (argument === '--claude-config') options.claudeConfig = resolve(value())
     else if (argument === '--opencode-config') options.openCodeConfig = resolve(value())
     else if (argument === '--codex-home') options.codexHome = resolve(value())
+    else if (argument === '--pi-agent-dir') options.piAgentDirectory = piAgentDirectory(value())
     else if (argument === '--skip-checks') options.checks = false
     else if (argument === '--skip-host-registration') options.hosts = false
     else if (argument === '--no-start') options.start = false
@@ -154,6 +156,14 @@ async function copyLicenses(metafile, destination) {
   }
 }
 
+export async function copyPiExtension(source, destination) {
+  await mkdir(destination, { recursive: true })
+  await copyFile(join(source, 'index.ts'), join(destination, 'index.ts'))
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.mjs')) await copyFile(join(source, entry.name), join(destination, entry.name))
+  }
+}
+
 /** Stage the same runtime payload as the Windows bundle, with a darwin binary. */
 async function buildPayload(stage, binary, arch) {
   const payload = join(stage, 'herald')
@@ -165,6 +175,7 @@ async function buildPayload(stage, binary, arch) {
     await mkdir(dirname(join(payload, 'codex-plugin', name)), { recursive: true })
     await copyFile(join(root, 'codex-plugin', name), join(payload, 'codex-plugin', name))
   }
+  await copyPiExtension(join(root, 'pi-plugin'), join(payload, 'pi-plugin'))
   const runtime = join(payload, 'native-announcer')
   await mkdir(join(runtime, 'bin'), { recursive: true })
   await copyFile(binary, join(runtime, 'bin', `herald-darwin-${arch}`))
@@ -173,7 +184,7 @@ async function buildPayload(stage, binary, arch) {
   await cp(join(root, 'native-announcer/resources/videos'), join(runtime, 'resources/videos'), { recursive: true })
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   const exports = Object.fromEntries(Object.entries(pkg.exports).map(([key, value]) => [key, value.replace(/\.ts$/, '.js')]))
-  await writeFile(join(payload, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, type: 'module', private: true, exports }, null, 2) + '\n')
+  await writeFile(join(payload, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, type: 'module', private: true, exports, pi: pkg.pi }, null, 2) + '\n')
   const metafile = join(stage, 'modules.json')
   const licenses = join(payload, 'licenses/javascript')
   for (const entry of ['index', 'tui']) {
@@ -184,6 +195,8 @@ async function buildPayload(stage, binary, arch) {
   await writeFile(join(payload, 'tui.ts'), `export { default } from "${exports['./tui']}"\n`)
   await writeFile(join(payload, 'claude-plugin/.claude-plugin/packaged.json'), '{"schemaVersion":1}\n')
   run('bun', ['build', join(root, 'development_tools/bundle/register-opencode.mjs'), '--target', 'node', '--format', 'esm', '--minify', `--outfile=${join(payload, 'register-opencode.mjs')}`, `--metafile=${metafile}`])
+  await copyLicenses(metafile, licenses)
+  run('bun', ['build', join(root, 'development_tools/bundle/register-pi.mjs'), '--main-fields', 'module', '--main-fields', 'main', '--target', 'node', '--format', 'esm', '--minify', `--outfile=${join(payload, 'register-pi.mjs')}`, `--metafile=${metafile}`])
   await copyLicenses(metafile, licenses)
   await rm(metafile, { force: true })
   return { payload, version: pkg.version }
@@ -210,13 +223,19 @@ export async function verifyPayload(payload, arch) {
   if (JSON.stringify(actual) !== JSON.stringify([...paths].sort())) throw new Error('Bundle contains unlisted or missing files')
   for (const file of manifest.files) {
     if (file.path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error(`Unsafe payload path: ${file.path}`)
+    if (/(^|\/)node_modules\//.test(file.path) || (file.path.startsWith('pi-plugin/') && !/^pi-plugin\/(index\.ts|[^/]+\.mjs)$/.test(file.path))) throw new Error(`Unexpected plugin runtime file: ${file.path}`)
     if (/\/resources\/tts\//.test(file.path)) throw new Error('Offline voice must be installed from Settings, not included in the bundle')
-    if (await sha256(join(payload, file.path)) !== file.sha256) throw new Error(`Payload verification failed: ${file.path}`)
+    if ((await stat(join(payload, file.path))).size !== file.size || await sha256(join(payload, file.path)) !== file.sha256) throw new Error(`Payload verification failed: ${file.path}`)
   }
-  for (const required of ['register-opencode.mjs', 'package.json', 'index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/.claude-plugin/packaged.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', ...CODEX_PLUGIN_FILES.map(name => `codex-plugin/${name}`), `native-announcer/bin/herald-darwin-${arch}`, `claude-plugin/native-announcer/bin/herald-darwin-${arch}`, `codex-plugin/native-announcer/bin/herald-darwin-${arch}`]) {
+  for (const required of ['register-opencode.mjs', 'register-pi.mjs', 'pi-plugin/index.ts', 'pi-plugin/bridge.mjs', 'pi-plugin/herald.mjs', 'pi-plugin/fork.mjs', 'package.json', 'index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/.claude-plugin/packaged.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', ...CODEX_PLUGIN_FILES.map(name => `codex-plugin/${name}`), `native-announcer/bin/herald-darwin-${arch}`, `claude-plugin/native-announcer/bin/herald-darwin-${arch}`, `codex-plugin/native-announcer/bin/herald-darwin-${arch}`]) {
     if (!paths.includes(required)) throw new Error(`Required runtime file missing: ${required}`)
   }
   if (paths.includes('claude-plugin/.claude-plugin/development.json')) throw new Error('Development fallback markers cannot be installed')
+  for (const obsolete of ['claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs']) {
+    if (paths.includes(obsolete)) throw new Error(`Obsolete Node runtime file is present: ${obsolete}`)
+  }
+  const pkg = JSON.parse(await readFile(join(payload, 'package.json'), 'utf8'))
+  if (JSON.stringify(pkg.pi?.extensions) !== JSON.stringify(['./pi-plugin/index.ts'])) throw new Error('Pi extension entry does not match the bundle')
   for (const prefix of ['native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer']) {
     const characters = JSON.parse(await readFile(join(payload, prefix, 'resources/characters.json'), 'utf8'))
     if (!Object.keys(characters).length) throw new Error('Character library is empty')
@@ -475,11 +494,13 @@ async function main() {
   const claudeConfig = options.claudeConfig ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
   const openCodeConfig = options.openCodeConfig ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode')
   const codexHome = options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex')
+  const piDirectory = piAgentDirectory(options.piAgentDirectory)
   const claude = options.hosts && hasCommand('claude')
   const codex = options.hosts && hasCommand('codex')
   const openCode = options.hosts && hasCommand('opencode')
+  const pi = options.hosts && hasCommand('pi')
   if (options.dryRun) {
-    console.log(JSON.stringify({ applications: [join(options.applications, `${APP.name}.app`)], announcer: join(options.applications, `${APP.name}.app`, HELPER_PATH), legacySettings: join(options.applications, `${LEGACY_SETTINGS.name}.app`), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, codexHome: codex ? codexHome : null, openCodeConfig: openCode ? openCodeConfig : null, checks: options.checks, start: options.start }, null, 2))
+    console.log(JSON.stringify({ applications: [join(options.applications, `${APP.name}.app`)], announcer: join(options.applications, `${APP.name}.app`, HELPER_PATH), legacySettings: join(options.applications, `${LEGACY_SETTINGS.name}.app`), payload: join(options.applications, 'Herald.app/Contents/Resources/herald'), claudeConfig: claude ? claudeConfig : null, codexHome: codex ? codexHome : null, openCodeConfig: openCode ? openCodeConfig : null, piAgentDirectory: pi ? piDirectory : null, checks: options.checks, start: options.start }, null, 2))
     return
   }
   if (options.checks) {
@@ -490,7 +511,7 @@ async function main() {
   const binary = join(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'native-announcer/target'), 'release/herald')
   const stage = join(root, 'temp/bundles', `.herald-stage-macos-${randomUUID()}`)
   await mkdir(stage, { recursive: true })
-  const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', codex: 'skipped', openCode: 'skipped', backups: null }
+  const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', codex: 'skipped', openCode: 'skipped', pi: 'skipped', backups: null }
   try {
     const { payload, version } = await buildPayload(stage, binary, arch)
     await sealPayload(payload, arch, BUNDLE_ID)
@@ -509,12 +530,13 @@ async function main() {
     await verifyPayload(installedPayload, arch)
     summary.payload = installedPayload
     if (options.hosts) {
-      const watched = [...['settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json'].map(name => join(claudeConfig, name)), ...(codex ? [join(codexHome, 'config.toml')] : []), ...(openCode ? ['opencode.json', 'opencode.jsonc'].map(name => join(openCodeConfig, name)) : [])]
+      const watched = [...['settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json'].map(name => join(claudeConfig, name)), ...(codex ? [join(codexHome, 'config.toml')] : []), ...(openCode ? ['opencode.json', 'opencode.jsonc'].map(name => join(openCodeConfig, name)) : []), ...(pi ? [join(piDirectory, 'settings.json')] : [])]
       const snapshots = await snapshot(watched, backupDirectory)
       try {
         summary.claude = claude ? await registerClaude(installedPayload, claudeConfig, Boolean(options.claudeConfig || process.env.CLAUDE_CONFIG_DIR)) : 'skipped: claude is not on PATH'
         summary.codex = codex ? await registerCodex(installedPayload, codexHome, Boolean(options.codexHome || process.env.CODEX_HOME)) : 'skipped: codex is not on PATH'
         summary.openCode = openCode ? await registerOpenCode(installedPayload, openCodeConfig, options.reloadOpenCode) : 'skipped: opencode is not on PATH'
+        summary.pi = pi ? await registerPi(installedPayload, piDirectory) : 'skipped: pi is not on PATH'
       } catch (error) {
         await restore(snapshots)
         throw error

@@ -74,12 +74,32 @@ try {
     '{"name":"herald-local"}' | Set-Content "$payload/codex-plugin/.agents/plugins/marketplace.json"
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer')) { '{"fixture":{"animationPath":"videos/fixture.mp4"}}' | Set-Content "$payload/$prefix/resources/characters.json" }
     Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'claude-plugin/hooks/register.ts') -Destination "$payload/claude-plugin/hooks/register.ts" -Force
+    New-Item -ItemType Directory -Path "$payload/pi-plugin" | Out-Null
+    Copy-Item -LiteralPath "$PSScriptRoot/../pi-plugin/index.ts" -Destination "$payload/pi-plugin/index.ts"
+    $piHelpers = @(Get-ChildItem -LiteralPath "$PSScriptRoot/../pi-plugin" -Filter '*.mjs' -File)
+    $piHelpers | Copy-Item -Destination "$payload/pi-plugin"
+    New-Item -ItemType Directory -Path "$payload/pi-plugin/tests", "$payload/pi-plugin/node_modules/unused-sdk" | Out-Null
+    'excluded' | Set-Content "$payload/pi-plugin/tests/fixture.mjs"
+    'excluded' | Set-Content "$payload/pi-plugin/node_modules/unused-sdk/index.js"
+    'excluded' | Set-Content "$payload/pi-plugin/unused.ts"
     $zip = & "$PSScriptRoot/build-bundle.ps1" -PayloadDirectory $payload -OutputDirectory (Join-Path $temporary 'output')
     $bundle = Join-Path $temporary 'extracted'
     Expand-Archive -LiteralPath $zip -DestinationPath $bundle
     Test-Bundle $bundle | Out-Null
     Assert-True (-not (Test-Path "$bundle/node_modules")) 'Compiled bundle contains a dependency tree'
-    Assert-True (-not (Get-ChildItem -LiteralPath $bundle -Recurse -File | Where-Object Name -in @('node.exe', 'bridge.mjs', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE'))) 'Bundle contains a removed Node runtime payload'
+    Assert-True (-not (Get-ChildItem -LiteralPath $bundle -Recurse -File | Where-Object Name -in @('node.exe', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE'))) 'Bundle contains a removed Node runtime payload'
+    Assert-True (-not (Test-Path "$bundle/claude-plugin/scripts/bridge.mjs")) 'Bundle contains the removed Claude bridge'
+    Assert-True (-not (Get-ChildItem -LiteralPath $bundle -Recurse -Directory | Where-Object Name -EQ 'node_modules')) 'Bundle includes an SDK or dependency tree'
+    Assert-True (-not (Test-Path "$bundle/pi-plugin/tests")) 'Bundle includes Pi tests'
+    Assert-True (@(Get-ChildItem -LiteralPath "$bundle/pi-plugin" -File).Count -eq $piHelpers.Count + 1) 'Bundle contains unexpected Pi files'
+    Assert-True ((Get-Content "$bundle/pi-plugin/index.ts" -Raw) -ceq (Get-Content "$PSScriptRoot/../pi-plugin/index.ts" -Raw)) 'Packaging rewrote the Pi extension entry'
+    $piManifest = Get-Content "$bundle/bundle-manifest.json" -Raw | ConvertFrom-Json
+    foreach ($source in @((Get-Item "$PSScriptRoot/../pi-plugin/index.ts")) + $piHelpers) {
+        $relative = "pi-plugin/$($source.Name)"
+        $entry = @($piManifest.files | Where-Object path -CEQ $relative)
+        Assert-True ($entry.Count -eq 1 -and $entry[0].size -eq $source.Length -and $entry[0].sha256 -ceq (Get-PayloadHash $source.FullName)) "Pi manifest does not match source: $relative"
+        Assert-SettingsPreserved (Join-Path $bundle $relative) ([Convert]::ToHexString([IO.File]::ReadAllBytes($source.FullName))) "Packaging rewrote Pi runtime: $relative"
+    }
     Assert-True (-not (Test-Path "$bundle/native-announcer/resources/tts") -and -not (Test-Path "$bundle/native-announcer/bin/sherpa-onnx-c-api.dll")) 'Bundle includes the optional voice engine'
     foreach ($package in @('@opencode-plugin-2.0.24', 'effect-4.0.0-rc.112', 'jsonc-parser-3.3.1')) {
         Assert-True (@(Get-ChildItem -LiteralPath "$bundle/licenses/javascript/$package" -File).Count -gt 0) "Bundled JavaScript license missing: $package"
@@ -129,6 +149,9 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $root = Join-Path $temporary 'installed'
     & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart -WhatIf | Out-Null
     Assert-True (-not (Test-Path $root)) 'WhatIf mutated the installation'
+    $piProfile = Join-Path $temporary 'pi-profile'
+    & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -PiAgentDirectory $piProfile -NoStart -WhatIf | Out-Null
+    Assert-True (-not (Test-Path $piProfile)) 'WhatIf created a Pi profile'
     $app = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
     Assert-True (Test-Path "$app/native-announcer/resources/videos/fixture.mp4") 'Runtime asset was not installed'
     Assert-True (-not (Get-Item "$app/claude-plugin/native-announcer").LinkType) 'Claude runtime is linked'
@@ -136,6 +159,15 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $again = & "$bundle/install.ps1" -Bundle $bundle -InstallDirectory $root -SkipHostRegistration -NoStart
     Assert-True ($again -eq $app) 'Repeated installation changed the immutable location'
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Repeated installation changed native settings'
+    New-Item -ItemType Directory -Path $piProfile | Out-Null
+    $piSettings = Join-Path $piProfile 'settings.json'
+    '{"model":"keep","extensions":["builtin:mcp"]}' | Set-Content -LiteralPath $piSettings
+    Register-PiBundle $app $piProfile
+    $piRegistered = Get-Content -LiteralPath $piSettings -Raw | ConvertFrom-Json
+    Assert-True ($piRegistered.model -eq 'keep' -and $piRegistered.extensions[0] -eq 'builtin:mcp' -and $piRegistered.extensions[1] -eq (Join-Path $app 'pi-plugin/index.ts').Replace('\', '/')) 'Pi registration did not use the installed extension or preserve settings'
+    $piBytes = [Convert]::ToHexString([IO.File]::ReadAllBytes($piSettings))
+    Register-PiBundle $app $piProfile
+    Assert-SettingsPreserved $piSettings $piBytes 'Repeated Pi registration changed settings'
     $lock = [IO.File]::Open((Join-Path $root '.install.lock'), 'Open', 'ReadWrite', 'None')
     try { Assert-Rejected { Install-Payload $bundle $root } 'Concurrent installation acquired the same root' } finally { $lock.Dispose() }
     'corrupt' | Set-Content "$app/native-announcer/resources/videos/fixture.mp4"
@@ -154,7 +186,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     [IO.File]::WriteAllBytes($file, $bytes)
     $manifestPath = "$bundle/bundle-manifest.json"
     $original = [IO.File]::ReadAllText($manifestPath)
-    foreach ($modulePath in @('index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js')) {
+    foreach ($modulePath in @('index.ts', 'tui.ts', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'pi-plugin/index.ts', 'pi-plugin/bridge.mjs', 'pi-plugin/herald.mjs', 'pi-plugin/fork.mjs', 'register-pi.mjs')) {
         $moduleBytes = [IO.File]::ReadAllBytes((Join-Path $bundle $modulePath))
         Remove-Item -LiteralPath (Join-Path $bundle $modulePath)
         $manifest = $original | ConvertFrom-Json
@@ -162,6 +194,24 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
         $manifest | ConvertTo-Json -Depth 8 | Set-Content $manifestPath
         Assert-Rejected { Test-Bundle $bundle } "Missing production entry was accepted: $modulePath"
         [IO.File]::WriteAllBytes((Join-Path $bundle $modulePath), $moduleBytes)
+        [IO.File]::WriteAllText($manifestPath, $original)
+    }
+    foreach ($source in $piHelpers) {
+        $helperPath = Join-Path $bundle "pi-plugin/$($source.Name)"
+        $helperBytes = [IO.File]::ReadAllBytes($helperPath)
+        'tampered' | Set-Content $helperPath
+        Assert-Rejected { Test-Bundle $bundle } "Tampered Pi helper was accepted: $($source.Name)"
+        [IO.File]::WriteAllBytes($helperPath, $helperBytes)
+    }
+    foreach ($forbidden in @('claude-plugin/scripts/bridge.mjs', 'pi-plugin/tests/fixture.mjs', 'pi-plugin/node_modules/unused-sdk/index.js')) {
+        $forbiddenPath = Join-Path $bundle $forbidden
+        New-Item -ItemType Directory -Path (Split-Path $forbiddenPath -Parent) -Force | Out-Null
+        'forbidden' | Set-Content $forbiddenPath
+        $manifest = $original | ConvertFrom-Json
+        $manifest.files += @{ path = $forbidden; sha256 = Get-PayloadHash $forbiddenPath; size = (Get-Item $forbiddenPath).Length }
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content $manifestPath
+        Assert-Rejected { Test-Bundle $bundle } "Forbidden runtime file was accepted: $forbidden"
+        Remove-Item -LiteralPath $forbiddenPath
         [IO.File]::WriteAllText($manifestPath, $original)
     }
     $manifest = $original | ConvertFrom-Json
@@ -299,17 +349,18 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $successPrograms = Join-Path $temporary 'successful-programs'
     $binary = "$app/native-announcer/bin/herald-win32-$arch.exe"
     $script:mutateClaude = $false
-    Register-BundleHosts $app @($config) $profile $binary $successPrograms
+    Register-BundleHosts $app @($config) $profile $binary $successPrograms -PiAgentDirectory $piProfile
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful host registration changed native settings'
     $rollbackPrograms = Join-Path $temporary 'rollback-programs'
     New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
     $rollbackShortcut = Join-Path $rollbackPrograms 'Herald settings.lnk'
     Write-NativeShortcut $rollbackShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
-    $rollbackPaths = @($config, "$profile/settings.json", "$profile/plugins/known_marketplaces.json", "$profile/plugins/installed_plugins.json", "$cache/hooks/register.ts", $rollbackShortcut)
+    '{"model":"previous","extensions":[]}' | Set-Content -LiteralPath $piSettings
+    $rollbackPaths = @($config, "$profile/settings.json", "$profile/plugins/known_marketplaces.json", "$profile/plugins/installed_plugins.json", "$cache/hooks/register.ts", $rollbackShortcut, $piSettings)
     $beforeRollback = @{}
     foreach ($path in $rollbackPaths) { $beforeRollback[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
     $script:mutateClaude = $true
-    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms } 'An unrelated shortcut did not fail host registration'
+    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $piProfile } 'An unrelated shortcut did not fail host registration'
     foreach ($path in $rollbackPaths) {
         Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -ceq $beforeRollback[$path]) "Host rollback did not restore $path"
     }
@@ -317,6 +368,9 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $absentConfig = Join-Path $openCode 'previously-absent.jsonc'
     Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms } 'Fresh config rollback did not fail'
     Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
+    $absentPi = Join-Path $temporary 'absent-pi'
+    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $absentPi } 'Fresh Pi config rollback did not fail'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $absentPi 'settings.json'))) 'Rollback left a newly created Pi configuration'
     Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Host rollback left a cache backup'
     $script:mutateClaude = $false
     & {
@@ -326,6 +380,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
         }
         function Register-ClaudeBundle { $calls.Add('claude') }
         function Register-CodexBundle { $calls.Add('codex') }
+        function Register-PiBundle { $calls.Add('pi') }
         function Register-OpenCodeBundle {
             param($App, $Configs, $BeforeWrite, $AfterWrite, $OpenCodeCommand)
             $calls.Add('opencode')
@@ -334,19 +389,21 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
         }
         function Get-ClaudeInstallations { }
         function Install-SettingsShortcut { $calls.Add('shortcut') }
-        for ($mask = 0; $mask -lt 8; $mask++) {
+        for ($mask = 0; $mask -lt 16; $mask++) {
             $available = @()
             if ($mask -band 1) { $available += 'claude' }
             if ($mask -band 2) { $available += 'codex' }
             if ($mask -band 4) { $available += 'opencode' }
+            if ($mask -band 8) { $available += 'pi' }
             $commands = Get-BundleHostCommands -WarningAction SilentlyContinue
             Assert-True ($commands.Count -eq $available.Count) 'Host detection did not skip absent apps'
             foreach ($name in $available) { Assert-True ($commands[$name] -eq "fixture-$name") 'Installed host command was not detected' }
             $calls = [Collections.Generic.List[string]]::new()
             $claudeProfile = if ($commands.claude) { Join-Path $temporary 'optional-claude' } else { $null }
             $codexProfile = if ($commands.codex) { Join-Path $temporary 'optional-codex' } else { $null }
+            $optionalPi = if ($commands.pi) { Join-Path $temporary 'optional-pi' } else { $null }
             $hostConfigs = @(if ($commands.opencode) { Join-Path $temporary 'optional-opencode.jsonc' })
-            Register-BundleHosts $app $hostConfigs $claudeProfile $binary (Join-Path $temporary 'optional-programs') -OpenCodeCommand $commands.opencode -CodexHome $codexProfile
+            Register-BundleHosts $app $hostConfigs $claudeProfile $binary (Join-Path $temporary 'optional-programs') -OpenCodeCommand $commands.opencode -CodexHome $codexProfile -PiAgentDirectory $optionalPi
             Assert-True ($calls.Count -eq $available.Count + 1) 'Optional host registration skipped an installed app or registered an absent app'
             foreach ($name in $available) { Assert-True ($calls.Contains($name)) 'Installed host was not registered' }
             Assert-True ($calls.Contains('shortcut')) 'Missing apps prevented installing the settings shortcut'
@@ -354,6 +411,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
         Assert-True (-not (Test-Path (Join-Path $temporary 'optional-claude'))) 'Absent Claude profile was created'
         Assert-True (-not (Test-Path (Join-Path $temporary 'optional-codex'))) 'Absent Codex profile was created'
         Assert-True (-not (Test-Path (Join-Path $temporary 'optional-opencode.jsonc'))) 'Absent OpenCode config was created'
+        Assert-True (-not (Test-Path (Join-Path $temporary 'optional-pi'))) 'Absent Pi profile was created'
     }
     Rename-Item -LiteralPath $bundle -NewName 'source-unavailable'
     Remove-DeploymentDirectory $payload

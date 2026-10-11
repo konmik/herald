@@ -47,6 +47,14 @@ For Claude, install a copy of `claude-plugin` with `native-announcer/bin` and `n
 
 For Codex, do the same with a copy of `codex-plugin`: put `native-announcer/bin` and `native-announcer/resources` inside the copy, then run `codex plugin marketplace add <copy-path>` and `codex plugin add herald@herald-local`. Both commands edit `~/.codex/config.toml` in place. Start Codex, open `/hooks` and trust the Herald hooks; Codex skips untrusted plugin hooks. Helper output goes to `PLUGIN_DATA/helpers.log` inside the Codex plugin data directory.
 
+For Pi, register the checkout after building the announcer:
+
+```sh
+node development_tools/bundle/register-pi.mjs --installed /absolute/path/to/herald
+```
+
+The helper adds `pi-plugin/index.ts` to `extensions` in `~/.pi/agent/settings.json`. `PI_CODING_AGENT_DIR` or `--agent-dir <directory>` selects another profile. It preserves other settings and extensions. Use `--dry-run` to preview without writing, or `--backup-directory <directory>` to save the previous settings. Run `/reload` in Pi or restart Pi to load the extension. Keep the checkout and its shared runtime available. Herald uses the SDK from your installed `@earendil-works/pi-coding-agent` package.
+
 On Omarchy, add this rule to `~/.config/hypr/hyprland.lua`:
 
 ```lua
@@ -98,11 +106,13 @@ pwsh -NoProfile -File .\install.ps1 -WhatIf
 pwsh -NoProfile -File .\install.ps1
 ```
 
-Installation needs neither Node on PATH, Cargo, Bun, nor network downloads. Open Settings > Offline voice and click Install to download the checksum-verified voice engine and model. The tab shows installation status and offers a retry if installation fails. Offline voice is stored with user data and shared by both plugins across upgrades. Without it, ElevenLabs can still provide speech and visual announcements still work. Host registration uses each installed host's CLI. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise `.claude`. OpenCode uses `XDG_CONFIG_HOME/opencode`, otherwise `.config/opencode`. Claude, Codex and OpenCode are registered when their commands are on PATH; missing hosts are skipped with a warning without changing their configuration.
+Installation needs neither Cargo, Bun, nor network downloads. Pi registration needs Node on PATH, as does Pi itself. Open Settings > Offline voice and click Install to download the checksum-verified voice engine and model. The tab shows installation status and offers a retry if installation fails. Offline voice is stored with user data and shared by the plugins across upgrades. Without it, ElevenLabs can still provide speech and visual announcements still work. The default Claude profile is `CLAUDE_CONFIG_DIR`, otherwise `.claude`. OpenCode uses `XDG_CONFIG_HOME/opencode`, otherwise `.config/opencode`. Pi uses `PI_CODING_AGENT_DIR`, otherwise `.pi/agent`. Claude, Codex, OpenCode, and Pi are registered when their commands are on PATH. Missing hosts are skipped without changing their configuration.
 
 The Start menu shortcut uses Windows' native Unicode shell-link interface, including when checking an existing shortcut's ownership. PowerShell 7 compiles this helper internally; no separate compiler installation is needed. Local speech uses Windows short filenames for non-ASCII paths. If the volume does not provide those names, install into an ASCII path.
 
 The complete payload is copied to `%LOCALAPPDATA%/Programs/herald/versions/<version>-<arch>-<payloadHash>`. When Claude is installed, its local marketplace points there and its cache receives a separate physical runtime copy. When `codex` is on PATH, the Codex `herald-local` marketplace points to the installed `codex-plugin` and `codex plugin add` copies it into the Codex plugin cache. Node is not bundled. When OpenCode is installed, its registration points to that installed version. The Start menu shortcut is installed even when no hosts are present. The extraction folder and checkout can then be removed. User data remains in `%LOCALAPPDATA%/herald`.
+
+When Pi is installed, its user settings point to the installed bundle's absolute `pi-plugin/index.ts` path. The bundle includes Pi's own `.mjs` runtime helpers, including `pi-plugin/bridge.mjs`, but no Pi SDK or plugin tests. Registration replaces only paths whose package identifies the Herald Pi extension. Keep an old registered package available during migration. Unknown paths and unrelated extensions remain unchanged. Registration refuses an active settings lock and recovers a lock whose PID owner is dead. An empty crash lock can be recovered after one minute; unknown owners and unsafe locks are rejected.
 
 Existing owned Claude marketplace registrations migrate with `claude plugin marketplace add` from the installed source. This changes the source without removing installed plugins. Existing cache junctions are replaced without touching their targets. OpenCode migration recognizes local packages by their package name, exports and plugin ID, preserving unrelated entries, comments and options. Keep the old registered package available until migration completes; unknown registrations are not removed.
 
@@ -112,10 +122,12 @@ For a copy-only test installation:
 pwsh -NoProfile -File .\install.ps1 -InstallDirectory "$env:LOCALAPPDATA/Temp/opencode/herald-test" -SkipHostRegistration -NoStart
 ```
 
-`-ClaudeConfigDirectory`, `-CodexHome`, `-OpenCodeConfigDirectory` and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
+`-ClaudeConfigDirectory`, `-CodexHome`, `-OpenCodeConfigDirectory`, `-PiAgentDirectory`, and `-ProgramsDirectory` select other targets. Repeat installation verifies the existing payload and repairs owned corrupt runtime files. Installation rejects links, unlisted files, unsafe paths, wrong architectures and checksum failures before copying.
 
-Host registration keeps the previous Claude cache until OpenCode registration and the shortcut have succeeded. A registration failure restores the previous cache, Claude registry and settings files, Codex `config.toml`, OpenCode configuration and shortcut. A newly created OpenCode config is removed on rollback. The verified versioned payload remains available for retry.
+Host registration keeps the previous Claude cache until the other registrations and the shortcut have succeeded. A registration failure restores the previous cache, Claude registry and settings files, Codex `config.toml`, OpenCode configuration, Pi settings, and shortcut. Newly created OpenCode and Pi settings files are removed on rollback. The verified versioned payload remains available for retry.
 
 Restart Claude and Codex sessions after installation, and trust the Herald hooks once in Codex's `/hooks`. OpenCode is explicitly reloaded only with `-ReloadOpenCode`; that reload cancels pending permissions and forms. OpenCode may also watch configuration changes automatically. Installation stops announcers only under verified previous plugin runtime directories, then starts the installed runtime. `-NoStart` suppresses that start.
+
+Run `/reload` in Pi or restart Pi after installation. `-WhatIf` leaves Pi settings unchanged.
 
 `pnpm run deploy:plugins` runs checks, builds the same bundle, then invokes this installer. No updater or uninstaller is included.

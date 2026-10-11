@@ -5,6 +5,7 @@ param(
     [string]$ClaudeConfigDirectory,
     [string]$OpenCodeConfigDirectory,
     [string]$CodexHome,
+    [string]$PiAgentDirectory,
     [string]$ProgramsDirectory = [Environment]::GetFolderPath('Programs'),
     [switch]$SkipHostRegistration,
     [switch]$NoStart,
@@ -68,12 +69,13 @@ function Test-Bundle {
     $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($file in $manifest.files) {
         Assert-SafePayloadPath $file.path
+        if ($file.path -match '(?i)(^|/)node_modules/' -or ($file.path.StartsWith('pi-plugin/') -and $file.path -notmatch '^pi-plugin/(index\.ts|[^/]+\.mjs)$')) { throw "Unexpected plugin runtime file: $($file.path)" }
         if ($file.path -match '(?i)/bin/(onnxruntime|sherpa-onnx-c-api)\.dll$|/resources/tts/') { throw 'Offline voice must be installed from Settings, not included in the bundle' }
         if ($file.path -eq 'bundle-manifest.json' -or -not $paths.Add($file.path) -or $file.sha256 -notmatch '^[a-f0-9]{64}$' -or $file.size -lt 0) { throw 'Invalid or duplicate manifest entry' }
         $path = Join-Path $Directory $file.path
         if (-not $inventory.ContainsKey($file.path) -or $inventory[$file.path].Length -ne $file.size -or (Get-PayloadHash $path) -ne $file.sha256) { throw "Payload verification failed: $($file.path)" }
     }
-    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-win32-$architecture.exe") + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })) {
+    foreach ($required in @('install.ps1', 'register-opencode.mjs', 'register-pi.mjs', 'pi-plugin/index.ts', 'pi-plugin/bridge.mjs', 'pi-plugin/herald.mjs', 'pi-plugin/fork.mjs', 'package.json', 'opencode-plugin/index.js', 'opencode-plugin/tui.js', 'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.ts', "native-announcer/bin/herald-win32-$architecture.exe", "claude-plugin/native-announcer/bin/herald-win32-$architecture.exe", "codex-plugin/native-announcer/bin/herald-win32-$architecture.exe") + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })) {
         if (-not $paths.Contains($required)) { throw "Required runtime file missing: $required" }
     }
     foreach ($obsolete in @('claude-plugin/native-announcer/bin/node.exe', 'claude-plugin/native-announcer/licenses/node-LICENSE', 'claude-plugin/scripts/bridge.mjs', 'claude-plugin/scripts/runtime.mjs', 'claude-plugin/scripts/session-title.mjs')) {
@@ -103,6 +105,7 @@ function Test-Bundle {
     if ($codexPlugin.name -ne $manifest.name -or $codexPlugin.version -ne $manifest.version -or $codexMarketplace.name -ne 'herald-local') { throw 'Codex plugin identity does not match the bundle' }
     if ($package.name -ne $manifest.name -or $package.version -ne $manifest.version -or $package.exports['.'] -ne './opencode-plugin/index.js' -or $package.exports['./tui'] -ne './opencode-plugin/tui.js' -or $plugin.name -ne $manifest.name -or $plugin.version -ne $manifest.version -or $marketplace.name -ne 'herald-local') { throw 'Runtime package identity does not match the bundle' }
     if ($package.dependencies.Count) { throw 'Plugin runtime dependencies must be compiled into the bundle' }
+    if ($package.pi.extensions.Count -ne 1 -or $package.pi.extensions[0] -ne './pi-plugin/index.ts') { throw 'Pi extension entry does not match the bundle' }
     if ($actual.Count -ne $paths.Count + 1) { throw 'Bundle contains unlisted files' }
     foreach ($file in $actual) {
         $relative = [IO.Path]::GetRelativePath($Directory, $file.FullName).Replace('\', '/')
@@ -445,10 +448,15 @@ function Register-CodexBundle {
 }
 
 function Register-BundleHosts {
-    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand, [string]$CodexHome)
+    param([string]$App, [string[]]$Configs, [string]$ClaudeConfigDirectory, [string]$Binary, [string]$ProgramsDirectory, [scriptblock]$BeforeRegistration, [scriptblock]$AfterRegistration, [string]$OpenCodeCommand, [string]$CodexHome, [string]$PiAgentDirectory)
+    if ($PiAgentDirectory) {
+        if ($PiAgentDirectory -match '^~(?:[\\/]|$)') { $PiAgentDirectory = Join-Path $HOME $PiAgentDirectory.Substring(1).TrimStart('\', '/') }
+        $PiAgentDirectory = [IO.Path]::GetFullPath($PiAgentDirectory)
+    }
     $files = @()
     if ($ClaudeConfigDirectory) { $files += @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $ClaudeConfigDirectory $_ } }
     if ($CodexHome) { $files += Join-Path $CodexHome 'config.toml' }
+    if ($PiAgentDirectory) { $files += Join-Path $PiAgentDirectory 'settings.json' }
     $files += Join-Path $ProgramsDirectory 'Herald settings.lnk'
     $snapshots = @($files | ForEach-Object {
         Assert-NoLinks $_
@@ -461,6 +469,7 @@ function Register-BundleHosts {
             if ($BeforeRegistration) { & $BeforeRegistration }
             if ($ClaudeConfigDirectory) { Register-ClaudeBundle $App $ClaudeConfigDirectory -Backups $backups }
             if ($CodexHome) { Register-CodexBundle $App }
+            if ($PiAgentDirectory) { Register-PiBundle $App $PiAgentDirectory }
         }
         $afterWrite = {
             Install-SettingsShortcut $Binary $ProgramsDirectory
@@ -495,12 +504,19 @@ function Register-BundleHosts {
 
 function Get-BundleHostCommands {
     $commands = @{}
-    foreach ($name in @('claude', 'codex', 'opencode')) {
+    foreach ($name in @('claude', 'codex', 'opencode', 'pi')) {
         $command = Get-Command $name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($command) { $commands[$name] = $command.Source }
         else { Write-Warning "$name is not on PATH; skipping its plugin." }
     }
     return $commands
+}
+
+function Register-PiBundle {
+    param([string]$App, [string]$AgentDirectory)
+    Assert-NoLinks $AgentDirectory
+    if (-not (Get-Command node -CommandType Application -ErrorAction SilentlyContinue)) { throw 'Node is required to register the Pi extension' }
+    Invoke-Checked 'node' @((Join-Path $App 'register-pi.mjs'), '--installed', $App, '--agent-dir', $AgentDirectory) | Out-Host
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -518,10 +534,12 @@ $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).ex
 if (-not $SkipHostRegistration) {
     if (-not $ClaudeConfigDirectory) { $ClaudeConfigDirectory = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
     if (-not $CodexHome) { $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' } }
+    if (-not $PiAgentDirectory) { $PiAgentDirectory = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $HOME '.pi/agent' } }
     if (-not $OpenCodeConfigDirectory) { $OpenCodeConfigDirectory = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'opencode' } else { Join-Path $HOME '.config/opencode' } }
     $commands = Get-BundleHostCommands
     if (-not $commands.claude) { $ClaudeConfigDirectory = $null }
     if (-not $commands.codex) { $CodexHome = $null }
+    if (-not $commands.pi) { $PiAgentDirectory = $null }
     $openCodeCommand = $commands.opencode
     $configs = @()
     if ($openCodeCommand) {
@@ -544,7 +562,8 @@ if (-not $SkipHostRegistration) {
                 else { Write-Warning 'No explicit OpenCode reload was requested. OpenCode may automatically watch configuration changes.' }
             }
             if ($ClaudeConfigDirectory -or $CodexHome) { Write-Warning 'Restart installed Claude and Codex sessions to load the installed hooks.' }
-        } -OpenCodeCommand $openCodeCommand -CodexHome $CodexHome
+            if ($PiAgentDirectory) { Write-Warning 'Run /reload in Pi or restart Pi to load the installed extension.' }
+        } -OpenCodeCommand $openCodeCommand -CodexHome $CodexHome -PiAgentDirectory $PiAgentDirectory
     } catch {
         foreach ($previous in $stopped) {
             if (Test-Path -LiteralPath $previous.binary) {

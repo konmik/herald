@@ -15,7 +15,7 @@ try {
     )) {
         if (-not $IsWindows -and $arguments[1] -eq 'test:bundle') {
             Write-Output 'Windows bundle tests require Windows. Running portable registration tests on this platform.'
-            & pnpm exec bun test development_tools/tests/registration.test.mjs
+            & pnpm exec bun test development_tools/tests/registration.test.mjs development_tools/tests/pi-registration.test.mjs
             if ($LASTEXITCODE -ne 0) { throw "Registration tests failed with exit code $LASTEXITCODE" }
             continue
         }
