@@ -142,6 +142,30 @@ fn bridge_notification_deserializes() {
     assert_eq!(n.character_id.as_deref(), Some("herald"));
 }
 
+#[test]
+fn explicit_pi_source_preserves_legacy_host_dispatch() {
+    for (character, session, expected) in [
+        ("pi", "pi:task", "pi"),
+        ("pi", "claude:task", "pi"),
+        ("monty", "claude:task", "monty"),
+        ("claude", "session", "claude"),
+        ("", "claude:task", "claude"),
+        ("", "pi:task", "opencode"),
+        ("", "session", "opencode"),
+        ("opencode", "claude:task", "opencode"),
+        ("unknown", "claude:task", "opencode"),
+        ("codex", "codex:task", "opencode"),
+        ("Pi", "pi:task", "opencode"),
+    ] {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "type":"notify", "id":"result", "sessionID":session,
+            "completed":10, "character":character
+        })).unwrap();
+        let Command::Notify(notification) = command else { panic!() };
+        assert_eq!(notification.character(), expected, "{character:?} {session}");
+    }
+}
+
 fn test_directory() -> PathBuf {
     let path = std::env::temp_dir().join("opencode").join(format!(
         "herald-state-{}-{}",

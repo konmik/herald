@@ -12,7 +12,7 @@ pub fn select_path(assets: &Path, character: &str) -> PathBuf {
         .filter(|path| path.is_file() && path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")))
         .collect();
     if paths.is_empty() {
-        assets.join(character).join("neutral.mp4")
+        assets.join(if character == "pi" { "opencode" } else { character }).join("neutral.mp4")
     } else {
         let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
         paths[random as usize % paths.len()].clone()

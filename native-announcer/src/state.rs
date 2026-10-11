@@ -32,6 +32,8 @@ impl Notification {
     pub fn character(&self) -> &str {
         if self.character == "monty" {
             "monty"
+        } else if self.character == "pi" {
+            "pi"
         } else if self.character == "claude"
             || (self.character.is_empty() && self.session_id.starts_with("claude:"))
         {

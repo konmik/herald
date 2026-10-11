@@ -45,6 +45,7 @@ fn decoder_failure_preserves_the_last_frame_and_stops_retrying() {
 fn uses_the_integration_video_without_a_shared_library() {
     let assets = Path::new("missing-announcer-test-assets");
     assert_eq!(select_path(assets, "claude"), assets.join("claude/neutral.mp4"));
+    assert_eq!(select_path(assets, "pi"), assets.join("opencode/neutral.mp4"));
 }
 
 #[test]
