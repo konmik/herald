@@ -1,5 +1,5 @@
 param(
-    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/herald.exe'),
+    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/herald-settings.exe'),
     [string]$Evidence = ('temp/verification/settings-theme-' + [guid]::NewGuid())
 )
 $ErrorActionPreference = 'Stop'

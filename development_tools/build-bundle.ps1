@@ -30,7 +30,8 @@ try {
         $oldTarget = $env:CARGO_TARGET_DIR
         try {
             $env:CARGO_TARGET_DIR = $target
-            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--target', $rustTarget, '-j', '6', '--manifest-path', (Join-Path $root 'native-announcer/Cargo.toml'))
+            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--target', $rustTarget, '-j', '6', '--manifest-path', (Join-Path $root 'native-announcer/Cargo.toml'), '--no-default-features', '--bin', 'herald')
+            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--target', $rustTarget, '-j', '6', '--manifest-path', (Join-Path $root 'native-announcer/Cargo.toml'), '--no-default-features', '--features', 'settings-ui', '--bin', 'herald-settings')
         } finally { $env:CARGO_TARGET_DIR = $oldTarget }
         foreach ($name in @('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts')) {
             $destination = Join-Path $stage "claude-plugin/$name"
@@ -45,6 +46,7 @@ try {
         $runtime = Join-Path $stage 'native-announcer'
         New-Item -ItemType Directory -Path "$runtime/bin", "$runtime/resources" -Force | Out-Null
         Copy-Item -LiteralPath "$target/$rustTarget/release/herald.exe" -Destination "$runtime/bin/herald-win32-$arch.exe"
+        Copy-Item -LiteralPath "$target/$rustTarget/release/herald-settings.exe" -Destination "$runtime/bin/herald-settings-win32-$arch.exe"
         foreach ($name in @('characters.json', 'videos')) {
             $destination = Join-Path $runtime "resources/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null

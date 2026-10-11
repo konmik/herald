@@ -19,6 +19,12 @@ function Assert-SettingsPreserved {
 }
 
 $temporary = Join-Path $env:LOCALAPPDATA ('Temp/opencode/Herald Ω bundle-test-' + [guid]::NewGuid())
+Assert-True (Test-AnnouncerProcess 'herald.exe' 'herald.exe') 'Announcer defaults to playback'
+Assert-True (-not (Test-AnnouncerProcess 'herald-settings.exe' 'herald-settings.exe')) 'Settings does not default to playback'
+Assert-True (Test-AnnouncerProcess 'herald-settings.exe' 'herald-settings.exe --announcer') 'Settings can host playback'
+Assert-True (Test-AnnouncerProcess 'herald.exe' 'herald.exe --settings --announcer') 'Last announcer flag selects playback'
+Assert-True (-not (Test-AnnouncerProcess 'herald-settings.exe' 'herald-settings.exe --announcer --settings')) 'Last Settings flag protects the UI'
+Assert-True (-not (Test-AnnouncerProcess 'herald.exe' 'herald.exe --announcer --bridge')) 'Bridge processes are not stopped'
 New-Item -ItemType Directory -Path $temporary | Out-Null
 $previousheraldData = $env:HERALD_DATA
 $nativeData = Join-Path $temporary 'native-data'
@@ -61,7 +67,7 @@ try {
     $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     $required = @('claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/.claude-plugin/marketplace.json', 'claude-plugin/hooks/register.ts', 'claude-plugin/hooks/hooks.json') + @($CodexPluginFiles | ForEach-Object { "codex-plugin/$_" })
     foreach ($prefix in @('native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer')) {
-        $required += "$prefix/bin/herald-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
+        $required += "$prefix/bin/herald-win32-$arch.exe", "$prefix/bin/herald-settings-win32-$arch.exe", "$prefix/resources/characters.json", "$prefix/resources/videos/fixture.mp4"
     }
     foreach ($file in $required) {
         $path = Join-Path $payload $file

@@ -179,7 +179,7 @@ class Session:
     def __init__(self, args):
         self.args = args
         self.root = Path(__file__).resolve().parent.parent
-        self.binary = Path(args.binary).resolve() if args.binary else self.root / "native-announcer/target/debug/herald"
+        self.binary = Path(args.binary).resolve() if args.binary else self.root / "native-announcer/target/debug/herald-settings"
         self.assets = self.root / "native-announcer/resources"
         evidence_root = self.root / "temp/verification"
         evidence_root.mkdir(parents=True, exist_ok=True)
@@ -1050,7 +1050,7 @@ class Session:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--binary", help="Settings executable (default: native-announcer/target/debug/herald)")
+    parser.add_argument("--binary", help="Settings executable (default: native-announcer/target/debug/herald-settings)")
     parser.add_argument("--evidence", help="Evidence directory (default: unique temp/verification/macos-settings-*)")
     parser.add_argument("--feature", choices=["all", *FEATURES], default="all")
     parser.add_argument("--preflight", action="store_true", help="Only check macOS permissions and exit")

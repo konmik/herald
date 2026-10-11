@@ -19,7 +19,7 @@ async function runtimeFixture(t, name = 'runtime') {
   const portraits = join(root, 'native-announcer/resources/portraits')
   await mkdir(bin, { recursive: true })
   await mkdir(portraits, { recursive: true })
-  await writeFile(join(bin, `herald-linux-${process.arch}`), 'native executable fixture', { mode: 0o755 })
+  await writeFile(join(bin, `herald-settings-linux-${process.arch}`), 'native executable fixture', { mode: 0o755 })
   await writeFile(join(portraits, 'flamboyant-herald.png'), 'icon fixture')
   return root
 }
@@ -34,7 +34,7 @@ test('installs a repeatable settings entry without replacing other applications'
   const path = await installLinuxMenu(root, { env, refresh: false })
   const content = await readFile(path, 'utf8')
   assert.ok(content.includes('Name=Herald Settings\n'))
-  assert.ok(content.includes(`Exec=/usr/bin/env -- "${join(root, `native-announcer/bin/herald-linux-${process.arch}`)}" --settings --assets "${join(root, 'native-announcer/resources')}"\n`))
+  assert.ok(content.includes(`Exec=/usr/bin/env -- "${join(root, `native-announcer/bin/herald-settings-linux-${process.arch}`)}" --settings --assets "${join(root, 'native-announcer/resources')}"\n`))
   assert.equal(content.includes('editor'), false)
   assert.ok(content.includes(`Icon=${join(root, 'native-announcer/resources/portraits/flamboyant-herald.png')}\n`))
   assert.ok(content.includes('Terminal=false\n'))
@@ -65,7 +65,7 @@ test('the desktop launcher preserves native arguments in paths with special char
   const root = await runtimeFixture(t, 'runtime with % " $ ` \\ characters')
   const directory = await fixture(t)
   const result = join(directory, 'arguments')
-  const binary = join(root, `native-announcer/bin/herald-linux-${process.arch}`)
+  const binary = join(root, `native-announcer/bin/herald-settings-linux-${process.arch}`)
   await writeFile(binary, '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$RESULT"\n')
   const path = await installLinuxMenu(root, { env: { XDG_DATA_HOME: directory }, refresh: false })
   const launch = spawnSync('gio', ['launch', path], { env: { ...process.env, RESULT: result }, encoding: 'utf8', timeout: 10000 })

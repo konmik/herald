@@ -58,6 +58,13 @@ test('options, architectures and process ownership', () => {
   assert.ok(isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --assets /x' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --settings' }))
   assert.ok(!isAnnouncer({ executable: '/x/bin/herald-darwin-x64', args: '/x/bin/herald-darwin-x64 --bridge --assets /x' }))
+  assert.ok(!isAnnouncer({ executable: '/x/bin/herald-settings', args: '/x/bin/herald-settings' }))
+  assert.ok(!isAnnouncer({ executable: '/x/bin/herald-settings-darwin-x64', args: '/x/bin/herald-settings-darwin-x64' }))
+  assert.ok(isAnnouncer({ executable: '/x/bin/herald-settings', args: '/x/bin/herald-settings --announcer' }))
+  assert.ok(!isAnnouncer({ executable: helper, args: `${helper} --bridge`, background: true }))
+  assert.equal(isAnnouncer({ executable: helper, args: `${helper} --announcer --settings`, background: true }), false)
+  assert.equal(isAnnouncer({ executable: main, args: `${main} --settings --announcer`, background: false }), true)
+  assert.equal(isAnnouncer({ executable: helper, args: `${helper} --announcer --bridge`, background: true }), false)
   const legacy = '/Applications/Herald Settings.app/Contents/MacOS/Herald Settings'
   assert.ok(!isAnnouncer({ executable: legacy, args: legacy, background: false }))
 })

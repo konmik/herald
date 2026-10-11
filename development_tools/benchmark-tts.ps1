@@ -14,7 +14,7 @@ try {
     $env:HERALD_TTS = Join-Path $repository 'native-announcer/resources/tts/kitten-nano-en-v0_8-int8'
     & node (Join-Path $PSScriptRoot 'prepare-tts.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Could not prepare Kitten assets' }
-    $messages = & cargo test --locked --no-run -j 6 --manifest-path (Join-Path $repository 'native-announcer/Cargo.toml') --message-format=json
+    $messages = & cargo test --locked --no-run --no-default-features --bin herald -j 6 --manifest-path (Join-Path $repository 'native-announcer/Cargo.toml') --message-format=json
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Kitten benchmark test' }
     $artifacts = @($messages | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable })
     if ($artifacts.Count -ne 1) { throw 'Could not identify native test executable' }

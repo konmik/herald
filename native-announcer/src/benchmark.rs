@@ -9,13 +9,16 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub(crate) type Preview = fn(&Path, &Settings, &str, &Options, &mut Recorder) -> Result<u64, String>;
+
 const TEXT: &str = "The native voice adviser is ready. Announcements stay visible without taking focus.";
-const SEED: u32 = 1234;
+pub(crate) const SEED: u32 = 1234;
 
-struct Options { cycles: usize, scale: f32, fps: f64, profile: bool, targets: Vec<String> }
+pub(crate) struct Options { pub cycles: usize, pub scale: f32, pub fps: f64, profile: bool, targets: Vec<String> }
 
-fn options(arguments: Vec<String>) -> Result<Options, String> {
-    let mut options = Options { cycles: 3, scale: 2.0, fps: 120.0, profile: false, targets: vec!["announcement".into(), "preview".into()] };
+fn options(arguments: Vec<String>, preview: Option<Preview>) -> Result<Options, String> {
+    let targets = if preview.is_some() { vec!["announcement".into(), "preview".into()] } else { vec!["announcement".into()] };
+    let mut options = Options { cycles: 3, scale: 2.0, fps: 120.0, profile: false, targets };
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or(format!("Missing value for {argument}"));
@@ -39,10 +42,10 @@ pub(crate) fn video_path(assets: &Path) -> Result<std::path::PathBuf, String> {
 
 fn phase_name(phase: AnnouncementPhase) -> String { format!("{phase:?}").to_lowercase() }
 
-struct Recorder { frames: Vec<serde_json::Value>, digest: Sha256, started: Instant }
+pub(crate) struct Recorder { frames: Vec<serde_json::Value>, digest: Sha256, started: Instant }
 
 impl Recorder {
-    fn record(&mut self, target: &str, preset: &str, cycle: usize, at: Duration, phase: AnnouncementPhase, burst: bool, start: Instant, pixels: &[u8]) {
+    pub(crate) fn record(&mut self, target: &str, preset: &str, cycle: usize, at: Duration, phase: AnnouncementPhase, burst: bool, start: Instant, pixels: &[u8]) {
         let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
         self.digest.update(pixels);
         let stages = profile::take();
@@ -103,28 +106,8 @@ fn announcement(assets: &Path, settings: &Settings, preset: &str, options: &Opti
     Ok(decoded)
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn preview(assets: &Path, settings: &Settings, preset: &str, options: &Options, recorder: &mut Recorder) -> Result<u64, String> {
-    let mut preview = crate::settings_app::BenchmarkPreview::new(assets, settings, options.scale, SEED)?;
-    let period = Duration::from_secs_f64(1.0 / options.fps);
-    let cycle_length = preview.cycle();
-    let duration = cycle_length - settings.lightning.transition_duration();
-    let mut at = Duration::ZERO;
-    for cycle in 0..options.cycles {
-        while at < cycle_length * (cycle as u32 + 1) {
-            let start = Instant::now();
-            let (image, phase) = preview.frame(if at.is_zero() { Duration::ZERO } else { period });
-            let local = at - cycle_length * cycle as u32;
-            let burst = phase != AnnouncementPhase::Holding || render::ambient_active(local, duration, SEED, settings.lightning);
-            recorder.record("preview", preset, cycle, local, phase, burst, start, image.as_raw());
-            at += period;
-        }
-    }
-    Ok(0)
-}
-
-pub fn run(assets: &Path, output: &Path, arguments: Vec<String>) -> Result<(), String> {
-    let options = options(arguments)?;
+pub fn run(assets: &Path, output: &Path, arguments: Vec<String>, preview: Option<Preview>) -> Result<(), String> {
+    let options = options(arguments, preview)?;
     profile::enable(options.profile);
     profile::take();
     let mut report = serde_json::json!({
@@ -138,8 +121,10 @@ pub fn run(assets: &Path, output: &Path, arguments: Vec<String>) -> Result<(), S
             let mut recorder = Recorder { frames: Vec::new(), digest: Sha256::new(), started: Instant::now() };
             let decoded = match target.as_str() {
                 "announcement" => announcement(assets, &settings, preset.id, &options, &mut recorder)?,
-                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-                "preview" => preview(assets, &settings, preset.id, &options, &mut recorder)?,
+                "preview" => {
+                    let preview = preview.ok_or("Preview benchmarks require the Settings executable")?;
+                    preview(assets, &settings, preset.id, &options, &mut recorder)?
+                }
                 _ => return Err(format!("Unknown benchmark target: {target}")),
             };
             let key = format!("{target}/{}", preset.id);
@@ -151,4 +136,28 @@ pub fn run(assets: &Path, output: &Path, arguments: Vec<String>) -> Result<(), S
     }
     report["frames"] = frames.into();
     std::fs::write(output, serde_json::to_vec(&report).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview(_: &Path, _: &Settings, _: &str, _: &Options, _: &mut Recorder) -> Result<u64, String> {
+        Ok(0)
+    }
+
+    #[test]
+    fn announcer_benchmark_defaults_to_announcement() {
+        assert_eq!(options(Vec::new(), None).unwrap().targets, ["announcement"]);
+    }
+
+    #[test]
+    fn settings_benchmark_defaults_include_preview() {
+        assert_eq!(options(Vec::new(), Some(preview)).unwrap().targets, ["announcement", "preview"]);
+    }
+
+    #[test]
+    fn explicit_targets_override_the_role_default() {
+        assert_eq!(options(vec!["--targets".into(), "announcement".into()], Some(preview)).unwrap().targets, ["announcement"]);
+    }
 }

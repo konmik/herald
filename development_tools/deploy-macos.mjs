@@ -85,7 +85,11 @@ export function bundleOf(executable) {
  * `Herald.app/Contents/MacOS/Herald` was the announcer before the merge and is Settings after it.
  */
 export function isAnnouncer({ executable, args, background }) {
+  if (/(^|\s)--bridge(\s|$)/.test(args)) return false
+  const modes = [...args.matchAll(/(?:^|\s)--(settings|announcer)(?=\s|$)/g)]
+  if (modes.length) return modes.at(-1)[1] === 'announcer'
   if (bundleOf(executable)) return background === true
+  if (/\/herald-settings(?:-|$)/.test(executable)) return false
   return !/(^|\s)--(settings|bridge)(\s|$)/.test(args)
 }
 
@@ -155,7 +159,7 @@ async function copyLicenses(metafile, destination) {
 }
 
 /** Stage the same runtime payload as the Windows bundle, with a darwin binary. */
-async function buildPayload(stage, binary, arch) {
+async function buildPayload(stage, binary, settingsBinary, arch) {
   const payload = join(stage, 'herald')
   for (const name of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/register.ts']) {
     await mkdir(dirname(join(payload, 'claude-plugin', name)), { recursive: true })
@@ -168,6 +172,7 @@ async function buildPayload(stage, binary, arch) {
   const runtime = join(payload, 'native-announcer')
   await mkdir(join(runtime, 'bin'), { recursive: true })
   await copyFile(binary, join(runtime, 'bin', `herald-darwin-${arch}`))
+  await copyFile(settingsBinary, join(runtime, 'bin', `herald-settings-darwin-${arch}`))
   await mkdir(join(runtime, 'resources'), { recursive: true })
   await copyFile(join(root, 'native-announcer/resources/characters.json'), join(runtime, 'resources/characters.json'))
   await cp(join(root, 'native-announcer/resources/videos'), join(runtime, 'resources/videos'), { recursive: true })
@@ -192,6 +197,7 @@ async function buildPayload(stage, binary, arch) {
 /** Sign the plugin runtimes, which the app bundle later seals as resources, then copy the Claude and Codex runtimes and write the manifest. */
 async function sealPayload(payload, arch, identifier) {
   output('codesign', ['--force', '--sign', '-', '--identifier', `${identifier}.runtime`, join(payload, 'native-announcer/bin', `herald-darwin-${arch}`)])
+  output('codesign', ['--force', '--sign', '-', '--identifier', `${identifier}.settings`, join(payload, 'native-announcer/bin', `herald-settings-darwin-${arch}`)])
   for (const host of ['claude-plugin', 'codex-plugin']) await cp(join(payload, 'native-announcer'), join(payload, host, 'native-announcer'), { recursive: true })
   const pkg = JSON.parse(await readFile(join(payload, 'package.json'), 'utf8'))
   const listed = []
@@ -218,6 +224,7 @@ export async function verifyPayload(payload, arch) {
   }
   if (paths.includes('claude-plugin/.claude-plugin/development.json')) throw new Error('Development fallback markers cannot be installed')
   for (const prefix of ['native-announcer', 'claude-plugin/native-announcer', 'codex-plugin/native-announcer']) {
+    if (!paths.includes(`${prefix}/bin/herald-settings-darwin-${arch}`)) throw new Error(`Settings executable is missing: ${prefix}`)
     const characters = JSON.parse(await readFile(join(payload, prefix, 'resources/characters.json'), 'utf8'))
     if (!Object.keys(characters).length) throw new Error('Character library is empty')
     for (const character of Object.values(characters)) {
@@ -255,9 +262,9 @@ async function makeBundle(bundle, app, { binary, icon, version }) {
   return contents
 }
 
-async function makeApplication(stage, { binary, icon, payload, version }) {
+async function makeApplication(stage, { binary, settingsBinary, icon, payload, version }) {
   const bundle = join(stage, `${APP.name}.app`)
-  const contents = await makeBundle(bundle, APP, { binary, icon, version })
+  const contents = await makeBundle(bundle, APP, { binary: settingsBinary, icon, version })
   // Contents/Resources is the default asset folder of a bundled executable; the helper reads the same folder.
   await copyFile(join(root, 'native-announcer/resources/characters.json'), join(contents, 'Resources/characters.json'))
   await cp(join(root, 'native-announcer/resources/videos'), join(contents, 'Resources/videos'), { recursive: true })
@@ -486,17 +493,19 @@ async function main() {
     run('pnpm', ['run', 'check'], { cwd: root })
     if (hasCommand('claude')) run('claude', ['plugin', 'validate', join(root, 'claude-plugin')], { cwd: root })
   }
-  run('cargo', ['build', '--release', '--locked', '-j', '6', '--manifest-path', join(root, 'native-announcer/Cargo.toml')], { cwd: root })
+  run('cargo', ['build', '--release', '--locked', '-j', '6', '--manifest-path', join(root, 'native-announcer/Cargo.toml'), '--no-default-features', '--bin', 'herald'], { cwd: root })
+  run('cargo', ['build', '--release', '--locked', '-j', '6', '--manifest-path', join(root, 'native-announcer/Cargo.toml'), '--no-default-features', '--features', 'settings-ui', '--bin', 'herald-settings'], { cwd: root })
   const binary = join(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'native-announcer/target'), 'release/herald')
+  const settingsBinary = join(dirname(binary), 'herald-settings')
   const stage = join(root, 'temp/bundles', `.herald-stage-macos-${randomUUID()}`)
   await mkdir(stage, { recursive: true })
   const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', codex: 'skipped', openCode: 'skipped', backups: null }
   try {
-    const { payload, version } = await buildPayload(stage, binary, arch)
+    const { payload, version } = await buildPayload(stage, binary, settingsBinary, arch)
     await sealPayload(payload, arch, BUNDLE_ID)
     await verifyPayload(payload, arch)
     const icon = await makeIcon(stage)
-    const bundle = await makeApplication(join(stage, 'apps'), { binary, icon, payload, version })
+    const bundle = await makeApplication(join(stage, 'apps'), { binary, settingsBinary, icon, payload, version })
     const backupDirectory = join(root, 'temp/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
     await mkdir(backupDirectory, { recursive: true })
     summary.backups = backupDirectory

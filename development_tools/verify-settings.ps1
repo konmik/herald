@@ -1,4 +1,4 @@
-param([string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/bin/herald-win32-x64.exe'))
+param([string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/bin/herald-settings-win32-x64.exe'))
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;

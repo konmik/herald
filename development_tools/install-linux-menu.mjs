@@ -11,7 +11,7 @@ function execArgument(value) {
 
 export async function installLinuxMenu(root, { env = process.env, refresh = true } = {}) {
   if (/[\r\n]/.test(root)) throw new Error('The installation path must not contain carriage returns or newlines.')
-  const binary = join(root, 'native-announcer', 'bin', `herald-linux-${process.arch}`)
+  const binary = join(root, 'native-announcer', 'bin', `herald-settings-linux-${process.arch}`)
   const assets = join(root, 'native-announcer', 'resources')
   await access(binary, constants.X_OK)
   const applications = join(env.XDG_DATA_HOME || join(env.HOME || homedir(), '.local/share'), 'applications')

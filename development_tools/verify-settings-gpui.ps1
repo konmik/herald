@@ -1,8 +1,9 @@
 param(
-    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald.exe'),
+    [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald-settings.exe'),
     [string]$Evidence = ('temp/verification/gpui-settings-' + [guid]::NewGuid()),
     [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'Lightning', 'All')]
-    [string]$Feature = 'All'
+    [string]$Feature = 'All',
+    [switch]$DefaultMode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -337,7 +338,8 @@ function New-StartInfo {
     $info.Environment['HERALD_ELEVENLABS_API_KEY'] = 'ignored-legacy-environment-test-key'
     $info.Environment['HERALD_LIGHTNING_STYLE'] = 'plasma'
     $info.Environment['ELEVENLABS_API_BASE_URL'] = 'http://127.0.0.1:1'
-    foreach ($argument in @('--settings', '--assets', (Join-Path $script:root 'native-announcer/resources'))) { [void]$info.ArgumentList.Add($argument) }
+    if (-not $DefaultMode) { [void]$info.ArgumentList.Add('--settings') }
+    foreach ($argument in @('--assets', (Join-Path $script:root 'native-announcer/resources'))) { [void]$info.ArgumentList.Add($argument) }
     $info
 }
 
