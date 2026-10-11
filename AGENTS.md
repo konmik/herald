@@ -12,10 +12,23 @@ Forking the existing conversation is a critical requirement for every announceme
 
 - `native-announcer/`: shared Rust code, executable in `bin/`, runtime videos in `resources/`. New library characters keep their source PNG in `resources/portraits/` and silent MP4 in `resources/videos/`; both belong in Git.
 - `claude-plugin/`, `opencode-plugin/`, `codex-plugin/`: integration code and tests only; all use the shared announcer. `codex-plugin/hooks/herald.mjs` is plain Node ESM because Codex runs it directly as a hook command.
+- `native-announcer/unit_tests/`: Rust unit tests, mirroring `src/`. See [Tests](#tests).
 - `development_tools/`: read [the tool index](development_tools/index.md) before choosing build, deployment, generation, recording, verification or profiling tools.
 - `generated-assets/`: unpublished videos; excluded from Git.
 
 Save every character image in the single `native-announcer/resources/portraits/` folder, including source images. Use descriptive filenames instead of per-character image folders. Scratch recordings and screenshots belong in `temp/`; published README media belongs in `.github/assets/`.
+
+## Tests
+
+Tests live outside the source files. Rust unit tests for `native-announcer/src/<module>.rs` live in `native-announcer/unit_tests/<module>.rs` (for example `src/settings_app/theme.rs` → `unit_tests/settings_app/theme.rs`). The module declares them as its last item, so they stay a child module with access to private items through `use super::*;`:
+
+```rust
+#[cfg(test)]
+#[path = "../../unit_tests/settings_app/theme.rs"]
+mod tests;
+```
+
+`#[path]` is relative to the source file's directory; inside an inline module of `src/a.rs` it is relative to `src/a/<inline modules>/` (see `src/window.rs`). Keep platform gates such as `#[cfg(all(test, unix))]` on the declaration. Never write `#[test]` or an inline `mod tests { ... }` in `src/`; `pnpm run lint:tests` (part of `pnpm run check`) fails on them and on `unit_tests/` files no module declares. JavaScript and TypeScript tests live in each plugin's `tests/` folder and `development_tools/tests/`.
 
 ## Deployment
 
