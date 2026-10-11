@@ -11,12 +11,21 @@ pub fn init(cx: &mut App) {
 
 /// The macOS menu bar; GPUI apps start with an empty application menu.
 pub fn menus() -> Vec<gpui_kit::Menu> {
-    Vec::new()
+    use gpui_kit::{Menu, MenuItem};
+    vec![
+        Menu::new("Herald Settings").items([MenuItem::action("Quit Herald Settings", Quit)]),
+        Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]),
+    ]
 }
 
 fn bindings() -> Vec<gpui_kit::KeyBinding> {
     use gpui_kit::KeyBinding;
     vec![
+        // Global, so they work whatever has focus; both close through the Close button's checks.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-q", Quit, None),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseWindow, None),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-s", Apply, Some("HeraldSettings")),
         #[cfg(target_os = "macos")]

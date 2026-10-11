@@ -1734,6 +1734,15 @@ fn choice_index(choices: &[Choice], value: &str) -> usize {
     choices.iter().position(|choice| choice.value == value).unwrap_or(0)
 }
 
+/// Quit and Close Window behave like the Close button: the settings window
+/// closes unless it must stay open, and closing the last window quits.
+fn request_close(handle: gpui_kit::AnyWindowHandle, view: &gpui_kit::WeakEntity<SettingsView>, cx: &mut App) {
+    let closed = handle.update(cx, |_, window, cx| {
+        if view.update(cx, |view, cx| view.should_close(window, cx)).unwrap_or(true) { window.remove_window(); }
+    });
+    if closed.is_err() { cx.quit(); }
+}
+
 pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
     let settings = Settings::load(data)?;
     let Some(instance) = instance::InstanceGuard::acquire(data)? else { return Ok(()); };
@@ -1761,11 +1770,21 @@ pub fn run(data: &Path, assets: &Path) -> Result<(), String> {
             }
             cx.new(|cx| SettingsView::new(data, assets, settings, instance.clone(), window, cx))
         }) {
-            Ok((handle, _view)) => {
+            Ok((handle, view)) => {
                 let _ = handle.downcast::<Root>();
-                // A command-line launch does not make a macOS app frontmost.
+                let view = view.downgrade();
+                cx.on_action({
+                    let view = view.clone();
+                    move |_: &keyboard::Quit, cx| request_close(handle, &view, cx)
+                });
+                cx.on_action(move |_: &keyboard::CloseWindow, cx| request_close(handle, &view, cx));
                 #[cfg(target_os = "macos")]
-                cx.activate(true);
+                {
+                    // GPUI starts with an empty menu bar and no Cmd-Q, so Quit must be provided here.
+                    cx.set_menus(keyboard::menus());
+                    // A command-line launch does not make a macOS app frontmost.
+                    cx.activate(true);
+                }
             }
             Err(error) => {
                 *launch_error_for_app.borrow_mut() = Some(error.to_string());
