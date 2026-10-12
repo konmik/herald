@@ -65,7 +65,7 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [verify-macos-settings.py](verify-macos-settings.py) | Launch the debug settings window on macOS with disposable data, drive it through Accessibility plus real pointer and keyboard events, and verify every page, controls, previews, Lightning, Characters, layout, keyboard, Apply, Close, every quit path (close button, Command+W, Command+Q, menu Quit, during previews), reopening and single-instance activation. |
 | [verify-linux-settings.py](verify-linux-settings.py) | Launch installed graphical settings on Hyprland, drive its AT-SPI controls, and verify navigation, Apply, draft discard, and reopening. |
 | [voice-api-fixture.mjs](voice-api-fixture.mjs) | Local speech API fixture for deterministic tests. |
-| [host-verification/](host-verification/) | Real Claude/OpenCode lifecycle drivers and proof capture. These tests make model requests. |
+| [host-verification/](host-verification/) | Real Claude/OpenCode/Codex lifecycle drivers and proof capture. These tests make model requests. On Windows, set `CODEX_BINARY` to its native executable, then run `node development_tools/host-verification/codex.mjs <scenario> temp/verification/<new-folder>` with `Background` or `Subagent`. |
 | [benchmark-tts.ps1](benchmark-tts.ps1) | Measure local voice loading and synthesis across thread counts. |
 | [benchmark-settings-memory.ps1](benchmark-settings-memory.ps1) | Compare release settings-process working set and private bytes with isolated data and alternating runs. |
 | [profile-plugin.ts](profile-plugin.ts) | Measure memory during 10,000 simulated completion cycles. |

@@ -14,6 +14,15 @@ export const ANNOUNCEMENT_GRACE = 60_000
 
 export const keyFor = (sessionID) => 'codex:' + sessionID
 
+function spawnSucceeded(value) {
+  try {
+    const response = typeof value === 'string' ? JSON.parse(value) : value
+    return typeof response?.agent_id === 'string' || typeof response?.task_name === 'string'
+  } catch {
+    return false
+  }
+}
+
 export function createHerald(host) {
   const update = (sessionID, change) => {
     const next = { ...host.read(sessionID), ...change }
@@ -21,30 +30,67 @@ export function createHerald(host) {
     return next
   }
 
-  async function hook(event) {
+  const hasWork = state => Object.keys(state.work ?? {}).length > 0 || Object.keys(state.spawns ?? {}).length > Object.keys(state.agents ?? {}).length
+  const locked = (sessionID, action) => host.lock(sessionID, action)
+
+  async function handle(event) {
     const sessionID = event.session_id
     if (typeof sessionID !== 'string' || !sessionID) return
     const key = keyFor(sessionID)
     const at = host.now()
+    const state = host.read(sessionID)
+    const spawning = ['Agent', 'spawn_agent', 'collaborationspawn_agent'].includes(event.tool_name)
+    if (event.hook_event_name === 'SubagentStart' || event.hook_event_name === 'PreToolUse') {
+      const id = event.hook_event_name === 'SubagentStart' ? 'agent:' + event.agent_id : 'tool:' + event.tool_use_id
+      if (event.hook_event_name === 'PreToolUse' && event.tool_name !== 'Bash' && !spawning) return
+      update(sessionID, {
+        work: { ...state.work, [id]: event.agent_id ?? null }, token: host.uuid(), pending: undefined,
+        agents: event.hook_event_name === 'SubagentStart' ? { ...state.agents, [event.agent_id]: true } : state.agents,
+        spawns: spawning ? { ...state.spawns, [event.tool_use_id]: true } : state.spawns,
+      })
+      return
+    }
+    if (event.hook_event_name === 'SubagentStop' || event.hook_event_name === 'PostToolUse') {
+      const id = event.hook_event_name === 'SubagentStop' ? 'agent:' + event.agent_id : 'tool:' + event.tool_use_id
+      const work = { ...state.work }
+      delete work[id]
+      const spawns = { ...state.spawns }
+      if (spawning && !spawnSucceeded(event.tool_response)) delete spawns[event.tool_use_id]
+      update(sessionID, { work, spawns })
+      return
+    }
+    if (event.agent_id) return
+    if (event.hook_event_name === 'Interrupt') {
+      update(sessionID, { token: host.uuid(), pending: undefined, started: undefined })
+      await host.bridge({ type: 'discard', sessionID: key, at })
+      return
+    }
     if (event.hook_event_name === 'UserPromptSubmit') {
       const state = update(sessionID, { started: at, token: host.uuid(), pending: undefined, notified: undefined })
       await host.bridge({ type: 'boot' })
       await host.bridge({ type: 'discard', sessionID: key, at })
       if (!host.alive(state.keeper)) update(sessionID, { keeper: host.start(['presence', JSON.stringify({ sessionID, pid: host.parent })]) })
     } else if (event.hook_event_name === 'Stop') {
-      const state = host.read(sessionID)
-      if (typeof state.started !== 'number' || state.pending) return
+      if (typeof state.started !== 'number' || state.pending || hasWork(state)) return
       if (at - state.started < MINIMUM_DURATION || !event.last_assistant_message?.trim()) {
         update(sessionID, { started: undefined })
         return
       }
-      update(sessionID, { started: undefined, pending: state.token })
+      update(sessionID, { pending: state.token })
       host.start(['summarize', JSON.stringify({ sessionID, turnID: event.turn_id, token: state.token, at, model: event.model, cwd: event.cwd })])
     }
   }
 
+  async function hook(event) {
+    if (typeof event.session_id !== 'string' || !event.session_id) return
+    return locked(event.session_id, () => handle(event))
+  }
+
   async function summarize(job) {
-    const current = () => host.read(job.sessionID).token === job.token
+    const current = () => {
+      const state = host.read(job.sessionID)
+      return state.token === job.token && !hasWork(state)
+    }
     try {
       const profile = JSON.parse((await host.bridge({ type: 'read-announcement-profile' })).stdout)
       if (typeof profile.prompt !== 'string') throw new Error('Herald bridge returned an invalid summary prompt')
@@ -52,10 +98,15 @@ export function createHerald(host) {
       const text = (await host.fork(job, profile.prompt)).replace(/\s+/g, ' ').trim()
       if (!text || !current()) return
       const key = keyFor(job.sessionID)
-      await host.bridge({ type: 'notify', id: key + ':' + job.turnID, sessionID: key, presenceSessionID: key, completed: job.at, text, title: host.title(job.sessionID) || basename(job.cwd ?? ''), character: 'codex', characterID: profile.characterID, emotion: 'neutral' })
-      if (current()) update(job.sessionID, { started: undefined, notified: host.now() })
+      await locked(job.sessionID, async () => {
+        if (!current()) return
+        await host.bridge({ type: 'notify', id: key + ':' + job.turnID, sessionID: key, presenceSessionID: key, completed: job.at, text, title: host.title(job.sessionID) || basename(job.cwd ?? ''), character: 'codex', characterID: profile.characterID, emotion: 'neutral' })
+        update(job.sessionID, { started: undefined, notified: host.now() })
+      })
     } finally {
-      if (host.read(job.sessionID).pending === job.token) update(job.sessionID, { pending: undefined })
+      await locked(job.sessionID, () => {
+        if (host.read(job.sessionID).pending === job.token) update(job.sessionID, { pending: undefined })
+      })
     }
   }
 
@@ -73,7 +124,9 @@ export function createHerald(host) {
       await host.sleep(PRESENCE_INTERVAL)
     }
     await host.bridge({ type: 'presence', clientID, sessionIDs: [], sequence: ++sequence, at: host.now() })
-    update(job.sessionID, { keeper: undefined })
+    await locked(job.sessionID, () => {
+      if (host.read(job.sessionID).keeper === host.pid) update(job.sessionID, { keeper: undefined })
+    })
   }
 
   return { hook, summarize, presence }
@@ -123,6 +176,18 @@ function nodeHost() {
     now: () => Date.now(),
     uuid: () => randomUUID(),
     sleep: (ms) => new Promise(done => setTimeout(done, ms)),
+    async lock(sessionID, action) {
+      mkdirSync(sessions, { recursive: true, mode: 0o700 })
+      const lock = file(sessionID) + '.lock'
+      const deadline = Date.now() + 10_000
+      for (;;) {
+        try { mkdirSync(lock); break } catch (error) {
+          if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error
+          await new Promise(done => setTimeout(done, 25))
+        }
+      }
+      try { return await action() } finally { rmSync(lock, { recursive: true }) }
+    },
     alive(pid) {
       if (typeof pid !== 'number') return false
       try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
