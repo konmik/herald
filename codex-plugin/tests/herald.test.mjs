@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ANNOUNCEMENT_GRACE, createHerald } from '../hooks/herald.mjs'
 
@@ -68,6 +69,30 @@ describe('codex hooks', () => {
   test('registers main completion and background lifecycle hooks', () => {
     const config = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
     expect(Object.keys(config.hooks)).toEqual(['UserPromptSubmit', 'SubagentStart', 'SubagentStop', 'PreToolUse', 'PostToolUse', 'Interrupt', 'Stop'])
+  })
+
+  test.skipIf(process.platform !== 'win32')('Windows hook commands run in PowerShell and cmd with spaces in the plugin path', () => {
+    const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex hook ', import.meta.url)))
+    const config = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+    const commands = new Set(Object.values(config.hooks).flatMap(entries => entries.flatMap(entry => entry.hooks.map(hook => hook.commandWindows))))
+    try {
+      mkdirSync(join(directory, 'hooks'))
+      copyFileSync(new URL('../hooks/herald.mjs', import.meta.url), join(directory, 'hooks', 'herald.mjs'))
+      for (const command of commands) {
+        for (const [shell, args] of [['pwsh', ['-NoProfile', '-Command', command]], ['cmd.exe', ['/d', '/c', command]]]) {
+          const result = spawnSync(shell, args, {
+            env: { ...process.env, PLUGIN_ROOT: directory, PLUGIN_DATA: directory, HERALD_BINARY: process.execPath },
+            input: JSON.stringify(event('PreToolUse', { tool_name: 'Bash', tool_use_id: shell })),
+            encoding: 'utf8', timeout: 10_000, windowsHide: true, windowsVerbatimArguments: shell === 'cmd.exe',
+          })
+          expect({ shell, status: result.status, stderr: result.stderr, error: result.error }).toEqual({ shell, status: 0, stderr: '', error: undefined })
+          const state = JSON.parse(readFileSync(join(directory, 'sessions', 's1.json'), 'utf8'))
+          expect(state.work['tool:' + shell]).toBeNull()
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   test('titles an unnamed exec session after its project folder', async () => {
