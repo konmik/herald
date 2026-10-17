@@ -255,6 +255,96 @@ describe('codex hooks', () => {
     expect(host.sent.at(-1).text).toBe('The parser now handles empty files.')
   })
 
+  test('a final main stop recovers a completed execution whose PostToolUse was lost during interruption', async () => {
+    const host = fakeHost()
+    const scans = []
+    host.completedExecutions = async (input, tracked) => {
+      scans.push({ input, tracked: [...tracked] })
+      return new Set(['exec-old'])
+    }
+    const herald = createHerald(host)
+    await herald.hook(event('UserPromptSubmit'))
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'exec-old' }))
+    await herald.hook(event('Interrupt'))
+    expect(host.read('s1').work).toEqual({ 'tool:exec-old': null })
+    await herald.hook(event('UserPromptSubmit', { prompt: 'Continue.' }))
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'exec-new' }))
+    host.clock += 65_000
+    await herald.hook(event('PostToolUse', { tool_name: 'Bash', tool_use_id: 'exec-new' }))
+    const before = host.read('s1')
+    const stop = event('Stop', { last_assistant_message: 'Finished.', transcript_path: '/rollout.jsonl' })
+    await herald.hook(stop)
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toHaveLength(1)
+    expect(scans).toEqual([{ input: stop, tracked: ['exec-old'] }])
+    expect(host.read('s1')).toEqual({ ...before, work: {}, pending: before.token })
+    await herald.hook(stop)
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toHaveLength(1)
+    await herald.summarize(host.started.find(([mode]) => mode === 'summarize')[1])
+    expect(host.sent.filter(command => command.type === 'notify')).toHaveLength(1)
+  })
+
+  test('recovery removes only tracked terminal executions and preserves unknown work and lifecycle state', async () => {
+    const host = fakeHost()
+    const scans = []
+    host.completedExecutions = async (_input, tracked) => {
+      scans.push([...tracked])
+      return new Set(['exec-finished', 'exec-untracked', 'shell', 'child'])
+    }
+    const before = {
+      started: host.clock - 65_000, token: 'keep-token', keeper: 99, notified: 123,
+      work: { 'tool:exec-finished': null, 'tool:exec-live': 'child', 'tool:shell': null, 'agent:child': 'child' },
+      agents: { child: true }, spawns: { 'exec-untracked': true },
+    }
+    host.write('s1', before)
+    await createHerald(host).hook(event('Stop', { last_assistant_message: 'Still running.' }))
+    expect(host.read('s1')).toEqual({ ...before, work: { 'tool:exec-live': 'child', 'tool:shell': null, 'agent:child': 'child' } })
+    expect(scans).toEqual([['exec-finished', 'exec-live']])
+    expect(host.started).toEqual([])
+  })
+
+  test('interrupts and subagent stops never reconcile executions', async () => {
+    const host = fakeHost()
+    let scans = 0
+    host.completedExecutions = async () => { scans += 1; return new Set(['exec-old']) }
+    const herald = createHerald(host)
+    await herald.hook(event('UserPromptSubmit'))
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'exec-old' }))
+    await herald.hook(event('SubagentStart', { agent_id: 'child' }))
+    await herald.hook(event('SubagentStop', { agent_id: 'child' }))
+    await herald.hook(event('Stop', { agent_id: 'child', last_assistant_message: 'Child finished.' }))
+    await herald.hook(event('Interrupt'))
+    expect(scans).toBe(0)
+    expect(host.read('s1').work).toEqual({ 'tool:exec-old': null })
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toEqual([])
+  })
+
+  test('an interrupted execution without terminal evidence still blocks the next qualifying task', async () => {
+    const host = fakeHost()
+    const herald = createHerald(host)
+    await herald.hook(event('UserPromptSubmit'))
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'exec-unknown' }))
+    await herald.hook(event('Interrupt'))
+    await herald.hook(event('UserPromptSubmit'))
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'exec-new' }))
+    host.clock += 65_000
+    await herald.hook(event('PostToolUse', { tool_name: 'Bash', tool_use_id: 'exec-new' }))
+    await herald.hook(event('Stop', { last_assistant_message: 'Finished the new task.' }))
+    expect(host.read('s1').work).toEqual({ 'tool:exec-unknown': null })
+    expect(host.read('s1').started).toBe(1_000_000)
+    expect(host.read('s1').pending).toBeUndefined()
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toEqual([])
+  })
+
+  test('main stops without tracked execution IDs do not scan transcripts', async () => {
+    const host = fakeHost()
+    host.completedExecutions = async () => { throw new Error('Unexpected transcript scan') }
+    const herald = createHerald(host)
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'shell' }))
+    await runTask(host, herald, 65)
+    expect(host.read('s1').work).toEqual({ 'tool:shell': null })
+    expect(host.started.filter(([mode]) => mode === 'summarize')).toEqual([])
+  })
+
   test('a new prompt discards the queued announcement and cancels the summary in flight', async () => {
     const host = fakeHost()
     const herald = createHerald(host)
