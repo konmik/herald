@@ -14,6 +14,26 @@ export const ANNOUNCEMENT_GRACE = 60_000
 
 export const keyFor = (sessionID) => 'codex:' + sessionID
 
+function executableName(name) {
+  const text = String(name ?? '').trim()
+  const slash = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+  return (slash < 0 ? text : text.slice(slash + 1)).toLowerCase()
+}
+
+export function codexAncestor(startPID, processes) {
+  const seen = new Set()
+  let pid = startPID
+  while (Number.isInteger(pid) && pid > 0 && !seen.has(pid) && seen.size < processes.size) {
+    seen.add(pid)
+    const record = processes.get(pid)
+    if (!record) break
+    const name = executableName(record.name)
+    if (name === 'codex' || name === 'codex.exe') return record.pid
+    pid = record.parentPID
+  }
+  throw new Error('Could not find the Codex process from pid ' + startPID)
+}
+
 function spawnSucceeded(value) {
   try {
     const response = typeof value === 'string' ? JSON.parse(value) : value
@@ -163,6 +183,55 @@ function sessionTitle(sessionID) {
   }
 }
 
+function snapshotText(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 10_000, windowsHide: true })
+  if (result.error || result.status !== 0) throw new Error('Process snapshot failed: ' + (result.stderr || result.error))
+  return result.stdout ?? ''
+}
+
+function windowsProcesses() {
+  const command = [
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+    '$OutputEncoding = [Console]::OutputEncoding',
+    "$ProgressPreference = 'SilentlyContinue'",
+    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ForEach-Object { $_ | ConvertTo-Json -Compress }',
+  ].join('; ')
+  const records = []
+  for (const line of snapshotText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]).replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    let row
+    try { row = JSON.parse(trimmed) } catch (error) {
+      throw new Error('Process snapshot failed: ' + error.message)
+    }
+    records.push({ pid: Number(row.ProcessId), parentPID: Number(row.ParentProcessId), name: row.Name ?? '' })
+  }
+  return records
+}
+
+function unixProcesses() {
+  const records = []
+  for (const line of snapshotText('ps', ['-A', '-o', 'pid=,ppid=,comm=']).split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)(?:\s+(.*))?$/)
+    if (!match) continue
+    records.push({ pid: Number(match[1]), parentPID: Number(match[2]), name: (match[3] ?? '').trim() })
+  }
+  return records
+}
+
+function processSnapshot() {
+  const table = new Map()
+  for (const record of (process.platform === 'win32' ? windowsProcesses() : unixProcesses())) {
+    if (!Number.isInteger(record.pid) || record.pid <= 0) continue
+    table.set(record.pid, {
+      pid: record.pid,
+      parentPID: Number.isInteger(record.parentPID) ? record.parentPID : 0,
+      name: String(record.name ?? ''),
+    })
+  }
+  return table
+}
+
 function nodeHost() {
   const script = fileURLToPath(import.meta.url)
   const root = process.env.PLUGIN_ROOT ?? dirname(dirname(script))
@@ -172,7 +241,9 @@ function nodeHost() {
   const file = (sessionID) => join(sessions, sessionID.replace(/[^\w.-]/g, '_') + '.json')
   return {
     pid: process.pid,
-    parent: process.ppid,
+    get parent() {
+      return codexAncestor(process.pid, processSnapshot())
+    },
     now: () => Date.now(),
     uuid: () => randomUUID(),
     sleep: (ms) => new Promise(done => setTimeout(done, ms)),

@@ -3,7 +3,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node
 import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ANNOUNCEMENT_GRACE, createHerald } from '../hooks/herald.mjs'
+import { ANNOUNCEMENT_GRACE, codexAncestor, createHerald } from '../hooks/herald.mjs'
 
 function fakeHost({ summary = 'The parser now handles empty files.', profile = { prompt: 'Summarize.', characterID: 'royal' } } = {}) {
   const host = {
@@ -35,6 +35,7 @@ function fakeHost({ summary = 'The parser now handles empty files.', profile = {
 }
 
 const event = (name, extra = {}) => ({ session_id: 's1', turn_id: 't1', cwd: '/work', model: 'gpt-6.1-sol', hook_event_name: name, ...extra })
+const processes = (rows) => new Map(rows.map(row => [row.pid, row]))
 
 async function runTask(host, herald, seconds) {
   await herald.hook(event('UserPromptSubmit', { prompt: 'Fix the parser' }))
@@ -320,5 +321,116 @@ describe('codex hooks', () => {
     await herald.presence({ sessionID: 's1', pid: 4242 })
     expect(host.sent.filter(command => command.type === 'presence').map(command => command.sessionIDs)).toEqual([['codex:s1'], []])
     expect(host.read('s1').keeper).toBeUndefined()
+  })
+
+  test('keeper watches the chosen Codex owner after the wrapper shell exits', async () => {
+    const owner = codexAncestor(50, processes([
+      { pid: 9001, parentPID: 1, name: 'Codex.exe' },
+      { pid: 4242, parentPID: 9001, name: 'powershell.exe' },
+      { pid: 50, parentPID: 4242, name: 'node.exe' },
+    ]))
+    const host = fakeHost()
+    let parentReads = 0
+    Object.defineProperty(host, 'parent', { get() { parentReads += 1; return owner } })
+    host.live.add(owner)
+    const herald = createHerald(host)
+    await herald.hook(event('PreToolUse', { tool_name: 'Bash', tool_use_id: 'shell' }))
+    expect(parentReads).toBe(0)
+    await herald.hook(event('UserPromptSubmit'))
+    expect(parentReads).toBe(1)
+    expect(host.started).toEqual([['presence', { sessionID: 's1', pid: owner }]])
+    host.live.add(99)
+    await herald.hook(event('UserPromptSubmit'))
+    expect(parentReads).toBe(1)
+    host.write('s1', { keeper: 7, started: host.clock })
+    let tick = 0
+    host.onSleep = () => {
+      tick += 1
+      if (tick === 1) host.live.delete(4242)
+      if (tick === 2) host.live.delete(owner)
+    }
+    await herald.presence({ sessionID: 's1', pid: owner })
+    expect(host.sent.filter(command => command.type === 'presence').map(command => command.sessionIDs)).toEqual([['codex:s1'], ['codex:s1'], []])
+    expect(host.read('s1').keeper).toBeUndefined()
+  })
+
+  test('a missing Codex owner does not start a keeper for the wrapper shell', async () => {
+    const host = fakeHost()
+    Object.defineProperty(host, 'parent', { get() { throw new Error('Could not find the Codex process from pid 50') } })
+    const herald = createHerald(host)
+    await expect(herald.hook(event('UserPromptSubmit'))).rejects.toThrow('Could not find the Codex process from pid 50')
+    expect(host.started).toEqual([])
+    expect(host.read('s1').keeper).toBeUndefined()
+  })
+})
+
+describe('codex ancestor', () => {
+  test('selects a direct native owner', () => {
+    expect(codexAncestor(10, processes([{ pid: 10, parentPID: 1, name: 'codex' }]))).toBe(10)
+  })
+
+  test('selects Codex above a wrapper shell and observer node', () => {
+    expect(codexAncestor(30, processes([
+      { pid: 10, parentPID: 1, name: 'codex.exe' },
+      { pid: 20, parentPID: 10, name: 'powershell.exe' },
+      { pid: 30, parentPID: 20, name: 'node.exe' },
+    ]))).toBe(10)
+  })
+
+  test('selects the nearest Codex when one Codex hosts another', () => {
+    expect(codexAncestor(40, processes([
+      { pid: 10, parentPID: 1, name: 'codex' },
+      { pid: 20, parentPID: 10, name: 'codex.exe' },
+      { pid: 30, parentPID: 20, name: 'powershell.exe' },
+      { pid: 40, parentPID: 30, name: 'node.exe' },
+    ]))).toBe(20)
+  })
+
+  test('does not select a similarly named executable', () => {
+    expect(codexAncestor(30, processes([
+      { pid: 10, parentPID: 1, name: 'codex' },
+      { pid: 15, parentPID: 10, name: 'codex.cmd' },
+      { pid: 20, parentPID: 15, name: 'codex-cli' },
+      { pid: 30, parentPID: 20, name: 'node.exe' },
+    ]))).toBe(10)
+  })
+
+  test('rejects an unrelated ancestor chain', () => {
+    expect(() => codexAncestor(30, processes([
+      { pid: 1, parentPID: 0, name: 'explorer.exe' },
+      { pid: 20, parentPID: 1, name: 'powershell.exe' },
+      { pid: 30, parentPID: 20, name: 'node.exe' },
+    ]))).toThrow('Could not find the Codex process from pid 30')
+  })
+
+  test('rejects a missing ancestor', () => {
+    expect(() => codexAncestor(30, processes([
+      { pid: 30, parentPID: 20, name: 'node.exe' },
+    ]))).toThrow('Could not find the Codex process from pid 30')
+  })
+
+  test('rejects a cyclic ancestor chain', () => {
+    expect(() => codexAncestor(30, processes([
+      { pid: 20, parentPID: 30, name: 'powershell.exe' },
+      { pid: 30, parentPID: 20, name: 'node.exe' },
+    ]))).toThrow('Could not find the Codex process from pid 30')
+  })
+
+  test('matches Codex.exe regardless of case', () => {
+    expect(codexAncestor(20, processes([
+      { pid: 10, parentPID: 1, name: 'Codex.EXE' },
+      { pid: 20, parentPID: 10, name: 'powershell.exe' },
+    ]))).toBe(10)
+  })
+
+  test('matches Codex when the record name is a path', () => {
+    expect(codexAncestor(20, processes([
+      { pid: 10, parentPID: 1, name: '/usr/local/bin/codex' },
+      { pid: 20, parentPID: 10, name: '/opt/codex/node' },
+    ]))).toBe(10)
+    expect(codexAncestor(20, processes([
+      { pid: 10, parentPID: 1, name: 'C:\\Program Files\\Codex\\Codex.exe' },
+      { pid: 20, parentPID: 10, name: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+    ]))).toBe(10)
   })
 })
