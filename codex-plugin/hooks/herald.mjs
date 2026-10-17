@@ -3,8 +3,9 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { open, readdir } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const MINIMUM_DURATION = 60_000
@@ -13,6 +14,65 @@ export const PRESENCE_INTERVAL = 2_000
 export const ANNOUNCEMENT_GRACE = 60_000
 
 export const keyFor = (sessionID) => 'codex:' + sessionID
+
+export async function completedExecutions(event, trackedIDs, sessions = join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'sessions')) {
+  const completed = new Set()
+  const paths = new Set()
+  async function scan(path) {
+    if (typeof path !== 'string' || !path) return
+    path = resolve(path)
+    if (paths.has(path)) return
+    paths.add(path)
+    let file
+    try {
+      file = await open(path, 'r')
+      const { size } = await file.stat()
+      if (!size) return
+      let verified = false
+      let pending = ''
+      for await (const chunk of file.createReadStream({ encoding: 'utf8', end: size - 1, autoClose: false })) {
+        pending += chunk
+        let newline
+        while ((newline = pending.indexOf('\n')) >= 0) {
+          const line = pending.slice(0, newline).trim()
+          pending = pending.slice(newline + 1)
+          if (!line) continue
+          let row
+          try { row = JSON.parse(line) } catch {
+            if (!verified) return
+            continue
+          }
+          if (!verified) {
+            if (row?.type !== 'session_meta' || row.payload?.id !== event.session_id) return
+            verified = true
+            continue
+          }
+          const item = row?.payload?.item
+          if (row?.type === 'event_msg' && row.payload?.type === 'item_completed' && item?.type === 'CommandExecution'
+            && (item.status === 'completed' || item.status === 'failed') && trackedIDs.has(item.id)) completed.add(item.id)
+          if (completed.size === trackedIDs.size) return
+        }
+      }
+    } catch {
+    } finally {
+      await file?.close()
+    }
+  }
+  async function visit(directory) {
+    let entries
+    try { entries = await readdir(directory, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (completed.size === trackedIDs.size) return
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) await visit(path)
+      else if (entry.isFile() && entry.name.includes(event.session_id) && entry.name.endsWith('.jsonl')) await scan(path)
+    }
+  }
+  if (!trackedIDs.size) return completed
+  await scan(event.transcript_path)
+  if (completed.size < trackedIDs.size) await visit(sessions)
+  return completed
+}
 
 function executableName(name) {
   const text = String(name ?? '').trim()
@@ -58,7 +118,7 @@ export function createHerald(host) {
     if (typeof sessionID !== 'string' || !sessionID) return
     const key = keyFor(sessionID)
     const at = host.now()
-    const state = host.read(sessionID)
+    let state = host.read(sessionID)
     const spawning = ['Agent', 'spawn_agent', 'collaborationspawn_agent'].includes(event.tool_name)
     if (event.hook_event_name === 'SubagentStart' || event.hook_event_name === 'PreToolUse') {
       const id = event.hook_event_name === 'SubagentStart' ? 'agent:' + event.agent_id : 'tool:' + event.tool_use_id
@@ -91,7 +151,15 @@ export function createHerald(host) {
       await host.bridge({ type: 'discard', sessionID: key, at })
       if (!host.alive(state.keeper)) update(sessionID, { keeper: host.start(['presence', JSON.stringify({ sessionID, pid: host.parent })]) })
     } else if (event.hook_event_name === 'Stop') {
-      if (typeof state.started !== 'number' || state.pending || hasWork(state)) return
+      if (typeof state.started !== 'number' || state.pending) return
+      const tracked = new Set(Object.keys(state.work ?? {}).filter(id => id.startsWith('tool:exec-')).map(id => id.slice(5)))
+      if (tracked.size) {
+        const completed = await host.completedExecutions(event, tracked)
+        const work = { ...state.work }
+        for (const id of completed) if (tracked.has(id)) delete work['tool:' + id]
+        if (Object.keys(work).length !== Object.keys(state.work).length) state = update(sessionID, { work })
+      }
+      if (hasWork(state)) return
       if (at - state.started < MINIMUM_DURATION || !event.last_assistant_message?.trim()) {
         update(sessionID, { started: undefined })
         return
@@ -247,6 +315,7 @@ function nodeHost() {
     now: () => Date.now(),
     uuid: () => randomUUID(),
     sleep: (ms) => new Promise(done => setTimeout(done, ms)),
+    completedExecutions,
     async lock(sessionID, action) {
       mkdirSync(sessions, { recursive: true, mode: 0o700 })
       const lock = file(sessionID) + '.lock'

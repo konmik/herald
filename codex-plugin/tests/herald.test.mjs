@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ANNOUNCEMENT_GRACE, codexAncestor, createHerald } from '../hooks/herald.mjs'
+import { ANNOUNCEMENT_GRACE, codexAncestor, completedExecutions, createHerald } from '../hooks/herald.mjs'
 
 function fakeHost({ summary = 'The parser now handles empty files.', profile = { prompt: 'Summarize.', characterID: 'royal' } } = {}) {
   const host = {
@@ -23,6 +23,7 @@ function fakeHost({ summary = 'The parser now handles empty files.', profile = {
     read: (sessionID) => ({ ...host.states.get(sessionID) }),
     write: (sessionID, state) => host.states.set(sessionID, JSON.parse(JSON.stringify(state))),
     lock: async (_sessionID, action) => action(),
+    completedExecutions: async () => new Set(),
     bridge: async (command) => {
       host.sent.push(command)
       return { stdout: command.type === 'read-announcement-profile' ? JSON.stringify(profile) : '' }
@@ -451,6 +452,118 @@ describe('codex hooks', () => {
     await expect(herald.hook(event('UserPromptSubmit'))).rejects.toThrow('Could not find the Codex process from pid 50')
     expect(host.started).toEqual([])
     expect(host.read('s1').keeper).toBeUndefined()
+  })
+})
+
+describe('completed Codex executions', () => {
+  const sessionID = '019e7ab0-1234-7890-abcd-1234567890ab'
+  const header = (id = sessionID) => ({ type: 'session_meta', payload: { id } })
+  const terminal = (id, status = 'completed', exit_code = 0) => ({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id, status, exit_code } } })
+  const fixture = async action => {
+    const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-rollout-', import.meta.url)))
+    const sessions = join(directory, 'sessions')
+    const write = (name, rows, tail = '') => {
+      const path = join(directory, name)
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, rows.map(row => typeof row === 'string' ? row : JSON.stringify(row)).join('\n') + '\n' + tail)
+      return path
+    }
+    try { await action({ directory, sessions, write }) } finally { rmSync(directory, { recursive: true, force: true }) }
+  }
+
+  test('trusts exact completed and failed CommandExecution events in the supplied transcript first', async () => {
+    await fixture(async ({ sessions, write }) => {
+      const transcript_path = write('current.jsonl', [
+        header(), terminal('exec-success'), terminal('exec-failed', 'failed', 17), terminal('exec-untracked'),
+        terminal('exec-running', 'in_progress'),
+        { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id: 'exec-exit-only', exit_code: 0 } } },
+        { type: 'event_msg', payload: { type: 'item_started', item: { type: 'CommandExecution', id: 'exec-started', status: 'completed', exit_code: 0 } } },
+        { type: 'item_completed', item: { type: 'CommandExecution', id: 'exec-other-row', status: 'completed', exit_code: 0 } },
+        { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'Other', id: 'exec-other-type', status: 'completed', exit_code: 0 } } },
+      ])
+      write(`sessions/2026/10/18/rollout-${sessionID}.jsonl`, [header(), terminal('exec-success', 'completed'), terminal('exec-running')])
+      const tracked = new Set(['exec-success', 'exec-failed', 'exec-exit-only', 'exec-started', 'exec-other-row', 'exec-other-type'])
+      expect(await completedExecutions({ session_id: sessionID, transcript_path }, tracked, sessions)).toEqual(new Set(['exec-success', 'exec-failed']))
+      expect(await completedExecutions({ session_id: sessionID, transcript_path }, new Set(['exec-success']), sessions)).toEqual(new Set(['exec-success']))
+    })
+  })
+
+  test('finds unresolved executions across resumed chunks with dates and filename suffixes', async () => {
+    await fixture(async ({ sessions, write }) => {
+      const transcript_path = write(`sessions/2026/10/18/rollout-${sessionID}-latest.jsonl`, [header(), terminal('exec-latest')])
+      write(`sessions/2026/10/17/rollout-${sessionID}-resumed-1.jsonl`, [header(), terminal('exec-old')])
+      write(`sessions/2026/09/30/rollout-${sessionID}-resumed-2.jsonl`, [header(), terminal('exec-failed', 'failed', 1)])
+      write(`sessions/2026/10/17/rollout-${sessionID}-wrong.jsonl`, [header('another-session'), terminal('exec-wrong-session')])
+      write('sessions/2026/10/17/unrelated.jsonl', [header(), terminal('exec-wrong-filename')])
+      write(`sessions/2026/10/17/rollout-${sessionID}.jsonl.backup`, [header(), terminal('exec-wrong-extension')])
+      const tracked = new Set(['exec-latest', 'exec-old', 'exec-failed', 'exec-wrong-session', 'exec-wrong-filename', 'exec-wrong-extension'])
+      expect(await completedExecutions({ session_id: sessionID, transcript_path }, tracked, sessions)).toEqual(new Set(['exec-latest', 'exec-old', 'exec-failed']))
+    })
+  })
+
+  test('missing transcripts and malformed or missing session headers provide no evidence', async () => {
+    await fixture(async ({ directory, sessions, write }) => {
+      const tracked = new Set(['exec-old'])
+      for (const transcript_path of [
+        join(directory, 'missing.jsonl'),
+        write('wrong.jsonl', [header('another-session'), terminal('exec-old')]),
+        write('no-header.jsonl', [terminal('exec-old')]),
+        write('malformed-header.jsonl', ['{bad', terminal('exec-old')]),
+        write('partial-header.jsonl', [], '{"type":"session_meta"'),
+      ]) {
+        expect(await completedExecutions({ session_id: sessionID, transcript_path }, tracked, sessions)).toEqual(new Set())
+      }
+      expect(await completedExecutions({ session_id: sessionID }, tracked, sessions)).toEqual(new Set())
+    })
+  })
+
+  test('falls back to matching chunks when the supplied transcript is missing or belongs to another session', async () => {
+    await fixture(async ({ directory, sessions, write }) => {
+      write(`sessions/2026/10/17/rollout-${sessionID}-resumed.jsonl`, [header(), terminal('exec-old')])
+      for (const transcript_path of [
+        join(directory, 'missing.jsonl'),
+        write('wrong-session.jsonl', [header('another-session'), terminal('exec-unrelated')]),
+        undefined,
+      ]) {
+        expect(await completedExecutions({ session_id: sessionID, transcript_path }, new Set(['exec-old', 'exec-unrelated']), sessions)).toEqual(new Set(['exec-old']))
+      }
+    })
+  })
+
+  test('malformed, partial, and in-progress rows do not release live work', async () => {
+    await fixture(async ({ sessions, write }) => {
+      const transcript_path = write('current.jsonl', [
+        header(), '{bad', terminal('exec-finished'), terminal('exec-live', 'in_progress'),
+        { type: 'response_item', payload: { type: 'function_call_output', call_id: 'exec-output', output: 'Process exited with code 0' } },
+      ], JSON.stringify(terminal('exec-partial')))
+      const host = fakeHost()
+      const tracked = new Set(['exec-finished', 'exec-live', 'exec-output', 'exec-partial'])
+      expect(await completedExecutions({ session_id: sessionID, transcript_path }, tracked, sessions)).toEqual(new Set(['exec-finished']))
+      host.completedExecutions = (input, ids) => completedExecutions(input, ids, sessions)
+      const before = { started: host.clock - 65_000, token: 'unchanged', work: Object.fromEntries([...tracked].map(id => ['tool:' + id, null])) }
+      host.write(sessionID, before)
+      await createHerald(host).hook(event('Stop', { session_id: sessionID, transcript_path, last_assistant_message: 'Live work remains.' }))
+      expect(host.read(sessionID)).toEqual({ ...before, work: { 'tool:exec-live': null, 'tool:exec-output': null, 'tool:exec-partial': null } })
+      expect(host.started).toEqual([])
+    })
+  })
+
+  test('the Node hook adapter persists only proven removals against isolated rollout files', async () => {
+    await fixture(async ({ directory, write }) => {
+      const transcript_path = write('current.jsonl', [header(), terminal('exec-finished')])
+      const before = {
+        started: Date.now() - 65_000, token: 'unchanged', keeper: 123, notified: 456,
+        work: { 'tool:exec-finished': null, 'tool:exec-live': null }, agents: {}, spawns: {},
+      }
+      const statePath = write(`data/sessions/${sessionID}.json`, [before])
+      const result = spawnSync('node', [fileURLToPath(new URL('../hooks/herald.mjs', import.meta.url))], {
+        env: { ...process.env, PLUGIN_ROOT: fileURLToPath(new URL('..', import.meta.url)), PLUGIN_DATA: join(directory, 'data'), CODEX_HOME: directory, HERALD_BINARY: process.execPath },
+        input: JSON.stringify(event('Stop', { session_id: sessionID, transcript_path, last_assistant_message: 'Background work remains.' })),
+        encoding: 'utf8', timeout: 10_000, windowsHide: true,
+      })
+      expect({ status: result.status, stderr: result.stderr, error: result.error }).toEqual({ status: 0, stderr: '', error: undefined })
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({ ...before, work: { 'tool:exec-live': null } })
+    })
   })
 })
 
