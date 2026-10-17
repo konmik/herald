@@ -35,10 +35,6 @@ let hostExited = false
 let nativeExited = false
 native.on('exit', () => { nativeExited = true })
 writeFileSync(join(evidence, 'instance.json'), JSON.stringify({ nativePID: native.pid, binary, scratch, driverPID: process.pid }))
-function bridge(command) {
-  const result = spawnSync(binary, ['--bridge', '--assets', assets], { env, input: JSON.stringify(command), encoding: 'utf8', timeout: 10000, windowsHide: true })
-  assert.equal(result.status, 0, result.stderr)
-}
 try {
   const command = `node "${join(root, 'development_tools/host-verification/codex-hook.mjs').replaceAll('\\', '/')}"`
   const args = ['app-server', '-c', 'features.hooks=true']
@@ -95,7 +91,6 @@ try {
   while (Date.now() < deadline) {
     assert.ok(!hostExited, 'Codex exited before verification')
     assert.ok(!nativeExited, 'Herald exited before verification')
-    bridge({ type: 'presence', clientID: 'codex-verification', sessionIDs: ['codex:' + sessionID], at: Date.now() })
     const history = rows(join(data, 'history.jsonl'))
     const hooks = rows(proof)
     const workStart = hooks.find(event => event.hook_event_name === (scenario === 'Subagent' ? 'SubagentStart' : 'PreToolUse'))
