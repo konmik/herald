@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSyn
 import { open, readdir } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
 export const MINIMUM_DURATION = 60_000
@@ -318,15 +319,14 @@ function nodeHost() {
     completedExecutions,
     async lock(sessionID, action) {
       mkdirSync(sessions, { recursive: true, mode: 0o700 })
-      const lock = file(sessionID) + '.lock'
-      const deadline = Date.now() + 10_000
-      for (;;) {
-        try { mkdirSync(lock); break } catch (error) {
-          if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error
-          await new Promise(done => setTimeout(done, 25))
-        }
+      const database = new DatabaseSync(file(sessionID) + '.sqlite')
+      try {
+        database.exec('PRAGMA busy_timeout = 10000')
+        database.exec('BEGIN IMMEDIATE')
+        return await action()
+      } finally {
+        database.close()
       }
-      try { return await action() } finally { rmSync(lock, { recursive: true }) }
     },
     alive(pid) {
       if (typeof pid !== 'number') return false

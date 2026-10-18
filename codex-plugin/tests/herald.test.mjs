@@ -37,6 +37,7 @@ function fakeHost({ summary = 'The parser now handles empty files.', profile = {
 
 const event = (name, extra = {}) => ({ session_id: 's1', turn_id: 't1', cwd: '/work', model: 'gpt-6.1-sol', hook_event_name: name, ...extra })
 const processes = (rows) => new Map(rows.map(row => [row.pid, row]))
+const withoutSQLiteWarning = stderr => stderr.replace(/^\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\r?\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\r?\n/gm, '')
 
 async function runTask(host, herald, seconds) {
   await herald.hook(event('UserPromptSubmit', { prompt: 'Fix the parser' }))
@@ -60,7 +61,7 @@ async function nativeHookFixture(action) {
     const timer = setTimeout(() => child.kill('SIGKILL'), 15_000)
     const result = new Promise(done => {
       child.on('error', error => done({ error }))
-      child.on('close', (code, signal) => { clearTimeout(timer); done({ code, signal, stderr }) })
+      child.on('close', (code, signal) => { clearTimeout(timer); done({ code, signal, stderr: withoutSQLiteWarning(stderr) }) })
     })
     const waitFor = async message => {
       const deadline = Date.now() + 5_000
@@ -153,7 +154,7 @@ describe('codex hooks', () => {
             input: JSON.stringify(event('PreToolUse', { tool_name: 'Bash', tool_use_id: shell })),
             encoding: 'utf8', timeout: 10_000, windowsHide: true, windowsVerbatimArguments: shell === 'cmd.exe',
           })
-          expect({ shell, status: result.status, stderr: result.stderr, error: result.error }).toEqual({ shell, status: 0, stderr: '', error: undefined })
+          expect({ shell, status: result.status, stderr: withoutSQLiteWarning(result.stderr), error: result.error }).toEqual({ shell, status: 0, stderr: '', error: undefined })
           const state = JSON.parse(readFileSync(join(directory, 'sessions', 's1.json'), 'utf8'))
           expect(state.work['tool:' + shell]).toBeNull()
         }
@@ -627,7 +628,7 @@ describe('completed Codex executions', () => {
         input: JSON.stringify(event('Stop', { session_id: sessionID, transcript_path, last_assistant_message: 'Background work remains.' })),
         encoding: 'utf8', timeout: 10_000, windowsHide: true,
       })
-      expect({ status: result.status, stderr: result.stderr, error: result.error }).toEqual({ status: 0, stderr: '', error: undefined })
+      expect({ status: result.status, stderr: withoutSQLiteWarning(result.stderr), error: result.error }).toEqual({ status: 0, stderr: '', error: undefined })
       expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({ ...before, work: { 'tool:exec-live': null } })
     })
   })
