@@ -44,7 +44,73 @@ async function runTask(host, herald, seconds) {
   await herald.hook(event('Stop', { last_assistant_message: 'Done.' }))
 }
 
+async function nativeHookFixture(action) {
+  const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-lock-', import.meta.url)))
+  const statePath = join(directory, 'sessions', 's1.json')
+  const children = []
+  const start = (id, pause = false) => {
+    const child = spawn('node', ['--import', new URL('./fixtures/pause-state-write.mjs', import.meta.url).href, fileURLToPath(new URL('../hooks/herald.mjs', import.meta.url))], {
+      env: { ...process.env, PLUGIN_ROOT: fileURLToPath(new URL('..', import.meta.url)), PLUGIN_DATA: directory, HERALD_BINARY: process.execPath, HERALD_TEST_PAUSE_STATE_WRITE: pause ? '1' : '' },
+      stdio: ['pipe', 'ignore', 'pipe', 'ipc'], windowsHide: true,
+    })
+    let stderr = ''
+    const messages = new Set()
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('message', message => messages.add(message))
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15_000)
+    const result = new Promise(done => {
+      child.on('error', error => done({ error }))
+      child.on('close', (code, signal) => { clearTimeout(timer); done({ code, signal, stderr }) })
+    })
+    const waitFor = async message => {
+      const deadline = Date.now() + 5_000
+      while (!messages.has(message)) {
+        if (Date.now() >= deadline || child.exitCode !== null) throw new Error('Hook did not signal ' + message + ': ' + stderr)
+        await new Promise(done => setTimeout(done, 10))
+      }
+    }
+    children.push({ child, result })
+    child.stdin.end(JSON.stringify(event('PreToolUse', { tool_name: 'Bash', tool_use_id: id })))
+    return { child, result, waitFor }
+  }
+  mkdirSync(dirname(statePath), { recursive: true })
+  const before = { started: 123, token: 'original', keeper: 456, work: { 'tool:existing': null }, agents: {}, spawns: {} }
+  writeFileSync(statePath, JSON.stringify(before))
+  try {
+    await action({ directory, statePath, before, start, read: () => JSON.parse(readFileSync(statePath, 'utf8')) })
+  } finally {
+    for (const { child } of children) child.kill('SIGKILL')
+    await Promise.all(children.map(({ result }) => result))
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
 describe('codex hooks', () => {
+  test('native hooks recover an abandoned legacy lock without losing session state', async () => {
+    await nativeHookFixture(async ({ statePath, before, start, read }) => {
+      mkdirSync(statePath + '.lock')
+      expect(await start('next').result).toEqual({ code: 0, signal: null, stderr: '' })
+      expect(read()).toEqual({ ...before, token: expect.any(String), work: { 'tool:existing': null, 'tool:next': null } })
+    })
+  }, 20_000)
+
+  test('native hooks wait for a live owner and recover after it is killed', async () => {
+    await nativeHookFixture(async ({ before, start, read }) => {
+      const owner = start('owner', true)
+      await owner.waitFor('written')
+      const ownerState = read()
+      expect(ownerState).toEqual({ ...before, token: expect.any(String), work: { 'tool:existing': null, 'tool:owner': null } })
+      const contender = start('contender')
+      await contender.waitFor('started')
+      expect(await Promise.race([contender.result, new Promise(done => setTimeout(() => done('waiting'), 200))])).toBe('waiting')
+      expect(read()).toEqual(ownerState)
+      owner.child.kill('SIGKILL')
+      await owner.result
+      expect(await contender.result).toEqual({ code: 0, signal: null, stderr: '' })
+      expect(read()).toEqual({ ...ownerState, token: expect.any(String), work: { 'tool:existing': null, 'tool:owner': null, 'tool:contender': null } })
+    })
+  }, 25_000)
+
   test('concurrent native hook processes retain every background task', async () => {
     const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-lock-', import.meta.url)))
     const script = fileURLToPath(new URL('../hooks/herald.mjs', import.meta.url))
