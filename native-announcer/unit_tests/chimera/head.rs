@@ -111,6 +111,100 @@ fn anatomy_paths_keep_the_throat_and_follow_the_eyes_through_blinks() {
 }
 
 #[test]
+fn eye_rays_start_at_both_pupils_and_extend_outward_with_the_gaze() {
+    for size in [128, 384] {
+        let mut head = Head::new(size);
+        for time in [0.0, 2.0, 3.9, 4.12, 7.0] {
+            head.draw(&pose(NEUTRAL), time);
+            assert_eq!(head.eye_rays().len(), 2);
+            for [origin, end] in head.eye_rays() {
+                assert!(origin.iter().all(|coordinate| (0.0..=1.0).contains(coordinate)));
+                assert!(end.iter().all(|coordinate| coordinate.is_finite()));
+                assert!(end[0] < origin[0] - 0.05);
+                let length = (end[0] - origin[0]).hypot(end[1] - origin[1]) * super::super::Head::LOGICAL_SIZE;
+                assert!((25.0..70.0).contains(&length), "Eye ray length {length} at {time}s");
+                let x = (origin[0] * size as f32).floor() as i32;
+                let y = (origin[1] * size as f32).floor() as i32;
+                let on_pupil = (y - 2..=y + 2).any(|row| (x - 2..=x + 2).any(|column| {
+                    if row < 0 || column < 0 || row >= size as i32 || column >= size as i32 { return false; }
+                    let pixel = head.frame().get_pixel(column as u32, row as u32).0;
+                    pixel[3] > 0 && pixel[2] > 40
+                }));
+                assert!(on_pupil, "Eye ray missed its pupil at {size}px, {time}s");
+            }
+        }
+    }
+}
+
+#[test]
+fn eye_rays_follow_motion_and_stop_during_closed_blinks() {
+    let mut head = Head::new(384);
+    head.draw(&pose(NEUTRAL), 0.0);
+    let original = head.eye_rays().to_vec();
+    head.draw(&pose(NEUTRAL), 2.0);
+    assert_ne!(head.eye_rays(), original);
+    head.draw(&pose(NEUTRAL), 4.01);
+    assert!(head.eye_rays().is_empty());
+    head.draw(&pose(NEUTRAL), 4.12);
+    assert_eq!(head.eye_rays().len(), 2);
+    head.draw(&pose(NEUTRAL), 0.0);
+    assert_eq!(head.eye_rays(), original);
+}
+
+#[test]
+fn mouth_discharge_follows_the_corrected_airway_from_trachea_to_lips() {
+    let mut head = Head::new(384);
+    for artic in [NEUTRAL, HumanArtic { jaw: 2.0, lip_ap: 1.5, tb_y: 5.7, ..NEUTRAL }, HumanArtic { lip_ap: 0.0, lip_prot: 1.0, ..NEUTRAL }, HumanArtic { labiodental: 1.0, lip_ap: 0.3, ..NEUTRAL }] {
+        head.draw(&pose(artic), 0.0);
+        let frame = &head.anatomy;
+        let mouth = mouth_geometry(frame, head.shape.bottom);
+        assert_eq!(mouth.tract.len(), frame.grid.len() + 3);
+        assert_eq!(mouth.tract[0], [frame.glottis.x + 0.08, head.shape.bottom, 0.0]);
+        assert!(mouth.tract[0][1] < mouth.tract[1][1]);
+        assert_eq!(mouth.tract[1], [frame.glottis.x, frame.glottis.y, 0.0]);
+        assert!(frame.grid.windows(2).all(|pair| pair[0].s <= pair[1].s));
+        for (point, sample) in mouth.tract[2..].iter().zip(&frame.grid) {
+            let dx = sample.outer.x - sample.inner.x;
+            let dy = sample.outer.y - sample.inner.y;
+            let offset = [sample.outer.x - point[0], sample.outer.y - point[1]];
+            assert!((offset[0].hypot(offset[1]) - sample.d * 0.5).abs() < 1e-8);
+            assert!((offset[0] * dy - offset[1] * dx).abs() < 1e-8);
+            assert_eq!(point[2], 0.0);
+        }
+        let upper = frame.outer.last().unwrap();
+        let lower = frame.inner.last().unwrap();
+        assert_eq!(mouth.ray[0], [(upper.x + lower.x) * 0.5, (upper.y + lower.y) * 0.5, 0.0]);
+        assert_eq!(mouth.tract.last(), Some(&mouth.ray[0]));
+        let [start, end] = mouth.ray;
+        assert!(end[0] > start[0]);
+        assert!(((end[0] - start[0]).hypot(end[1] - start[1]) - 5.0).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn mouth_discharge_tracks_lip_articulation_and_the_current_camera() {
+    let mut head = Head::new(384);
+    assert!(head.mouth_discharge().is_none());
+    head.draw(&pose(NEUTRAL), 0.0);
+    let original = head.mouth_discharge().unwrap().clone();
+    for (artic, time) in [(NEUTRAL, 2.0), (HumanArtic { jaw: 2.0, lip_ap: 1.5, lip_prot: 0.7, ..NEUTRAL }, 0.0)] {
+        head.draw(&pose(artic), time);
+        let discharge = head.mouth_discharge().unwrap();
+        assert_ne!(discharge.tract, original.tract);
+        assert_eq!(discharge.tract.last(), Some(&discharge.ray[0]));
+        assert!(discharge.tract.iter().flatten().all(|coordinate| (0.0..=1.0).contains(coordinate)));
+        assert!(discharge.ray[1][0] < discharge.ray[0][0] - 0.05);
+        let camera = Camera::new(384, time, 0.0, 0.0);
+        let upper = head.anatomy.outer.last().unwrap();
+        let lower = head.anatomy.inner.last().unwrap();
+        let projected = camera.project([(upper.x + lower.x) * 0.5, (upper.y + lower.y) * 0.5, 0.0]);
+        assert!((discharge.ray[0][0] - (projected[0] / 384.0) as f32).abs() < 1e-6);
+        assert!((discharge.ray[0][1] - (projected[1] / 384.0) as f32).abs() < 1e-6);
+        assert_eq!(head.eye_rays().len(), 2);
+    }
+}
+
+#[test]
 fn idle_animation_moves_the_skull_within_two_seconds() {
     let mut head = Head::new(384);
     let quiet = pose(HumanArtic { jaw: 0.0, lip_ap: 0.0, ..NEUTRAL });

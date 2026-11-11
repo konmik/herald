@@ -36,6 +36,14 @@ impl Animation {
         match self { Self::Video(_) => &[], Self::Chimera(head) => head.anatomy_paths() }
     }
 
+    pub fn eye_rays(&self) -> &[[[f32; 2]; 2]] {
+        match self { Self::Video(_) => &[], Self::Chimera(head) => head.eye_rays() }
+    }
+
+    pub fn mouth_discharge(&self) -> Option<&chimera::MouthDischarge> {
+        match self { Self::Video(_) => None, Self::Chimera(head) => head.mouth_discharge() }
+    }
+
     pub fn fps(&self) -> f64 {
         match self { Self::Video(video) => video.fps(), Self::Chimera(_) => 60.0 }
     }

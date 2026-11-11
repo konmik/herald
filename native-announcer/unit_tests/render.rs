@@ -3,6 +3,84 @@ use super::*;
 const CHIMERA_MESSAGE: &str = "Attention, human. The build is ready and the checks have passed. Please admire my moving mouth, glowing tongue, and deeply questionable voice. Mission complete.";
 
 #[test]
+fn mouth_discharge_travels_through_the_tract_before_shooting_out() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
+    let image = RgbaImage::new(384, 384);
+    let discharge = crate::chimera::MouthDischarge {
+        tract: vec![[0.7, 0.85], [0.7, 0.6], [0.2, 0.6]],
+        ray: [[0.2, 0.6], [0.04, 0.6]],
+    };
+    let duration = Duration::from_secs(13);
+    let burst_at = |progress: f32| (650..3000).map(Duration::from_millis).find(|elapsed| {
+        ambient_burst(*elapsed, duration, 177, Settings::default().lightning)
+            .is_some_and(|burst| (burst.progress - progress).abs() < 0.015)
+    }).unwrap();
+    for holding in [false, true] {
+        for late in [false, true] {
+            let entrance = (!holding).then(|| Duration::from_millis(if late { 430 } else { 240 }));
+            renderer.lightning_activity = holding.then(|| LightningActivity::Holding(burst_at(if late { 0.8 } else { 0.2 }), duration, 177));
+            let mut original = vec![0; 600 * 432];
+            renderer.set_mouth_discharge(None);
+            renderer.draw(&mut original, 600, 432, 1.0, Some(&image), 0.0, entrance);
+            let mut firing = vec![0; 600 * 432];
+            renderer.set_mouth_discharge(Some(&discharge));
+            renderer.draw(&mut firing, 600, 432, 1.0, Some(&image), 0.0, entrance);
+            assert_ne!(firing[350 * 600 + 560], original[350 * 600 + 560]);
+            let outlet_pixels = (275..300).flat_map(|y| (345..392).map(move |x| y * 600 + x))
+                .filter(|index| firing[*index] != original[*index]).count();
+            if late { assert!(outlet_pixels > 10, "No mouth discharge, holding {holding}"); }
+            else { assert_eq!(outlet_pixels, 0, "Outlet fired before energy reached the lips, holding {holding}"); }
+            assert!(firing.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+        }
+    }
+}
+
+#[test]
+fn eye_bolts_leave_the_head_and_stop_between_flashes_and_after_consumption() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
+    let head = crate::chimera::Head::new();
+    renderer.set_anatomy_paths(head.anatomy_paths());
+    let left = head.frame().enumerate_pixels().filter(|(_, _, pixel)| pixel[3] > 0).map(|(x, _, _)| x).min().unwrap();
+    let duration = Duration::from_secs(13);
+    let elapsed = (650..3000).map(Duration::from_millis).find(|elapsed| {
+        ambient_burst(*elapsed, duration, 177, renderer.lightning).is_some_and(|burst| burst.intensity > 0.8)
+    }).unwrap();
+    for scale in [1.0, 1.5] {
+        let width = (600.0 * scale) as usize;
+        let height = (432.0 * scale) as usize;
+        let mut original = vec![0; width * height];
+        renderer.set_eye_rays(&[]);
+        renderer.draw(&mut original, width, height, scale, Some(head.frame()), 0.0, Some(Duration::from_millis(300)));
+        let mut firing = vec![0; width * height];
+        renderer.set_eye_rays(head.eye_rays());
+        renderer.draw(&mut firing, width, height, scale, Some(head.frame()), 0.0, Some(Duration::from_millis(300)));
+        let boundary = ((325.0 + left as f32 / head.frame().width() as f32 * 336.0) * scale) as usize;
+        let outside = firing.iter().zip(&original).enumerate().filter(|(index, (a, b))| index % width + 2 < boundary && a != b).count();
+        assert!(outside > 20, "Eye bolts were clipped to the head at {scale}: {outside} pixels");
+        assert!(firing.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+        renderer.lightning_activity = Some(LightningActivity::Holding(elapsed, duration, 177));
+        renderer.set_eye_rays(&[]);
+        renderer.draw(&mut original, width, height, scale, Some(head.frame()), 0.0, None);
+        renderer.set_eye_rays(head.eye_rays());
+        renderer.draw(&mut firing, width, height, scale, Some(head.frame()), 0.0, None);
+        assert!(firing.iter().zip(&original).enumerate().filter(|(index, (a, b))| index % width + 2 < boundary && a != b).count() > 20);
+        for activity in [None, Some(LightningActivity::Closing(Duration::from_millis(500), 177))] {
+            renderer.lightning_activity = activity;
+            renderer.set_eye_rays(&[]);
+            renderer.draw(&mut original, width, height, scale, Some(head.frame()), 0.0, None);
+            renderer.set_eye_rays(head.eye_rays());
+            renderer.draw(&mut firing, width, height, scale, Some(head.frame()), 0.0, None);
+            assert_eq!(firing, original);
+        }
+        renderer.lightning_activity = None;
+    }
+}
+
+#[test]
 fn anatomy_lightning_tracks_open_paths_without_bridging_their_ends() {
     let mut coverage = PaintCoverage::new(vec![true; 120 * 120], PixelFormat::PremultipliedArgb);
     coverage.wires = vec![vec![[20.0, 20.0], [20.0, 100.0], [100.0, 100.0]]];
@@ -25,7 +103,7 @@ fn anatomy_lightning_flashes_on_internal_wires_during_holding() {
     let lightning = Settings::default().lightning;
     let duration = Duration::from_secs(13);
     let elapsed = (650..3000).map(Duration::from_millis).find(|elapsed| {
-        ambient_burst(*elapsed, duration, 177, lightning).is_some_and(|(_, intensity, _)| intensity > 0.8)
+        ambient_burst(*elapsed, duration, 177, lightning).is_some_and(|burst| burst.intensity > 0.8)
     }).unwrap();
     let activity = LightningActivity::Holding(elapsed, duration, 177);
     let mut coverage = PaintCoverage::new(vec![true; 120 * 120], PixelFormat::PremultipliedArgb);
@@ -377,7 +455,7 @@ fn all_presets_preserve_characterized_bolts_entrance_holding_and_exit_pixels() {
                     pin(&renderer.draw_scene(&scene, None, 0.0, Some(Duration::from_millis(time))));
                 }
                 let duration = Duration::from_secs(5);
-                let active = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, preset.settings).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+                let active = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, preset.settings).is_some_and(|burst| burst.intensity > 0.8)).unwrap();
                 for activity in [
                     LightningActivity::Holding(Duration::from_millis(700), duration, seed),
                     LightningActivity::Holding(Duration::from_millis(active), duration, seed),
@@ -574,7 +652,7 @@ fn sporadic_flashes_stay_near_the_outline_without_projecting_outward() {
     assert!(lit(&mut late) > lit(&mut early) * 3);
     let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
     let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1234, LightningSettings::default());
-    let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234, LightningSettings::default()).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+    let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234, LightningSettings::default()).is_some_and(|burst| burst.intensity > 0.8)).unwrap();
     renderer.seed = 567891;
     renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(time), Duration::from_secs(5), 1234));
     let frame = renderer.draw_scene(&scene, None, 0.0, None);
@@ -596,7 +674,7 @@ fn holding_frequency_and_speed_control_event_count_and_flash_duration() {
         let mut visible = 0;
         let mut previous = None;
         for time in 0..30000 {
-            if let Some((seed, _, _)) = ambient_burst(lightning.transition_duration() + Duration::from_millis(time), lightning.transition_duration() + Duration::from_secs(30), 1234, lightning) {
+            if let Some(AmbientBurst { seed, .. }) = ambient_burst(lightning.transition_duration() + Duration::from_millis(time), lightning.transition_duration() + Duration::from_secs(30), 1234, lightning) {
                 visible += 1;
                 if previous != Some(seed) { count += 1; }
                 previous = Some(seed);
@@ -645,7 +723,7 @@ fn sporadic_bolts_are_fully_visible_and_stationary_during_each_flash() {
     let duration = Duration::from_secs(5);
     let mut previous = None;
     for milliseconds in 650..5000 {
-        if let Some((seed, _, buildup)) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234, LightningSettings::default()) {
+        if let Some(AmbientBurst { seed, buildup, .. }) = ambient_burst(Duration::from_millis(milliseconds), duration, 1234, LightningSettings::default()) {
             if let Some((last_seed, last_buildup)) = previous {
                 if seed == last_seed { assert_eq!(buildup, last_buildup); }
             }
@@ -660,7 +738,7 @@ fn sporadic_timing_has_uneven_gaps_and_quick_clusters() {
     let mut starts = Vec::new();
     let mut last_seed = None;
     for time in (650..30000).step_by(5) {
-        if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, 1234, LightningSettings::default()) {
+        if let Some(AmbientBurst { seed, .. }) = ambient_burst(Duration::from_millis(time), duration, 1234, LightningSettings::default()) {
             if last_seed != Some(seed) { starts.push(time); }
             last_seed = Some(seed);
         }
@@ -683,7 +761,7 @@ fn ambient_arcs_build_up_over_short_and_long_announcements() {
             for (region, start) in [650, 650 + total * 2 / 3].into_iter().enumerate() {
                 let mut previous_seed = None;
                 for time in (start..start + total / 3).step_by(5) {
-                    if let Some((seed, _, _)) = ambient_burst(Duration::from_millis(time), duration, notification, LightningSettings::default()) {
+                    if let Some(AmbientBurst { seed, .. }) = ambient_burst(Duration::from_millis(time), duration, notification, LightningSettings::default()) {
                         samples[region] += 1;
                         if previous_seed != Some(seed) { bursts[region] += 1; }
                         previous_seed = Some(seed);
@@ -706,7 +784,7 @@ fn holding_has_frequent_bursts_and_exit_consumes_both_interiors() {
     let active: Vec<_> = (650..5000).step_by(20).filter(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_some()).collect();
     assert!(active.len() >= 100 && active.len() < 210);
     let inactive = (650..5000).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_none()).unwrap();
-    let peak = (650..5000).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
+    let peak = (650..5000).find(|time| ambient_burst(Duration::from_millis(*time), duration, seed, LightningSettings::default()).is_some_and(|burst| burst.intensity > 0.8)).unwrap();
     for time in [inactive, peak] {
         let mut pixels = vec![0; plain.len()];
         renderer.seed = 567891;

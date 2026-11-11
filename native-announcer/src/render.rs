@@ -100,7 +100,14 @@ pub enum LightningActivity {
     Closing(Duration, u32),
 }
 
-fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32, lightning: LightningSettings) -> Option<(u32, f32, f32)> {
+struct AmbientBurst {
+    seed: u32,
+    intensity: f32,
+    buildup: f32,
+    progress: f32,
+}
+
+fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32, lightning: LightningSettings) -> Option<AmbientBurst> {
     let time = elapsed.saturating_sub(lightning.transition_duration()).as_secs_f32();
     let duration = duration.saturating_sub(lightning.transition_duration()).as_secs_f32().max(1.0);
     let mut start = (0.1 + (crate::state::noise_hash(seed) % 500) as f32 / 1000.0) / lightning.frequency;
@@ -113,7 +120,7 @@ fn ambient_burst(elapsed: Duration, duration: Duration, seed: u32, lightning: Li
         let flash_length = length / lightning.speed;
         if time < start + flash_length {
             let age = (time - start) / flash_length;
-            burst = Some((random, (std::f32::consts::PI * age).sin(), buildup));
+            burst = Some(AmbientBurst { seed: random, intensity: (std::f32::consts::PI * age).sin(), buildup, progress: age });
         }
         let gap = if random % 4 == 0 { 0.04 + ((random >> 16) % 110) as f32 / 1000.0 }
             else { 0.22 + ((random >> 16) % 900) as f32 / 1000.0 };
@@ -409,6 +416,21 @@ impl LightningPaint {
         }
     }
 
+    fn trace(&mut self, path: &[[f32; 2]], scale: f32, taper: f32, intensity: f32, reveal: f32) {
+        let length: f32 = path.windows(2).map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1])).sum();
+        let mut remaining = length * reveal.clamp(0.0, 1.0);
+        for pair in path.windows(2) {
+            if remaining <= 0.0 { break; }
+            let dx = pair[1][0] - pair[0][0];
+            let dy = pair[1][1] - pair[0][1];
+            let distance = dx.hypot(dy);
+            if distance == 0.0 { continue; }
+            let fraction = (remaining / distance).min(1.0);
+            self.stroke(pair[0], [pair[0][0] + dx * fraction, pair[0][1] + dy * fraction], scale, taper, intensity);
+            remaining -= distance;
+        }
+    }
+
     fn stroke(&mut self, from: [f32; 2], to: [f32; 2], scale: f32, taper: f32, intensity: f32) {
         if intensity <= 0.0 { return; }
         self.strokes.push(Stroke { from, to, scale, taper, intensity });
@@ -560,6 +582,8 @@ pub struct Renderer {
     portrait_warp: Option<(usize, Vec<PortraitTexel>)>,
     chimera_template: Option<chimera::Frame>,
     anatomy_paths: Vec<Vec<[f32; 2]>>,
+    eye_rays: Vec<[[f32; 2]; 2]>,
+    mouth_discharge: Option<crate::chimera::MouthDischarge>,
 }
 
 /// Identifies one laid-out text block; its glyph rasters do not change between frames.
@@ -708,6 +732,8 @@ impl Renderer {
             portrait_warp: None,
             chimera_template: None,
             anatomy_paths: Vec::new(),
+            eye_rays: Vec::new(),
+            mouth_discharge: None,
         })
     }
 
@@ -743,6 +769,15 @@ impl Renderer {
     pub fn set_anatomy_paths(&mut self, paths: &[Vec<[f32; 2]>]) {
         self.anatomy_paths.resize_with(paths.len(), Vec::new);
         for (target, path) in self.anatomy_paths.iter_mut().zip(paths) { target.clone_from(path); }
+    }
+
+    pub fn set_eye_rays(&mut self, rays: &[[[f32; 2]; 2]]) {
+        self.eye_rays.clear();
+        self.eye_rays.extend_from_slice(rays);
+    }
+
+    pub fn set_mouth_discharge(&mut self, discharge: Option<&crate::chimera::MouthDischarge>) {
+        self.mouth_discharge = discharge.cloned();
     }
 
     pub fn ambient_active(&self, elapsed: Duration, duration: Duration, seed: u32) -> bool { ambient_active(elapsed, duration, seed, self.lightning) }
@@ -1240,27 +1275,16 @@ impl PaintCoverage {
         for offset in 0..count {
             let index = (seed as usize + offset * self.wires.len() / count) % self.wires.len();
             let path = &self.wires[index];
-            let length: f32 = path.windows(2).map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1])).sum();
-            let mut remaining = length * progress.clamp(0.0, 1.0);
             let random = crate::state::noise_hash(seed ^ index as u32);
             let taper = 0.45 + (random & 255) as f32 / 255.0 * 0.2;
-            for pair in path.windows(2) {
-                if remaining <= 0.0 { break; }
-                let dx = pair[1][0] - pair[0][0];
-                let dy = pair[1][1] - pair[0][1];
-                let distance = dx.hypot(dy);
-                if distance == 0.0 { continue; }
-                let fraction = (remaining / distance).min(1.0);
-                paint.stroke(pair[0], [pair[0][0] + dx * fraction, pair[0][1] + dy * fraction], scale, taper, intensity * 0.8);
-                remaining -= distance;
-            }
+            paint.trace(path, scale, taper, intensity * 0.8, progress);
         }
     }
 
     fn draw_activity(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, activity: LightningActivity, lightning: LightningSettings) {
         match activity {
             LightningActivity::Holding(elapsed, duration, seed) => {
-                let Some((seed, intensity, buildup)) = ambient_burst(elapsed, duration, seed, lightning) else { return; };
+                let Some(AmbientBurst { seed, intensity, buildup, .. }) = ambient_burst(elapsed, duration, seed, lightning) else { return; };
                 let mut glow = LightningPaint::new(width, height, lightning);
                 let intensity = lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0 * lightning.speed, intensity);
                 draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);

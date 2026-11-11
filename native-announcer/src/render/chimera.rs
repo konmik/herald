@@ -155,6 +155,48 @@ impl Renderer {
         if let Some(coverage) = coverage {
             self.draw_lightning(buffer, width, height, scale, strike, coverage, layout);
         }
+        if image.is_some() { self.draw_discharge_lightning(buffer, width, height, scale, layout, strike); }
+    }
+
+    fn draw_discharge_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, layout: AnnouncementLayout, strike: Option<Duration>) {
+        if self.eye_rays.is_empty() && self.mouth_discharge.is_none() { return; }
+        let (seed, intensity, progress) = if let Some(elapsed) = strike {
+            let milliseconds = elapsed.as_secs_f32() * 1000.0 * self.lightning.speed;
+            if milliseconds < 180.0 { return; }
+            (31973, self.lightning.pulse_profile.entrance(milliseconds) * ((650.0 - milliseconds) / 140.0).clamp(0.0, 1.0),
+                ((milliseconds - 180.0) / 270.0).clamp(0.0, 1.0))
+        } else {
+            match self.lightning_activity {
+                Some(LightningActivity::Holding(elapsed, duration, seed)) => {
+                    let Some(AmbientBurst { seed, intensity, progress, .. }) = ambient_burst(elapsed, duration, seed, self.lightning) else { return; };
+                    (seed, self.lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0 * self.lightning.speed, intensity), progress)
+                }
+                Some(LightningActivity::Closing(elapsed, seed)) => {
+                    let elapsed = elapsed.mul_f32(self.lightning.speed);
+                    let progress = elapsed.as_secs_f32() / crate::state::TRANSITION_DURATION.as_secs_f32();
+                    if progress >= 0.42 { return; }
+                    (seed, self.lightning.pulse_profile.exit(elapsed) * (1.0 - progress / 0.42), (progress / 0.32).min(1.0))
+                }
+                None => return,
+            }
+        };
+        if intensity <= 0.0 { return; }
+        let mut paint = LightningPaint::new(width, height, self.lightning);
+        let point = |point: [f32; 2]| [
+            (layout.portrait[0] + point[0] * layout.portrait[2]) * scale,
+            (layout.portrait[1] + point[1] * layout.portrait[3]) * scale,
+        ];
+        for (index, ray) in self.eye_rays.iter().enumerate() {
+            paint.bolt(point(ray[0]), point(ray[1]), scale, seed ^ index as u32 * 7919, intensity * 1.2, (progress * 2.7).min(1.0));
+        }
+        if let Some(discharge) = &self.mouth_discharge {
+            let tract: Vec<_> = discharge.tract.iter().copied().map(point).collect();
+            paint.trace(&tract, scale, 0.65, intensity, (progress / 0.6).min(1.0));
+            if progress > 0.6 {
+                paint.bolt(point(discharge.ray[0]), point(discharge.ray[1]), scale, seed ^ 42971, intensity * 1.2, ((progress - 0.6) / 0.4).min(1.0));
+            }
+        }
+        paint.composite(buffer, PixelFormat::PremultipliedArgb);
     }
 }
 

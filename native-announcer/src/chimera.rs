@@ -16,6 +16,12 @@ pub const POSE_HOP: usize = 800;
 const MAX_TEXT_BYTES: usize = 8_000;
 const MAX_DURATION: f64 = 180.0;
 
+#[derive(Clone, Debug)]
+pub struct MouthDischarge {
+    pub tract: Vec<[f32; 2]>,
+    pub ray: [[f32; 2]; 2],
+}
+
 #[derive(Clone)]
 pub(super) struct Pose {
     pub(super) artic: HumanArtic,
@@ -220,6 +226,14 @@ impl Head {
 
     pub fn anatomy_paths(&self) -> &[Vec<[f32; 2]>] {
         self.renderer.anatomy_paths()
+    }
+
+    pub fn eye_rays(&self) -> &[[[f32; 2]; 2]] {
+        self.renderer.eye_rays()
+    }
+
+    pub fn mouth_discharge(&self) -> Option<&MouthDischarge> {
+        self.renderer.mouth_discharge()
     }
 
     pub fn frames(&self) -> u64 {

@@ -1,7 +1,7 @@
 use std::f64::consts::PI;
 
 use chimera_voice::anatomy::geom::{catmull_rom, rotate_about, v, Vec2};
-use chimera_voice::anatomy::human::{HumanArtic, HumanFrame, HumanVocalTract, BODY_MALE, NEUTRAL};
+use chimera_voice::anatomy::human::{GridSample, HumanArtic, HumanFrame, HumanVocalTract, BODY_MALE, NEUTRAL};
 use image::{Rgba, RgbaImage};
 
 type Point = [f64; 3];
@@ -150,6 +150,8 @@ pub(super) struct Head {
     shell: Vec<Vec<Point>>,
     moving: Vec<Line>,
     anatomy_paths: Vec<Vec<[f32; 2]>>,
+    eye_rays: Vec<[[f32; 2]; 2]>,
+    mouth_discharge: Option<super::MouthDischarge>,
     last_artic: Option<HumanArtic>,
 }
 
@@ -164,7 +166,7 @@ impl Head {
         let shape = Shape::new(&outline, false);
         let shell = shell_lines(&shape, &anatomy);
         let (fixed, jaw) = rest_lines(&tract, &shape);
-        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 0])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), anatomy_paths: Vec::new(), last_artic: None }
+        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 0])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), anatomy_paths: Vec::new(), eye_rays: Vec::new(), mouth_discharge: None, last_artic: None }
     }
 
     pub(super) fn draw(&mut self, pose: &super::Pose, elapsed: f64) {
@@ -177,11 +179,23 @@ impl Head {
         let level = if pose.level.is_finite() { f64::from(pose.level).clamp(0.0, 1.0) } else { 0.0 };
         let pitch = if level > 0.001 && pose.f0.is_finite() && pose.f0 > 0.0 { (pose.f0 / 110.0).log2().clamp(-1.0, 1.0) } else { 0.0 };
         let camera = Camera::new(self.image.width(), time, level, pitch);
-        let mut eyes = eye_lines(time, level, pitch);
-        for line in &mut eyes { line.lightning = true; }
+        let mut eyes = eye_geometry(time, level, pitch);
+        for line in &mut eyes.lines { line.lightning = true; }
+        self.eye_rays = eyes.rays.iter().map(|ray| ray.map(|point| {
+            let projected = camera.project(point);
+            [(projected[0] / f64::from(self.image.width())) as f32, (projected[1] / f64::from(self.image.height())) as f32]
+        })).collect();
+        let mouth = mouth_geometry(&self.anatomy, self.shape.bottom);
+        let project = |point| {
+            let projected = camera.project(point);
+            [(projected[0] / f64::from(self.image.width())) as f32, (projected[1] / f64::from(self.image.height())) as f32]
+        };
+        self.mouth_discharge = Some(super::MouthDischarge {
+            tract: mouth.tract.into_iter().map(project).collect(), ray: mouth.ray.map(project),
+        });
         self.image.pixels_mut().for_each(|p| *p = Rgba([0, 0, 0, 0]));
         self.anatomy_paths.clear();
-        for line in self.fixed.iter().chain(self.moving.iter()).chain(eyes.iter()) {
+        for line in self.fixed.iter().chain(self.moving.iter()).chain(eyes.lines.iter()) {
             draw_line(&mut self.image, line, &camera);
             if line.lightning && line.alpha > 0.0 {
                 let size = f64::from(self.image.width());
@@ -205,6 +219,14 @@ impl Head {
 
     pub(super) fn anatomy_paths(&self) -> &[Vec<[f32; 2]>] {
         &self.anatomy_paths
+    }
+
+    pub(super) fn eye_rays(&self) -> &[[[f32; 2]; 2]] {
+        &self.eye_rays
+    }
+
+    pub(super) fn mouth_discharge(&self) -> Option<&super::MouthDischarge> {
+        self.mouth_discharge.as_ref()
     }
 }
 
@@ -637,6 +659,34 @@ fn tongue(lines: &mut Vec<Line>, frame: &HumanFrame, artic: &HumanArtic) {
     }
 }
 
+fn airway_center(sample: &GridSample) -> Point {
+    let dx = sample.outer.x - sample.inner.x;
+    let dy = sample.outer.y - sample.inner.y;
+    let length = dx.hypot(dy);
+    let half = if length > 0.0 { sample.d / (2.0 * length) } else { 0.0 };
+    [sample.outer.x - dx * half, sample.outer.y - dy * half, 0.0]
+}
+
+struct MouthGeometry {
+    tract: Vec<Point>,
+    ray: [Point; 2],
+}
+
+fn mouth_geometry(frame: &HumanFrame, bottom: f64) -> MouthGeometry {
+    let mut tract = vec![[frame.glottis.x + 0.08, bottom, 0.0], [frame.glottis.x, frame.glottis.y, 0.0]];
+    tract.extend(frame.grid.iter().map(airway_center));
+    let aperture = |offset: usize| {
+        let upper = frame.outer[frame.outer.len() - 1 - offset];
+        let lower = frame.inner[frame.inner.len() - 1 - offset];
+        [(upper.x + lower.x) * 0.5, (upper.y + lower.y) * 0.5, 0.0]
+    };
+    let mouth = aperture(0);
+    let before = aperture(1);
+    let direction = normalize([mouth[0] - before[0], mouth[1] - before[1], 0.0]);
+    tract.push(mouth);
+    MouthGeometry { tract, ray: [mouth, std::array::from_fn(|axis| mouth[axis] + direction[axis] * 5.0)] }
+}
+
 fn airway(lines: &mut Vec<Line>, frame: &HumanFrame) {
     let mut sides = [Vec::new(), Vec::new()];
     let mut direction = [-1.0, 0.0];
@@ -646,8 +696,7 @@ fn airway(lines: &mut Vec<Line>, frame: &HumanFrame) {
         let length = dx.hypot(dy);
         if length > 1e-4 { direction = [dx / length, dy / length]; }
         let half = sample.d / 2.0;
-        let cx = sample.outer.x - direction[0] * half;
-        let cy = sample.outer.y - direction[1] * half;
+        let [cx, cy, _] = airway_center(sample);
         let width = if sample.d > 0.01 { (2.0 * sample.area / (PI * sample.d)).min(3.5) } else { 0.0 };
         if index % 2 == 0 {
             lines.push(Line::new(ellipse([cx, cy, 0.0], [direction[0] * half, direction[1] * half, 0.0], [0.0, 0.0, width], 24), BLUE_DIM, 0.85, 0.37));
@@ -726,7 +775,12 @@ fn larynx(lines: &mut Vec<Line>, tract: &HumanVocalTract, frame: &HumanFrame, ar
     }
 }
 
-fn eye_lines(time: f64, level: f64, pitch: f64) -> Vec<Line> {
+struct EyeGeometry {
+    lines: Vec<Line>,
+    rays: Vec<[Point; 2]>,
+}
+
+fn eye_geometry(time: f64, level: f64, pitch: f64) -> EyeGeometry {
     let blink_phase = time.rem_euclid(4.7);
     let lid = if (3.9..4.12).contains(&blink_phase) { ((blink_phase - 3.9) / 0.22 * PI).sin().powi(2) } else { 0.0 };
     let gaze_yaw = 0.13 * (time * 0.43).sin();
@@ -738,6 +792,7 @@ fn eye_lines(time: f64, level: f64, pitch: f64) -> Vec<Line> {
     };
     let scale = |point: Point, amount: f64| [point[0] * amount, point[1] * amount, point[2] * amount];
     let mut lines = Vec::new();
+    let mut rays = Vec::new();
     for side in [1.0, -1.0] {
         let center = [6.15, 15.35, side * 3.15];
         let radius = 1.05;
@@ -746,8 +801,10 @@ fn eye_lines(time: f64, level: f64, pitch: f64) -> Vec<Line> {
         lines.push(Line::new(ellipse(center, scale(u, radius), scale(v, radius), 36), BLUE_MID, 1.0, 0.35));
         let (iris_u, iris_v) = basis(direction);
         let seen = 1.0 - smooth(0.4, 0.9, lid);
-        for (offset, size, alpha, count) in [(0.86, 0.5, 0.9, 24), (0.97, 0.2, 0.7, 14)] {
-            let iris = [center[0] + direction[0] * radius * offset, center[1] + direction[1] * radius * offset, center[2] + direction[2] * radius * offset];
+        let center_at = |offset| [center[0] + direction[0] * radius * offset, center[1] + direction[1] * radius * offset, center[2] + direction[2] * radius * offset];
+        let pupil = center_at(0.97);
+        if seen > 0.0 { rays.push([pupil, std::array::from_fn(|axis| pupil[axis] + direction[axis] * 5.0)]); }
+        for (iris, size, alpha, count) in [(center_at(0.86), 0.5, 0.9, 24), (pupil, 0.2, 0.7, 14)] {
             lines.push(Line::new(ellipse(iris, scale(iris_u, radius * size), scale(iris_v, radius * size), count), BLUE, 1.0, alpha * seen));
         }
         for upper in [true, false] {
@@ -766,7 +823,7 @@ fn eye_lines(time: f64, level: f64, pitch: f64) -> Vec<Line> {
             [center[0] + 1.32 * radius * elevation.cos() * az.cos(), center[1] + 1.32 * radius * elevation.sin(), center[2] + 1.32 * radius * elevation.cos() * az.sin()]
         }).collect(), BLUE_MID, 1.3, 0.8));
     }
-    lines
+    EyeGeometry { lines, rays }
 }
 
 fn normalize(p: Point) -> Point {

@@ -670,6 +670,8 @@ fn run() -> Result<(), String> {
                                 if !active.speaking { pre_speech_played_samples = pre_speech_played_samples.max(animation.sample_position()); }
                             }
                             renderer.set_anatomy_paths(active.animation.as_ref().map_or(&[], animation::Animation::anatomy_paths));
+                            renderer.set_eye_rays(active.animation.as_ref().map_or(&[], animation::Animation::eye_rays));
+                            renderer.set_mouth_discharge(active.animation.as_ref().and_then(animation::Animation::mouth_discharge));
                             renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
                             let seed = active.seed();
                             renderer.lightning_activity = if active.end.is_some() {
