@@ -3,9 +3,30 @@ use super::*;
 const CHIMERA_MESSAGE: &str = "Attention, human. The build is ready and the checks have passed. Please admire my moving mouth, glowing tongue, and deeply questionable voice. Mission complete.";
 
 #[test]
+fn long_paths_and_words_wrap_within_the_text_bubble() {
+    let renderer = Renderer::new().unwrap();
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        for text in ["deployment_artifact_name_".repeat(12), "W".repeat(200), "First line.\n\nSecond line.".into()] {
+            let layout = position_text(&renderer.body_font, &text, 18.0 * scale, 268.0 * scale, None);
+            assert!(!layout.glyphs.is_empty());
+            for glyph in layout.glyphs {
+                assert!(glyph.px_bounds().max.x <= 269.0 * scale, "Long text overflows at scale {scale}: {}", glyph.px_bounds().max.x);
+            }
+        }
+    }
+}
+
+#[test]
+fn body_and_title_share_the_same_face_across_sizes() {
+    let renderer = Renderer::new().unwrap();
+    assert_ne!(renderer.body_preference.size, renderer.title_preference.size);
+    assert!(std::sync::Arc::ptr_eq(&renderer.body_font, &renderer.title_font));
+}
+
+#[test]
 fn chimera_signal_breaks_animate_without_filling_the_background_or_closing_the_mouth_gap() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     let head = crate::chimera::Head::new();
     for scale in [1.0, 1.5] {
@@ -84,7 +105,7 @@ fn signal_keeps_eye_and_mouth_discharge_attached_to_the_distorted_head() {
         }).unwrap();
         let signal = chimera::SignalDistortion::new(size, scale, 0.62, xorshift_jump(seed, 1));
         let mut renderer = Renderer::new().unwrap();
-        renderer.set_style(AnnouncementStyle::Chimera);
+        renderer.set_style(AnnouncementStyle::Chimera).unwrap();
         renderer.text = CHIMERA_MESSAGE.into();
         renderer.set_anatomy_paths(head.anatomy_paths());
         let width = (600.0 * scale) as usize;
@@ -111,7 +132,7 @@ fn signal_keeps_eye_and_mouth_discharge_attached_to_the_distorted_head() {
 #[test]
 fn mouth_discharge_travels_through_the_tract_before_shooting_out() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     let image = RgbaImage::new(384, 384);
     let discharge = crate::chimera::MouthDischarge {
@@ -146,7 +167,7 @@ fn mouth_discharge_travels_through_the_tract_before_shooting_out() {
 #[test]
 fn eye_bolts_leave_the_head_and_stop_between_flashes_and_after_consumption() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     let head = crate::chimera::Head::new();
     renderer.set_anatomy_paths(head.anatomy_paths());
@@ -224,7 +245,7 @@ fn anatomy_lightning_flashes_on_internal_wires_during_holding() {
 #[test]
 fn chimera_lightning_reaches_internal_eye_and_throat_wires() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     let head = crate::chimera::Head::new();
     for scale in [1.0, 1.5] {
@@ -257,7 +278,7 @@ fn chimera_lightning_reaches_internal_eye_and_throat_wires() {
 #[test]
 fn chimera_preserves_partial_alpha_through_text_head_and_lightning() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     renderer.title = "CHIMERA announcement".into();
     let head = crate::chimera::Head::new();
@@ -285,7 +306,7 @@ fn chimera_preserves_partial_alpha_through_text_head_and_lightning() {
 fn chimera_card_fits_small_and_high_density_monitors() {
     let style = AnnouncementStyle::Chimera;
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(style);
+    renderer.set_style(style).unwrap();
     for (width, height, requested) in [(1440, 1080, 2.5), (1280, 720, 2.0), (800, 600, 1.5), (640, 480, 1.0), (3840, 2160, 2.5)] {
         let scale = style.fit_scale(width, height, requested);
         for message in [CHIMERA_MESSAGE.to_owned(), CHIMERA_MESSAGE.repeat(6)] {
@@ -301,7 +322,7 @@ fn chimera_card_fits_small_and_high_density_monitors() {
 #[test]
 fn chimera_text_fits_the_ribbed_frame_at_display_scales() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     for message in ["Ready.", CHIMERA_MESSAGE, &CHIMERA_MESSAGE.repeat(3)] {
         renderer.text = message.into();
         for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
@@ -323,7 +344,7 @@ fn chimera_text_fits_the_ribbed_frame_at_display_scales() {
 #[test]
 fn chimera_halves_bottom_padding_without_moving_text_or_head() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.title = "CHIMERA announcement".into();
     for message in ["Ready.".to_owned(), CHIMERA_MESSAGE.into(), CHIMERA_MESSAGE.repeat(3)] {
         renderer.text = message;
@@ -362,7 +383,7 @@ fn chimera_halves_bottom_padding_without_moving_text_or_head() {
 #[test]
 fn chimera_remeasures_padding_when_same_size_messages_change() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     let mut previous_bottom = None;
     for message in ["Ready.", "The build passed.\nThe tests passed.\nDeployment finished.", "Ready."] {
         renderer.text = message.into();
@@ -381,18 +402,18 @@ fn chimera_style_switch_restores_video_fonts_and_rendering() {
     renderer.title = "CHIMERA announcement".into();
     let mut original = vec![0; 320 * 300];
     renderer.draw(&mut original, 320, 300, 1.0, None, 0.0, None);
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     assert_eq!(renderer.body_preference, FontPreference::new("Berkeley Mono", 14));
     assert_eq!(renderer.title_preference, FontPreference::new("Berkeley Mono", 12));
     let mut chimera = vec![0; 600 * 432];
     renderer.draw(&mut chimera, 600, 432, 1.0, None, 0.0, None);
-    renderer.set_style(AnnouncementStyle::Video);
+    renderer.set_style(AnnouncementStyle::Video).unwrap();
     let mut restored = vec![0; original.len()];
     renderer.seed = 567891;
     renderer.draw(&mut restored, 320, 300, 1.0, None, 0.0, None);
     assert_eq!(original, restored);
-    renderer.set_preferences(&FontPreference::new("Consolas", 17), &FontPreference::new("Consolas", 15));
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_preferences(&FontPreference::new("Consolas", 17), &FontPreference::new("Consolas", 15)).unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     assert_eq!(renderer.body_preference, FontPreference::new("Consolas", 17));
     assert_eq!(renderer.title_preference, FontPreference::new("Consolas", 15));
 }
@@ -400,7 +421,7 @@ fn chimera_style_switch_restores_video_fonts_and_rendering() {
 #[test]
 fn chimera_portrait_keeps_transparent_corners_and_a_mouth_gap() {
     let mut renderer = Renderer::new().unwrap();
-    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.set_style(AnnouncementStyle::Chimera).unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
     let mut head = crate::chimera::Head::new();
     let speech = crate::chimera::prepare("Attention human. Please admire my mouth.", &std::sync::atomic::AtomicBool::new(false)).unwrap();
@@ -1111,16 +1132,13 @@ fn announcement_height_fits_the_last_word_at_windows_display_scales() {
     renderer.text = display_text("[excited] Committed and deployed announcement cleanup and text-editing improvements! Checks passed!");
     for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
         let height = renderer.message_height(scale) + 238;
-        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-        layout.reset(&LayoutSettings {
-            x: 26.0 * scale,
-            y: 26.0 * scale,
-            max_width: Some(268.0 * scale),
-            ..LayoutSettings::default()
-        });
-        layout.append(&[&renderer.body_font], &TextStyle::new(&renderer.text, f32::from(renderer.body_preference.size) * scale, 0));
+        let glyphs = layout_glyphs(&renderer.body_font, &TextBlock {
+            text: &renderer.text, x: 26.0, y: 26.0, width: 268.0,
+            line_height: None, size: f32::from(renderer.body_preference.size),
+            color: 0, max_height: f32::INFINITY,
+        }, scale);
         let cutoff = (height as f32 - 198.0) * scale;
-        for glyph in layout.glyphs() {
+        for glyph in glyphs {
             assert!(glyph.y + glyph.height as f32 <= cutoff, "The final line is clipped at scale {scale}: {} > {cutoff}", glyph.y + glyph.height as f32);
         }
     }
@@ -1388,11 +1406,11 @@ fn separate_font_sizes_change_body_height_and_preserve_unavailable_preferences()
     renderer.text = "A message that wraps across more than one line.".into();
     let body = FontPreference::new("Unavailable body family", 32);
     let title = FontPreference::new("Unavailable title family", 8);
-    renderer.set_preferences(&body, &title);
+    renderer.set_preferences(&body, &title).unwrap();
     let large_height = renderer.message_height(1.0);
     assert_eq!(renderer.body_preference(), &body);
     assert_eq!(renderer.title_preference(), &title);
-    renderer.set_preferences(&FontPreference::new("Unavailable body family", 8), &FontPreference::new("Unavailable title family", 32));
+    renderer.set_preferences(&FontPreference::new("Unavailable body family", 8), &FontPreference::new("Unavailable title family", 32)).unwrap();
     assert!(renderer.message_height(1.0) < large_height);
     assert_eq!(renderer.body_preference().family, "Unavailable body family");
     assert_eq!(renderer.title_preference().family, "Unavailable title family");
@@ -1404,11 +1422,11 @@ fn title_font_size_changes_title_rendering_without_changing_message_height() {
     renderer.text = "Message".into();
     renderer.title = "A title".into();
     let mut small = vec![0; 320 * 240];
-    renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 8));
+    renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 8)).unwrap();
     let height = renderer.message_height(1.0);
     renderer.draw(&mut small, 320, 240, 1.0, None, 0.0, None);
     let mut large = vec![0; 320 * 240];
-    renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 32));
+    renderer.set_preferences(&FontPreference::new("Unavailable body family", 18), &FontPreference::new("Unavailable title family", 32)).unwrap();
     assert_eq!(renderer.message_height(1.0), height);
     renderer.seed = 567891;
     renderer.draw(&mut large, 320, 240, 1.0, None, 0.0, None);

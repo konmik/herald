@@ -191,7 +191,7 @@ impl Renderer {
         });
         let mut coverage = (strike.is_some() || active).then(|| PaintCoverage::new(self.chimera_template.as_ref().unwrap().coverage.clone(), PixelFormat::PremultipliedArgb));
         let mut title = self.title.clone();
-        while title.chars().map(|c| self.title_font.metrics(c, f32::from(self.title_preference.size)).advance_width).sum::<f32>() > layout.title[2] { title.pop(); }
+        while title.chars().map(|c| advance_width(&self.title_font, c, f32::from(self.title_preference.size))).sum::<f32>() > layout.title[2] { title.pop(); }
         if title != self.title {
             title = title.chars().take(title.chars().count().saturating_sub(3)).collect::<String>() + "...";
         }

@@ -1,5 +1,4 @@
-use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
-use fontdue::Font;
+use crate::fonts::Font;
 use image::RgbaImage;
 use std::time::Duration;
 use crate::settings::{FontPreference, Settings};
@@ -8,6 +7,9 @@ use crate::profile::{self, Stage};
 use crate::pixels::PixelFormat;
 
 mod chimera;
+mod text;
+
+use text::{advance_width, position_text};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -610,18 +612,15 @@ struct CachedGlyph {
 
 /// Lays out and rasterizes a text block, keeping only the glyphs that fit above its maximum height.
 fn layout_glyphs(font: &Font, block: &TextBlock<'_>, scale: f32) -> Vec<CachedGlyph> {
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.reset(&LayoutSettings {
-        x: block.x * scale,
-        y: block.y * scale,
-        max_width: Some(block.width * scale),
-        line_height: block.line_height.map(|height| height * scale / font.horizontal_line_metrics(block.size * scale).unwrap().new_line_size).unwrap_or(1.0),
-        ..LayoutSettings::default()
-    });
-    layout.append(&[font], &TextStyle::new(block.text, block.size * scale, 0));
-    layout.glyphs().iter().filter(|glyph| glyph.y + glyph.height as f32 <= block.max_height * scale).map(|glyph| {
-        let (_, pixels) = font.rasterize_config(glyph.key);
-        CachedGlyph { x: glyph.x, y: glyph.y, width: glyph.width, height: glyph.height, pixels }
+    let layout = position_text(font, block.text, block.size * scale, block.width * scale, block.line_height.map(|height| height * scale));
+    layout.glyphs.into_iter().filter_map(|glyph| {
+        let bounds = glyph.px_bounds();
+        if bounds.max.y + block.y * scale > block.max_height * scale { return None; }
+        let width = bounds.width() as usize;
+        let height = bounds.height() as usize;
+        let mut pixels = vec![0; width * height];
+        glyph.draw(|x, y, coverage| pixels[y as usize * width + x as usize] = (coverage * 255.0).round() as u8);
+        Some(CachedGlyph { x: bounds.min.x + block.x * scale, y: bounds.min.y + block.y * scale, width, height, pixels })
     }).collect()
 }
 
@@ -707,9 +706,9 @@ impl Renderer {
     }
 
     pub fn with_settings(settings: &Settings) -> Result<Self, String> {
-        let catalog = crate::fonts::FontCatalog::new()?;
-        let body_font = catalog.get(&settings.announcement_body_font.family);
-        let title_font = catalog.get(&settings.announcement_title_font.family);
+        let catalog = crate::fonts::FontCatalog::new();
+        let body_font = catalog.get(&settings.announcement_body_font.family)?;
+        let title_font = catalog.get(&settings.announcement_title_font.family)?;
         Ok(Self {
             catalog,
             style: AnnouncementStyle::Video,
@@ -737,31 +736,37 @@ impl Renderer {
         })
     }
 
-    pub fn set_preferences(&mut self, body: &FontPreference, title: &FontPreference) {
-        if &self.saved_body_preference == body && &self.saved_title_preference == title { return; }
+    pub fn set_preferences(&mut self, body: &FontPreference, title: &FontPreference) -> Result<(), String> {
+        if &self.saved_body_preference == body && &self.saved_title_preference == title { return Ok(()); }
+        self.update_fonts(self.style, body, title)
+    }
+
+    pub fn set_style(&mut self, style: AnnouncementStyle) -> Result<(), String> {
+        if self.style == style { return Ok(()); }
+        self.update_fonts(style, &self.saved_body_preference.clone(), &self.saved_title_preference.clone())?;
+        self.contour_cache = None;
+        Ok(())
+    }
+
+    fn update_fonts(&mut self, style: AnnouncementStyle, body: &FontPreference, title: &FontPreference) -> Result<(), String> {
+        let defaults = Settings::default();
+        let body_preference = if style == AnnouncementStyle::Chimera && body == &defaults.announcement_body_font {
+            FontPreference::new("Berkeley Mono", 14)
+        } else { body.clone() };
+        let title_preference = if style == AnnouncementStyle::Chimera && title == &defaults.announcement_title_font {
+            FontPreference::new("Berkeley Mono", 12)
+        } else { title.clone() };
+        let body_font = self.catalog.get(&body_preference.family)?;
+        let title_font = self.catalog.get(&title_preference.family)?;
+        self.style = style;
         self.saved_body_preference = body.clone();
         self.saved_title_preference = title.clone();
-        self.update_fonts();
-    }
-
-    pub fn set_style(&mut self, style: AnnouncementStyle) {
-        if self.style == style { return; }
-        self.style = style;
-        self.update_fonts();
-        self.contour_cache = None;
-    }
-
-    fn update_fonts(&mut self) {
-        let defaults = Settings::default();
-        self.body_preference = if self.style == AnnouncementStyle::Chimera && self.saved_body_preference == defaults.announcement_body_font {
-            FontPreference::new("Berkeley Mono", 14)
-        } else { self.saved_body_preference.clone() };
-        self.title_preference = if self.style == AnnouncementStyle::Chimera && self.saved_title_preference == defaults.announcement_title_font {
-            FontPreference::new("Berkeley Mono", 12)
-        } else { self.saved_title_preference.clone() };
-        self.body_font = self.catalog.get(&self.body_preference.family);
-        self.title_font = self.catalog.get(&self.title_preference.family);
+        self.body_preference = body_preference;
+        self.title_preference = title_preference;
+        self.body_font = body_font;
+        self.title_font = title_font;
         self.glyph_cache.borrow_mut().clear();
+        Ok(())
     }
 
     pub fn set_lightning(&mut self, lightning: LightningSettings) { self.lightning = lightning; }
@@ -789,18 +794,11 @@ impl Renderer {
     pub fn title_preference(&self) -> &FontPreference { &self.title_preference }
 
     pub fn message_height(&self, scale: f32) -> u32 {
-        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         let size = f32::from(self.body_preference.size) * scale;
-        layout.reset(&LayoutSettings {
-            max_width: Some(self.style.layout(432, self.title_preference.size).body[2] * scale),
-            line_height: if self.style == AnnouncementStyle::Chimera { size * 1.65 / self.body_font.horizontal_line_metrics(size).unwrap().new_line_size } else { 1.0 },
-            ..LayoutSettings::default()
-        });
-        layout.append(&[&self.body_font], &TextStyle::new(&self.text, f32::from(self.body_preference.size) * scale, 0));
-        let height = if self.style == AnnouncementStyle::Chimera {
-            layout.glyphs().iter().map(|glyph| glyph.y + glyph.height as f32).fold(layout.height(), f32::max)
-        } else { layout.height() };
-        (height / scale).ceil() as u32
+        let layout = position_text(&self.body_font, &self.text, size,
+            self.style.layout(432, self.title_preference.size).body[2] * scale,
+            (self.style == AnnouncementStyle::Chimera).then_some(size * 1.65));
+        (layout.height / scale).ceil() as u32
     }
 
     pub fn announcement_height(&self, scale: f32, max_height: u32) -> u32 {
@@ -815,15 +813,17 @@ impl Renderer {
     }
 
     fn glyphs(&self, font: &Font, block: &TextBlock<'_>, scale: f32) -> std::sync::Arc<Vec<CachedGlyph>> {
-        let key = TextKey { font: font.file_hash(), text: block.text.to_owned(), size: (block.size * scale).to_bits(),
+        let key = TextKey { font: std::sync::Arc::as_ptr(font) as usize, text: block.text.to_owned(), size: (block.size * scale).to_bits(),
             x: block.x.to_bits(), width: block.width.to_bits(), line_height: block.line_height.unwrap_or_default().to_bits(),
             y: (block.y * scale).to_bits(), max_height: (block.max_height * scale).to_bits(), scale: scale.to_bits() };
         let glyphs = self.glyph_cache.borrow().get(&key).cloned();
         glyphs.unwrap_or_else(|| {
             let glyphs = std::sync::Arc::new(layout_glyphs(font, block, scale));
             let mut cache = self.glyph_cache.borrow_mut();
-            if cache.len() >= 8 { cache.clear(); }
-            cache.insert(key, glyphs.clone());
+            let bytes = glyphs.iter().map(|glyph| glyph.pixels.len()).sum::<usize>();
+            let retained = cache.values().flat_map(|glyphs| glyphs.iter()).map(|glyph| glyph.pixels.len()).sum::<usize>();
+            if cache.len() >= 8 || retained + bytes > 1024 * 1024 { cache.clear(); }
+            if bytes <= 1024 * 1024 { cache.insert(key, glyphs.clone()); }
             glyphs
         })
     }
@@ -918,7 +918,7 @@ impl Renderer {
         let mut title = self.title.clone();
         while title
             .chars()
-            .map(|c| self.title_font.metrics(c, f32::from(self.title_preference.size)).advance_width)
+            .map(|c| advance_width(&self.title_font, c, f32::from(self.title_preference.size)))
             .sum::<f32>()
             > 268.0
         {

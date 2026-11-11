@@ -432,7 +432,9 @@ fn run() -> Result<(), String> {
                             warmups.clear();
                             signal.stop();
                             if matches!(&current, Presentation::Idle) {
-                                renderer.set_preferences(&settings_store.current.announcement_body_font, &settings_store.current.announcement_title_font);
+                                if let Err(error) = renderer.set_preferences(&settings_store.current.announcement_body_font, &settings_store.current.announcement_title_font) {
+                                    state::log(&data, error); *control_flow = ControlFlow::Exit; return;
+                                }
                             }
                         }
                         Err(error) => state::log(&data, format!("Settings: {error}")),
@@ -505,13 +507,17 @@ fn run() -> Result<(), String> {
                     }
                 }
                 if activation.is_none() && matches!(current, Presentation::Idle) && meeting.ready() {
-                    renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font);
+                    if let Err(error) = renderer.set_preferences(&settings.announcement_body_font, &settings.announcement_title_font) {
+                        state::log(&data, error); *control_flow = ControlFlow::Exit; return;
+                    }
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
                         state::timing(format!("notification_selected id={} completed={}", notification.id, notification.completed));
                         let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         let style = match character.visual { characters::ResolvedVisual::Chimera => render::AnnouncementStyle::Chimera, characters::ResolvedVisual::Video(_) => render::AnnouncementStyle::Video };
-                        renderer.set_style(style);
+                        if let Err(error) = renderer.set_style(style) {
+                            state::log(&data, error); *control_flow = ControlFlow::Exit; return;
+                        }
                         let lightning = capture_lightning.unwrap_or(settings.lightning);
                         renderer.set_lightning(lightning);
                         renderer.text = render::display_text(&notification.text);

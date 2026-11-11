@@ -1,27 +1,42 @@
-use fontdue::{Font, FontSettings};
-use std::collections::BTreeSet;
+use ab_glyph::FontVec;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 
+pub type Font = Arc<FontVec>;
+
+#[derive(Default)]
 pub struct FontCatalog {
-    fallback: Font,
+    faces: RefCell<HashMap<String, Weak<FontVec>>>,
 }
 
 impl FontCatalog {
-    pub fn new() -> Result<Self, String> {
-        let fallback = fallback_paths().into_iter().find_map(|(_, path)| std::fs::read(path).ok().and_then(parse_font))
-            .or_else(|| family_names().into_iter().find_map(|family| load_font(&family)))
-            .ok_or("No system font found")?;
-        Ok(Self { fallback })
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn get(&self, family: &str) -> Font {
-        load_font(family).unwrap_or_else(|| self.fallback.clone())
+    pub fn get(&self, family: &str) -> Result<Font, String> {
+        self.face(family, || load_font(family))
+            .or_else(|| fallback_paths().into_iter().find_map(|(family, path)| {
+                self.face(&family, || std::fs::read(path).ok().and_then(parse_font))
+            }))
+            .or_else(|| family_names().into_iter().find_map(|family| self.face(&family, || load_font(&family))))
+            .ok_or_else(|| "No system font found".into())
+    }
+
+    fn face(&self, family: &str, load: impl FnOnce() -> Option<Font>) -> Option<Font> {
+        let key = family.to_lowercase();
+        if let Some(face) = self.faces.borrow().get(&key).and_then(Weak::upgrade) { return Some(face); }
+        let face = load()?;
+        let mut faces = self.faces.borrow_mut();
+        faces.retain(|_, face| face.strong_count() > 0);
+        faces.insert(key, Arc::downgrade(&face));
+        Some(face)
     }
 }
 
 pub fn available_families() -> Result<Vec<String>, String> {
-    #[cfg(not(target_os = "windows"))]
-    FontCatalog::new()?;
     Ok(family_names().into_iter().filter(|family| supports_family(family)).collect())
 }
 
@@ -43,7 +58,7 @@ fn supports_family(family: &str) -> bool {
 }
 
 fn parse_font(bytes: Vec<u8>) -> Option<Font> {
-    Font::from_bytes(bytes, FontSettings::default()).ok()
+    FontVec::try_from_vec(bytes).ok().map(Arc::new)
 }
 
 fn fallback_paths() -> Vec<(String, PathBuf)> {
