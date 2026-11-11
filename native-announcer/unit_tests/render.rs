@@ -3,6 +3,112 @@ use super::*;
 const CHIMERA_MESSAGE: &str = "Attention, human. The build is ready and the checks have passed. Please admire my moving mouth, glowing tongue, and deeply questionable voice. Mission complete.";
 
 #[test]
+fn chimera_signal_breaks_animate_without_filling_the_background_or_closing_the_mouth_gap() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
+    let head = crate::chimera::Head::new();
+    for scale in [1.0, 1.5] {
+        let width = (600.0 * scale) as usize;
+        let height = (432.0 * scale) as usize;
+        let mut bubble = vec![0; width * height];
+        renderer.draw(&mut bubble, width, height, scale, None, 0.0, None);
+        let seed = renderer.seed;
+        let mut clean = vec![0; width * height];
+        renderer.draw(&mut clean, width, height, scale, Some(head.frame()), 0.0, None);
+        assert_eq!(renderer.seed, seed);
+        let mut previous = clean.clone();
+        for _ in 0..4 {
+            let seed = renderer.seed;
+            let mut broken = vec![0; width * height];
+            renderer.draw(&mut broken, width, height, scale, Some(head.frame()), 0.62, None);
+            assert_eq!(renderer.seed, xorshift_jump(seed, 1));
+            assert_ne!(broken, previous);
+            assert!(broken.iter().zip(&clean).filter(|(a, b)| (**a >> 24) != (**b >> 24)).count() > (300.0 * scale * scale) as usize);
+            assert!(broken.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+            assert!(broken.chunks(width).zip(clean.chunks(width)).all(|(a, b)| a[..(325.0 * scale) as usize] == b[..(325.0 * scale) as usize]));
+            assert!(broken.chunks(width).flat_map(|row| &row[(405.0 * scale) as usize..]).filter(|pixel| **pixel == 0).count() > width * height / 6);
+            assert_eq!(broken[(410.0 * scale) as usize * width + (330.0 * scale) as usize], 0);
+            for y in (225.0 * scale) as usize..(310.0 * scale) as usize {
+                let bubble_right = bubble[y * width..y * width + (405.0 * scale) as usize].iter().rposition(|pixel| *pixel != 0);
+                if let Some(right) = bubble_right {
+                    if let Some(gap) = broken[y * width + right + 1..(y + 1) * width].iter().position(|pixel| *pixel != 0) {
+                        assert!(gap >= (3.0 * scale) as usize, "Signal closed the mouth gap at {scale}, row {y}");
+                    }
+                }
+            }
+            previous = broken;
+        }
+        let seed = renderer.seed;
+        renderer.draw(&mut previous, width, height, scale, Some(head.frame()), 0.0, None);
+        assert_eq!(previous, clean);
+        assert_eq!(renderer.seed, seed);
+    }
+}
+
+#[test]
+fn signal_maps_wire_paths_to_torn_pixels_without_long_diagonal_bridges() {
+    for scale in [1.0, 1.5] {
+        let size = (336.0 * scale) as u32;
+        let signal = chimera::SignalDistortion::new(size as usize, scale, 0.62, 177);
+        let x = (size as f32 * 0.6) as u32;
+        let image = RgbaImage::from_fn(size, size, |column, row| image::Rgba(if column.abs_diff(x) <= 1 && row > 8 && row + 8 < size { [255; 4] } else { [0; 4] }));
+        let broken = signal.apply(&image);
+        let path = signal.path(&[[x as f32 / size as f32, 0.05], [x as f32 / size as f32, 0.95]]);
+        assert!(path.len() > 2);
+        for point in &path {
+            let column = (point[0] * size as f32).floor() as u32;
+            let row = (point[1] * size as f32).floor() as u32;
+            assert!(broken.get_pixel(column, row)[3] > 0);
+        }
+        for pair in path.windows(2) {
+            if (pair[1][0] - pair[0][0]).abs() * size as f32 > 1.0 {
+                assert!((pair[1][1] - pair[0][1]).abs() * (size as f32) < 0.1);
+            }
+        }
+        assert!(broken.pixels().filter(|pixel| pixel[3] > 0).count() < size as usize * 10);
+        assert_eq!(broken.get_pixel(0, 0).0, [0; 4]);
+        assert_eq!(broken.get_pixel(size - 1, size - 1).0, [0; 4]);
+    }
+}
+
+#[test]
+fn signal_keeps_eye_and_mouth_discharge_attached_to_the_distorted_head() {
+    let head = crate::chimera::Head::new();
+    let origins: Vec<_> = head.eye_rays().iter().map(|ray| ray[0]).chain(head.mouth_discharge().map(|mouth| mouth.ray[0])).collect();
+    for scale in [1.0, 1.5] {
+        let size = (336.0 * scale) as usize;
+        let seed = (1..5000).find(|seed| {
+            let signal = chimera::SignalDistortion::new(size, scale, 0.62, xorshift_jump(*seed, 1));
+            origins.iter().all(|point| (signal.point(*point)[0] - point[0]) * 336.0 >= 3.9)
+        }).unwrap();
+        let signal = chimera::SignalDistortion::new(size, scale, 0.62, xorshift_jump(seed, 1));
+        let mut renderer = Renderer::new().unwrap();
+        renderer.set_style(AnnouncementStyle::Chimera);
+        renderer.text = CHIMERA_MESSAGE.into();
+        renderer.set_anatomy_paths(head.anatomy_paths());
+        let width = (600.0 * scale) as usize;
+        let height = (432.0 * scale) as usize;
+        let mut original = vec![0; width * height];
+        renderer.seed = seed;
+        renderer.draw(&mut original, width, height, scale, Some(head.frame()), 0.62, Some(Duration::from_millis(430)));
+        renderer.set_eye_rays(head.eye_rays());
+        renderer.set_mouth_discharge(head.mouth_discharge());
+        renderer.seed = seed;
+        let mut firing = vec![0; width * height];
+        renderer.draw(&mut firing, width, height, scale, Some(head.frame()), 0.62, Some(Duration::from_millis(430)));
+        for origin in &origins {
+            let mapped = signal.point(*origin);
+            let x = ((325.0 + mapped[0] * 336.0) * scale).round() as usize;
+            let y = ((84.0 + mapped[1] * 336.0) * scale).round() as usize;
+            assert!((y - 1..=y + 1).any(|row| (x - 1..=x + 1).any(|column| {
+                [0, 8, 16].into_iter().any(|shift| ((firing[row * width + column] >> shift) as u8).abs_diff((original[row * width + column] >> shift) as u8) > 40)
+            })), "Discharge missed its displaced origin at {scale}, {x}, {y}");
+        }
+    }
+}
+
+#[test]
 fn mouth_discharge_travels_through_the_tract_before_shooting_out() {
     let mut renderer = Renderer::new().unwrap();
     renderer.set_style(AnnouncementStyle::Chimera);

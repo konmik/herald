@@ -876,7 +876,7 @@ impl Renderer {
         entrance: Option<Duration>,
     ) {
         if self.style == AnnouncementStyle::Chimera {
-            self.draw_chimera(buffer, width, height, scale, image, entrance);
+            self.draw_chimera(buffer, width, height, scale, image, interference, entrance);
             return;
         }
         let resized = image.filter(|frame| frame.dimensions() != (128, 128)).map(|frame| {

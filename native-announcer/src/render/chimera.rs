@@ -1,6 +1,90 @@
 use super::*;
 use tiny_skia::{Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, Pixmap, Point, Shader, SpreadMode, Stroke, Transform};
 
+pub(super) struct SignalDistortion {
+    rows: Vec<i32>,
+    breaks: Vec<usize>,
+    vertical: i32,
+    split: i32,
+    scale: f32,
+    strength: f32,
+    seed: u32,
+}
+
+impl SignalDistortion {
+    pub(super) fn new(size: usize, scale: f32, strength: f32, seed: u32) -> Self {
+        let mut rows = vec![0; size];
+        for band in 0..4 {
+            let random = crate::state::noise_hash(seed ^ band * 7919);
+            let start = random as usize % size;
+            let length = ((12 + (random >> 8) % 22) as f32 * scale).round() as usize;
+            let shift = ((4 + (random >> 16) % 3) as f32 * scale).round() as i32;
+            rows[start..(start + length).min(size)].fill(if random & 1 == 0 { shift } else { -shift });
+        }
+        let breaks = (1..size).filter(|row| rows[*row] != rows[*row - 1]).collect();
+        let vertical = ((1 + (seed >> 8) % 3) as f32 * scale).round() as i32 * if seed & 1 == 0 { 1 } else { -1 };
+        Self { rows, breaks, vertical, split: (1.25 * scale).round() as i32, scale, strength: strength.clamp(0.0, 1.0), seed }
+    }
+
+    pub(super) fn point(&self, point: [f32; 2]) -> [f32; 2] {
+        let size = self.rows.len() as f32;
+        let row = (point[1] * size).floor().clamp(0.0, size - 1.0) as usize;
+        [point[0] + self.rows[row] as f32 / size, point[1] + self.vertical as f32 / size]
+    }
+
+    pub(super) fn path(&self, path: &[[f32; 2]]) -> Vec<[f32; 2]> {
+        let mut mapped = Vec::with_capacity(path.len() + self.breaks.len() * 2);
+        for pair in path.windows(2) {
+            mapped.push(self.point(pair[0]));
+            let dy = pair[1][1] - pair[0][1];
+            if dy == 0.0 { continue; }
+            let mut crossings: Vec<_> = self.breaks.iter().map(|row| (*row as f32 / self.rows.len() as f32 - pair[0][1]) / dy)
+                .filter(|fraction| *fraction > 0.0 && *fraction <= 1.0).collect();
+            crossings.sort_by(f32::total_cmp);
+            for fraction in crossings {
+                let x = pair[0][0] + (pair[1][0] - pair[0][0]) * fraction;
+                let y = pair[0][1] + dy * fraction;
+                let epsilon = 0.01 / self.rows.len() as f32 * dy.signum();
+                mapped.extend([self.point([x, y - epsilon]), self.point([x, y + epsilon])]);
+            }
+        }
+        if let Some(point) = path.last() { mapped.push(self.point(*point)); }
+        mapped
+    }
+
+    pub(super) fn apply(&self, image: &RgbaImage) -> RgbaImage {
+        let sample = |x: i32, y: i32| {
+            if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 { [0; 4] }
+            else { image.get_pixel(x as u32, y as u32).0 }
+        };
+        RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+            let source_y = y as i32 - self.vertical;
+            if source_y < 0 || source_y >= image.height() as i32 { return image::Rgba([0; 4]); }
+            let shift = self.rows[source_y as usize];
+            let source_x = x as i32 - shift;
+            let base = sample(source_x, source_y);
+            let red = sample(source_x - self.split, source_y);
+            let blue = sample(source_x + self.split, source_y);
+            let alpha = base[3].max(red[3]).max(blue[3]);
+            let random = crate::state::noise_hash(self.seed ^ x.wrapping_mul(7919) ^ y.wrapping_mul(104729));
+            let grain = if shift != 0 && random & 3 == 0 { if random & 4 == 0 { 0 } else { 255 } } else { random & 255 };
+            let monochrome = grain as f32 * f32::from(alpha) / 255.0;
+            let amount = self.strength * if shift == 0 { 0.12 } else { 0.75 };
+            let scanline = if ((y as f32 / self.scale) as u32 + self.seed % 3).is_multiple_of(3) { 0.55 } else { 1.0 };
+            let color = [red[0], base[1], blue[2]].map(|channel| ((f32::from(channel) * (1.0 - amount) + monochrome * amount) * scanline) as u8);
+            image::Rgba([color[0], color[1], color[2], alpha])
+        })
+    }
+}
+
+fn portrait_path(path: &[[f32; 2]], layout: AnnouncementLayout, scale: f32, signal: Option<&SignalDistortion>) -> Vec<[f32; 2]> {
+    let mapped = signal.map(|signal| signal.path(path));
+    mapped.as_deref().unwrap_or(path).iter().map(|point| [
+        (layout.portrait[0] + point[0] * layout.portrait[2]) * scale,
+        (layout.portrait[1] + point[1] * layout.portrait[3]) * scale,
+    ]).collect()
+}
+
 pub(super) struct Frame {
     width: usize,
     height: usize,
@@ -85,8 +169,9 @@ fn path(commands: &[Command], extra: f32) -> Path {
 }
 
 impl Renderer {
-    pub(super) fn draw_chimera(&mut self, buffer: &mut [u32], width: usize, height: usize, scale: f32, image: Option<&RgbaImage>, entrance: Option<Duration>) {
+    pub(super) fn draw_chimera(&mut self, buffer: &mut [u32], width: usize, height: usize, scale: f32, image: Option<&RgbaImage>, interference: f32, entrance: Option<Duration>) {
         let layout = self.style.layout((height as f32 / scale).round() as u32, self.title_preference.size);
+        let signal = (interference > 0.0 && image.is_some()).then(|| SignalDistortion::new((layout.portrait[2] * scale).round() as usize, scale, interference, self.random()));
         let body = TextBlock {
             text: &self.text, x: layout.body[0], y: layout.body[1], width: layout.body[2], max_height: layout.body[3],
             size: f32::from(self.body_preference.size), color: 0xecf6fc, line_height: Some(f32::from(self.body_preference.size) * 1.65),
@@ -127,6 +212,8 @@ impl Renderer {
                         (u16::from(blue) * u16::from(alpha) / 255) as u8, alpha])
                 });
                 let frame = image::imageops::resize(&premultiplied, size, size, image::imageops::FilterType::Triangle);
+                let distorted = signal.as_ref().map(|signal| signal.apply(&frame));
+                let frame = distorted.as_ref().unwrap_or(&frame);
                 let left = (layout.portrait[0] * scale).round() as usize;
                 let top = (layout.portrait[1] * scale).round() as usize;
                 for (y, row) in frame.rows().enumerate().take(height.saturating_sub(top)) {
@@ -147,18 +234,15 @@ impl Renderer {
             }
         });
         if let (Some(coverage), Some(_)) = (&mut coverage, image) {
-            coverage.wires = self.anatomy_paths.iter().map(|path| path.iter().map(|point| [
-                (layout.portrait[0] + point[0] * layout.portrait[2]) * scale,
-                (layout.portrait[1] + point[1] * layout.portrait[3]) * scale,
-            ]).collect()).collect();
+            coverage.wires = self.anatomy_paths.iter().map(|path| portrait_path(path, layout, scale, signal.as_ref())).collect();
         }
         if let Some(coverage) = coverage {
             self.draw_lightning(buffer, width, height, scale, strike, coverage, layout);
         }
-        if image.is_some() { self.draw_discharge_lightning(buffer, width, height, scale, layout, strike); }
+        if image.is_some() { self.draw_discharge_lightning(buffer, width, height, scale, layout, strike, signal.as_ref()); }
     }
 
-    fn draw_discharge_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, layout: AnnouncementLayout, strike: Option<Duration>) {
+    fn draw_discharge_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, layout: AnnouncementLayout, strike: Option<Duration>, signal: Option<&SignalDistortion>) {
         if self.eye_rays.is_empty() && self.mouth_discharge.is_none() { return; }
         let (seed, intensity, progress) = if let Some(elapsed) = strike {
             let milliseconds = elapsed.as_secs_f32() * 1000.0 * self.lightning.speed;
@@ -182,15 +266,15 @@ impl Renderer {
         };
         if intensity <= 0.0 { return; }
         let mut paint = LightningPaint::new(width, height, self.lightning);
-        let point = |point: [f32; 2]| [
-            (layout.portrait[0] + point[0] * layout.portrait[2]) * scale,
-            (layout.portrait[1] + point[1] * layout.portrait[3]) * scale,
-        ];
+        let point = |point: [f32; 2]| {
+            let point = signal.map_or(point, |signal| signal.point(point));
+            [(layout.portrait[0] + point[0] * layout.portrait[2]) * scale, (layout.portrait[1] + point[1] * layout.portrait[3]) * scale]
+        };
         for (index, ray) in self.eye_rays.iter().enumerate() {
             paint.bolt(point(ray[0]), point(ray[1]), scale, seed ^ index as u32 * 7919, intensity * 1.2, (progress * 2.7).min(1.0));
         }
         if let Some(discharge) = &self.mouth_discharge {
-            let tract: Vec<_> = discharge.tract.iter().copied().map(point).collect();
+            let tract = portrait_path(&discharge.tract, layout, scale, signal);
             paint.trace(&tract, scale, 0.65, intensity, (progress / 0.6).min(1.0));
             if progress > 0.6 {
                 paint.bolt(point(discharge.ray[0]), point(discharge.ray[1]), scale, seed ^ 42971, intensity * 1.2, ((progress - 0.6) / 0.4).min(1.0));
