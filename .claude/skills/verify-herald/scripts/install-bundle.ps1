@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$Archive,
-    [string]$Evidence = ('temp/verification/bundle-install-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/bundle-install-' + [guid]::NewGuid()))
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))

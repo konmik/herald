@@ -4,7 +4,7 @@ param(
     [string]$Model,
     [string]$AppDirectory,
     [string]$ClaudePluginDirectory,
-    [string]$Evidence = ('temp/verification/hosts-' + [guid]::NewGuid()),
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/hosts-' + [guid]::NewGuid())),
     [switch]$CustomSummary
 )
 $ErrorActionPreference = 'Stop'

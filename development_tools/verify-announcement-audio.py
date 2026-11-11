@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 import uuid
 import wave
@@ -156,7 +157,7 @@ def verify_preview_order(path, evidence, delay_seconds, started_at):
 
 def main():
     parser = argparse.ArgumentParser(epilog="Capture requires PyAudioWPatch. CHIMERA waveform checks also require numpy.")
-    parser.add_argument("--evidence", default=f"temp/verification/audio-{uuid.uuid4()}")
+    parser.add_argument("--evidence", default=str(Path(tempfile.gettempdir()) / f"herald/verification/audio-{uuid.uuid4()}"))
     parser.add_argument("--check", type=Path)
     parser.add_argument("--delay-seconds", type=int, choices=range(11), default=0)
     parser.add_argument("--settings-previews", action="store_true")
@@ -186,7 +187,7 @@ def main():
                     command.extend(["-Speech", "-CharacterId", "chimera", "-CaptureFrames", "-Volume", "100"])
                 else:
                     command.extend(["-Speech", "-SpeechFixture"])
-                command.extend(["-Evidence", str((evidence / "playback").relative_to(root)), "-SilentSoundSeconds", str(args.delay_seconds)])
+                command.extend(["-Evidence", str(evidence / "playback"), "-SilentSoundSeconds", str(args.delay_seconds)])
                 if args.app_directory:
                     command.extend(["-AppDirectory", str(args.app_directory)])
                     if args.settings_previews:

@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)][string]$TestExecutable,
     [string]$ClaudePluginDirectory,
     [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode',
-    [string]$Evidence = ('temp/verification/speech-assets-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/speech-assets-' + [guid]::NewGuid()))
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))

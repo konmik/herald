@@ -5,7 +5,7 @@ Read this index before choosing a proof. Each entry point remains separately acc
 ## Baseline preconditions
 
 - Follow Launch in `../SKILL.md`; require an interactive Windows desktop, PowerShell 7, Node and Cargo.
-- Use a fresh evidence directory under `temp/verification/`.
+- Use the helper's default unique evidence directory in system temp.
 - Helpers own unique disposable data directories. Leave the user's companion and host sessions alone.
 - Require Doctor before driving and successful cleanup after each attempt, including failures.
 - Serialize focus and audio checks. Default runs are silent.

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$AppDirectory,
-    [string]$Evidence = ('temp/verification/bundle-' + [guid]::NewGuid()),
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/bundle-' + [guid]::NewGuid())),
     [switch]$Hosts,
     [string]$TestExecutable,
     [string]$ClaudePluginDirectory,

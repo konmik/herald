@@ -3,7 +3,7 @@
 The helper launches a disposable `--settings` instance with its own HERALD_DATA,
 drives the real window through the macOS Accessibility (AX) API, falls back to
 real pointer and keyboard events where GPUI exposes no AX action, captures
-window screenshots, and keeps evidence in temp/verification/macos-settings-*/.
+window screenshots, and keeps evidence in the system temporary directory.
 
 Requirements: Python 3 with pyobjc (Quartz, ApplicationServices) and Pillow.
 The application that runs this script (Terminal, iTerm, an IDE or agent host)
@@ -181,7 +181,7 @@ class Session:
         self.root = Path(__file__).resolve().parent.parent
         self.binary = Path(args.binary).resolve() if args.binary else self.root / "native-announcer/target/debug/herald"
         self.assets = self.root / "native-announcer/resources"
-        evidence_root = self.root / "temp/verification"
+        evidence_root = Path(tempfile.gettempdir()) / "herald/verification"
         evidence_root.mkdir(parents=True, exist_ok=True)
         self.evidence = Path(args.evidence).resolve() if args.evidence else Path(tempfile.mkdtemp(prefix="macos-settings-", dir=evidence_root))
         self.evidence.mkdir(parents=True, exist_ok=True)
@@ -1051,7 +1051,7 @@ class Session:
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--binary", help="Settings executable (default: native-announcer/target/debug/herald)")
-    parser.add_argument("--evidence", help="Evidence directory (default: unique temp/verification/macos-settings-*)")
+    parser.add_argument("--evidence", help="Evidence directory (default: unique herald/verification/macos-settings-* in system temp)")
     parser.add_argument("--feature", choices=["all", *FEATURES], default="all")
     parser.add_argument("--preflight", action="store_true", help="Only check macOS permissions and exit")
     args = parser.parse_args()

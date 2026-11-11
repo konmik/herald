@@ -25,7 +25,7 @@ Use the debug executable rather than `npm run build:announcer`: that command bui
 Launch and drive a disposable settings instance:
 
 ```powershell
-pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1 -Feature Settings -Evidence temp/verification/settings-proof
+pwsh -NoProfile -File .claude/skills/verify-herald/scripts/verify.ps1 -Feature Settings
 ```
 
 The helper starts `native-announcer/target/debug/herald.exe --settings`, waits up to ten seconds for its window, runs Doctor, drives the feature, closes and reopens it, then cleans up. Readiness is the owned `Herald settings` window with `Apply` and `Close` controls.
@@ -33,7 +33,7 @@ The helper starts `native-announcer/target/debug/herald.exe --settings`, waits u
 Announcement launch and drive:
 
 ```powershell
-pwsh -NoProfile -File .claude/skills/verify-herald/scripts/announce.ps1 -Evidence temp/verification/announcement-proof
+pwsh -NoProfile -File .claude/skills/verify-herald/scripts/announce.ps1
 ```
 
 This starts the same executable with `--isolated --assets native-announcer/resources --test-seconds 35`, an evidence report and render snapshot. Readiness is a live owned process and initialized inbox, followed by rendered history. The helper maintains presence through the production bridge. Playback exits automatically; the helper bounds the run at 45 seconds.
@@ -52,7 +52,7 @@ pnpm run test:settings:macos
 
 Requirements: Xcode command-line tools, Rust, `ffmpeg` on `PATH` (the non-Windows video decoder and the inline Lightning preview use it), Python 3 with pyobjc and Pillow (`python3 -m pip install --user -r development_tools/requirements-checks.txt`), and **Accessibility** and **Screen Recording** permission for the application that launches the command. That is the outermost app above the shell (Terminal, iTerm, an IDE or an agent host), not `python3`. The preflight names it. Restart that app after granting. Without the permissions the helper exits with code 2 and `proof.json` reports `blocked`; record macOS as unverified rather than passed.
 
-`development_tools/verify-macos-settings.py` launches `native-announcer/target/debug/herald --settings` with unique `HERALD_DATA`, waits for the `Herald settings` AX window with Apply and Close, and runs Doctor (owned PID and start time, executable path and SHA-256, no `errors.log`). It visits all seven pages and opens a character editor. It checks that a second launch exits, keeps one window and brings the existing one frontmost. It drives checkboxes, sliders, dropdowns, text and multiline fields, the silent Audio preview, Lightning presets, the five sliders and pixel motion in the inline preview, and Characters New/Delete with the confirmation. It also covers Command+S, Ctrl+Tab and other keyboard paths, Escape, resizing to 420×650, 420×360 and 1100×700 without horizontal overflow, Apply, Close discard, process exit on Close and reopening. `--feature quit` checks that the red close button, Command+W, Command+Q and the application menu's Quit Herald each exit the process with status 0 and leave no window, including Command+Q while the Lightning preview plays and the close button while a 1% voice preview plays. Dock Quit needs the app bundle; check it on the deployed `/Applications/Herald.app`. Evidence goes to `temp/verification/macos-settings-*/` (`proof.json` per-feature results, `actions.json`, `cleanup.json`, PNG screenshots via `screencapture -l` and AX JSON snapshots). Cleanup terminates only owned PIDs whose start time still matches and removes only the scratch directory.
+`development_tools/verify-macos-settings.py` launches `native-announcer/target/debug/herald --settings` with unique `HERALD_DATA`, waits for the `Herald settings` AX window with Apply and Close, and runs Doctor (owned PID and start time, executable path and SHA-256, no `errors.log`). It visits all seven pages and opens a character editor. It checks that a second launch exits, keeps one window and brings the existing one frontmost. It drives checkboxes, sliders, dropdowns, text and multiline fields, the silent Audio preview, Lightning presets, the five sliders and pixel motion in the inline preview, and Characters New/Delete with the confirmation. It also covers Command+S, Ctrl+Tab and other keyboard paths, Escape, resizing to 420×650, 420×360 and 1100×700 without horizontal overflow, Apply, Close discard, process exit on Close and reopening. `--feature quit` checks that the red close button, Command+W, Command+Q and the application menu's Quit Herald each exit the process with status 0 and leave no window, including Command+Q while the Lightning preview plays and the close button while a 1% voice preview plays. Dock Quit needs the app bundle; check it on the deployed `/Applications/Herald.app`. Evidence goes to `herald/verification/macos-settings-*/` in the system temporary directory (`proof.json` per-feature results, `actions.json`, `cleanup.json`, PNG screenshots via `screencapture -l` and AX JSON snapshots). Cleanup terminates only owned PIDs whose start time still matches and removes only the scratch directory.
 
 The helper always launches with Finder's `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, since a shell PATH hides missing tools such as ffmpeg, and checks that every Lightning preset plays. Pass `--binary /Applications/Herald.app/Contents/MacOS/Herald` to verify the installed app with its bundled resources; `pnpm run deploy:macos` does this for Lightning. After `pnpm run deploy:macos`, check the installed layout: `open /Applications/Herald.app` opens one Settings window with a Dock icon and a second `open` only activates it; `ps` shows the announcer running from `Herald.app/Contents/Helpers/Herald Announcer.app/Contents/MacOS/Herald Announcer` with no Dock icon; `/Applications/Herald Settings.app` is gone; and a Claude or Codex task of at least a minute still announces.
 
@@ -83,7 +83,7 @@ For plugin-generation changes, transport injection is insufficient: exercise eac
 
 ## Evidence
 
-Use a new folder under `temp/verification/` for every run. Helpers default to a GUID folder; explicit example paths must be changed when already used. Evidence is local and ignored by Git.
+Use the helper's default unique evidence folder in the system temporary directory. The repository's `temp/` belongs to the user for uncommitted files; tool evidence and scratch files belong outside the repository. Keep evidence until it has been reviewed, then remove only the files created by the current run.
 
 Settings proof includes the action transcript, binary identity, control snapshots before/during/after/reopening, and actual settings files before/after Apply. It must prove Apply persisted values, Close discarded an unapplied edit, and a newly opened user window loaded the persisted state. Reading only the JSON file is insufficient.
 
@@ -95,7 +95,7 @@ Exercise user controls and real host-session paths, not internal settings setter
 
 Both helpers use `finally` on success and failure: close or kill only the process object they started, remove its uniquely named scratch data, restore the announcement helper's prior environment, and write `cleanup.json`. Close and reopen are tracked sequentially. Evidence folders are outside scratch and survive teardown.
 
-After every attempt, require `cleanup.json` to report `scratchRemoved: true` and `processExited: true`. Confirm `actions.txt` and the successful feature's proof files still exist. For forced interruption that prevents `finally`, verify the manifest PID **and start time and executable path**, stop only that owned process, and remove only the manifest's unique scratch directory. Keep the evidence. Never stop processes by name, redeploy plugins, reload host sessions, or remove runtime assets for verification cleanup.
+After every attempt, require `cleanup.json` to report `scratchRemoved: true` and `processExited: true`. Confirm `actions.txt` and the successful feature's proof files still exist. For forced interruption that prevents `finally`, verify the manifest PID **and start time and executable path**, stop only that owned process, and remove only the manifest's unique scratch directory. Review the evidence before removing the current run's evidence folder. Never stop processes by name, redeploy plugins, reload host sessions, or remove runtime assets for verification cleanup.
 
 ## Helpers
 

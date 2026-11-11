@@ -9,7 +9,7 @@ $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot/bundle/install.ps1"
 . "$PSScriptRoot/bundle-licenses.ps1"
 if (-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 on Windows is required' }
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'temp/bundles' }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path ([IO.Path]::GetTempPath()) 'herald/bundles' }
 Assert-NoLinks $OutputDirectory
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $stage = Join-Path $OutputDirectory ('.herald-stage-' + [guid]::NewGuid())

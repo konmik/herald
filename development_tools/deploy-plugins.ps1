@@ -20,7 +20,7 @@ try {
     $zip = & "$PSScriptRoot/build-bundle.ps1"
     $zip = @($zip)[-1]
     Invoke-Checked 'pwsh' @('-NoProfile', '-File', (Join-Path $Repository '.claude/skills/verify-herald/scripts/install-bundle.ps1'), '-Archive', $zip)
-    $extract = Join-Path $Repository ('temp/bundles/.herald-extract-' + [guid]::NewGuid())
+    $extract = Join-Path ([IO.Path]::GetTempPath()) ('herald/bundles/.herald-extract-' + [guid]::NewGuid())
     try {
         Expand-Archive -LiteralPath $zip -DestinationPath $extract
         & "$extract/install.ps1" -InstallDirectory $InstallDirectory -ClaudeConfigDirectory $ClaudeConfigDirectory -OpenCodeConfigDirectory $OpenCodeConfigDirectory -PiAgentDirectory $PiAgentDirectory -ReloadOpenCode:$ReloadOpenCode

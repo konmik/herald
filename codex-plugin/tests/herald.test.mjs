@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { ANNOUNCEMENT_GRACE, codexAncestor, completedExecutions, createHerald } from '../hooks/herald.mjs'
 
@@ -46,7 +47,7 @@ async function runTask(host, herald, seconds) {
 }
 
 async function nativeHookFixture(action) {
-  const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-lock-', import.meta.url)))
+  const directory = mkdtempSync(join(tmpdir(), 'herald-codex-lock-'))
   const statePath = join(directory, 'sessions', 's1.json')
   const children = []
   const start = (id, pause = false) => {
@@ -113,7 +114,7 @@ describe('codex hooks', () => {
   }, 25_000)
 
   test('concurrent native hook processes retain every background task', async () => {
-    const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-lock-', import.meta.url)))
+    const directory = mkdtempSync(join(tmpdir(), 'herald-codex-lock-'))
     const script = fileURLToPath(new URL('../hooks/herald.mjs', import.meta.url))
     const run = input => new Promise((done, fail) => {
       const child = spawn(process.execPath, [script], { env: { ...process.env, PLUGIN_ROOT: fileURLToPath(new URL('..', import.meta.url)), PLUGIN_DATA: directory, HERALD_BINARY: process.execPath }, stdio: ['pipe', 'ignore', 'pipe'] })
@@ -141,7 +142,7 @@ describe('codex hooks', () => {
   })
 
   test.skipIf(process.platform !== 'win32')('Windows hook commands run in PowerShell and cmd with spaces in the plugin path', () => {
-    const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex hook ', import.meta.url)))
+    const directory = mkdtempSync(join(tmpdir(), 'herald-codex hook '))
     const config = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
     const commands = new Set(Object.values(config.hooks).flatMap(entries => entries.flatMap(entry => entry.hooks.map(hook => hook.commandWindows))))
     try {
@@ -527,7 +528,7 @@ describe('completed Codex executions', () => {
   const header = (id = sessionID) => ({ type: 'session_meta', payload: { id } })
   const terminal = (id, status = 'completed', exit_code = 0) => ({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id, status, exit_code } } })
   const fixture = async action => {
-    const directory = mkdtempSync(fileURLToPath(new URL('../../temp/codex-rollout-', import.meta.url)))
+    const directory = mkdtempSync(join(tmpdir(), 'herald-codex-rollout-'))
     const sessions = join(directory, 'sessions')
     const write = (name, rows, tail = '') => {
       const path = join(directory, name)

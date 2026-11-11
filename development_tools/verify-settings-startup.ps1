@@ -1,6 +1,6 @@
 param(
     [string]$Binary = 'native-announcer/target/debug/herald.exe',
-    [string]$Evidence = ('temp/verification/settings-startup-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/settings-startup-' + [guid]::NewGuid()))
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing

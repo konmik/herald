@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][ValidateSet('original', 'storm', 'electric', 'plasma')][string]$Style,
-    [string]$Evidence = ('temp/verification/lightning-' + $Style + '-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/lightning-' + $Style + '-' + [guid]::NewGuid()))
 )
 
 $ErrorActionPreference = 'Stop'

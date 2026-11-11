@@ -145,7 +145,7 @@ def main():
     original_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     previous_accessibility = accessibility_status(connection)
-    evidence_root = root / "temp/verification"
+    evidence_root = Path(tempfile.gettempdir()) / "herald/verification"
     evidence_root.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="linux-settings-", dir=evidence_root))
     log = (evidence / "runtime.log").open("w")

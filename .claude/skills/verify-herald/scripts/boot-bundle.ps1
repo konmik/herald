@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$AppDirectory,
     [string]$PluginDirectory,
-    [string]$Evidence = ('temp/verification/bundle-boot-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/bundle-boot-' + [guid]::NewGuid()))
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))

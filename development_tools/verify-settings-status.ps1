@@ -1,6 +1,6 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/herald.exe'),
-    [string]$Evidence = ('temp/verification/settings-status-' + [guid]::NewGuid())
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/settings-status-' + [guid]::NewGuid()))
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))

@@ -1,6 +1,7 @@
 import { afterAll, expect, mock, spyOn, test } from "bun:test"
-import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 type Event = { type: string; id: string; created: number; data: Record<string, unknown> }
@@ -32,12 +33,11 @@ afterAll(() => {
 })
 
 test("an installed OpenCode package ignores a checkout executable override", async () => {
-  const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
-  mkdirSync(temporary, { recursive: true })
-  const directory = mkdtempSync(join(temporary, "installed-opencode-"))
+  const directory = mkdtempSync(join(tmpdir(), "herald-installed-opencode-"))
   const previousExternal = process.env.HERALD_EXTERNAL_COMPANION
   try {
     delete process.env.HERALD_EXTERNAL_COMPANION
+    symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(directory, "node_modules"), "junction")
     mkdirSync(join(directory, "opencode-plugin"))
     mkdirSync(join(directory, "claude-plugin", "scripts"), { recursive: true })
     const source = fileURLToPath(new URL("..", import.meta.url))
@@ -180,9 +180,7 @@ test("cancels generation during readiness checking and allows the next summary",
 })
 
 test("sends the saved prompt unchanged and rereads it", async () => {
-  const temporary = fileURLToPath(new URL("../../temp/", import.meta.url))
-  mkdirSync(temporary, { recursive: true })
-  const data = mkdtempSync(join(temporary, "summary-prompt-"))
+  const data = mkdtempSync(join(tmpdir(), "herald-summary-prompt-"))
   const previousData = process.env.HERALD_DATA
   const firstPrompt = "Report the task outcome.\nUnicode: Ω 😀\nBe explicit and concise."
   const secondPrompt = "Describe the result in one sentence."

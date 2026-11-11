@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--silent", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    evidence = Path(tempfile.mkdtemp(prefix="linux-playback-", dir=root / "temp/verification"))
+    evidence = Path(tempfile.mkdtemp(prefix="herald-linux-playback-"))
     data = Path(tempfile.mkdtemp(prefix="herald-playback-", dir="/tmp/opencode"))
     env = dict(os.environ, HERALD_DATA=str(data))
     settings = {"scheduleEnabled": False, "volume": 0 if args.silent else 60, "selectedCharacter": "hatted-herald-07"}

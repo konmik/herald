@@ -87,12 +87,12 @@ PowerShell 7 is required. Build on Windows with Bun, Node and Cargo matching the
 pnpm run build:bundle
 ```
 
-The release ZIP is written to `temp/bundles`. Building reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The voice engine and model are not bundled. The separate build cache keeps release builds away from the running checkout executable.
+The release ZIP is written to `herald/bundles` in the system temporary directory. Building reuses the Cargo cache in `native-announcer/target/bundle`; it does not replace the checkout executable or install anything. The voice engine and model are not bundled. The separate build cache keeps release builds away from the running checkout executable.
 
 To repackage an already extracted complete bundle without rebuilding native code or downloading assets:
 
 ```powershell
-pwsh -NoProfile -File development_tools/build-bundle.ps1 -PayloadDirectory .\extracted-bundle -OutputDirectory .\temp\bundles
+pwsh -NoProfile -File development_tools/build-bundle.ps1 -PayloadDirectory .\extracted-bundle -OutputDirectory (Join-Path ([IO.Path]::GetTempPath()) 'herald/bundles')
 ```
 
 Repackaging refreshes the installer and its helpers and generates a new manifest in a staging copy. The source bundle is unchanged.

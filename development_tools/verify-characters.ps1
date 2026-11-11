@@ -1,6 +1,6 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/debug/herald.exe'),
-    [string]$Evidence = (Join-Path (Split-Path $PSScriptRoot -Parent) ('temp/verification/characters-' + [guid]::NewGuid())),
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/characters-' + [guid]::NewGuid())),
     [switch]$SettingsOnly,
     [switch]$VideoPickerOnly,
     [switch]$CharacterPromptsOnly,

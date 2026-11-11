@@ -1,6 +1,6 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald.exe'),
-    [string]$Evidence = ('temp/verification/gpui-settings-' + [guid]::NewGuid()),
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/gpui-settings-' + [guid]::NewGuid())),
     [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Chimera', 'Announcements', 'Lightning', 'All')]
     [string]$Feature = 'All'
 )

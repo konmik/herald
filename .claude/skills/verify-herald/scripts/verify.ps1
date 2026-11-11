@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Settings', 'Quiet', 'Output', 'Preview', 'VoicePreview', 'Announcements', 'SilentSound')][string]$Feature = 'Settings',
-    [string]$Evidence = ('temp/verification/' + [guid]::NewGuid()),
+    [string]$Evidence = (Join-Path ([IO.Path]::GetTempPath()) ('herald/verification/' + [guid]::NewGuid())),
     [string]$AppDirectory,
     [string]$ClaudePluginDirectory,
     [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode',

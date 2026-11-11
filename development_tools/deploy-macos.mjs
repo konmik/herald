@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { piAgentDirectory, registerPi } from './bundle/register-pi.mjs'
@@ -369,7 +369,7 @@ async function removeLegacySettings(applications, backupDirectory) {
 }
 
 function verifyInstalledSettings(bundle) {
-  const evidence = join(root, 'temp/verification', `macos-installed-${randomUUID()}`)
+  const evidence = join(tmpdir(), 'herald/verification', `macos-installed-${randomUUID()}`)
   const result = spawnSync('python3', [join(root, 'development_tools/verify-macos-settings.py'), '--feature', 'lightning', '--binary', join(bundle, 'Contents/MacOS', APP.name), '--evidence', evidence], { stdio: ['ignore', 'ignore', 'inherit'] })
   // Exit 2 means macOS has not granted Accessibility or Screen Recording to this terminal.
   if (result.status === 2) return `skipped: Accessibility or Screen Recording is not granted (${evidence})`
@@ -511,7 +511,7 @@ async function main() {
   }
   run('cargo', ['build', '--release', '--locked', '-j', '6', '--manifest-path', join(root, 'native-announcer/Cargo.toml')], { cwd: root })
   const binary = join(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'native-announcer/target'), 'release/herald')
-  const stage = join(root, 'temp/bundles', `.herald-stage-macos-${randomUUID()}`)
+  const stage = join(tmpdir(), 'herald/bundles', `.herald-stage-macos-${randomUUID()}`)
   await mkdir(stage, { recursive: true })
   const summary = { applications: [], payload: undefined, stopped: [], claude: 'skipped', codex: 'skipped', openCode: 'skipped', pi: 'skipped', backups: null }
   try {
@@ -520,7 +520,7 @@ async function main() {
     await verifyPayload(payload, arch)
     const icon = await makeIcon(stage)
     const bundle = await makeApplication(join(stage, 'apps'), { binary, icon, payload, version })
-    const backupDirectory = join(root, 'temp/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
+    const backupDirectory = join(tmpdir(), 'herald/deploy-backups', `macos-${new Date().toISOString().replaceAll(':', '-')}`)
     await mkdir(backupDirectory, { recursive: true })
     summary.backups = backupDirectory
     const installedPayload = join(options.applications, 'Herald.app/Contents/Resources/herald')
