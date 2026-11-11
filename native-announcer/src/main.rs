@@ -14,6 +14,7 @@ mod linux_surface;
 #[cfg(target_os = "macos")]
 mod macos_surface;
 mod platform;
+mod pixels;
 mod private;
 mod profile;
 mod benchmark;
@@ -27,6 +28,8 @@ mod video;
 mod animation;
 mod chimera;
 mod window;
+#[cfg(target_os = "windows")]
+mod windows_surface;
 
 use chrono::Timelike;
 use platform::{Signal, Speech, SpeechEvent};
@@ -345,6 +348,8 @@ fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut alpha_surface = windows_surface::Surface::new(window.hwnd() as *mut _);
     #[cfg(target_os = "macos")]
     let mut surface = macos_surface::Surface::new(&window)?;
     #[cfg(target_os = "linux")]
@@ -504,21 +509,28 @@ fn run() -> Result<(), String> {
                     let notification = if demo_mode && inbox.queue.front().is_some_and(|n| n.session_id == "demo") { inbox.queue.pop_front() } else { inbox.next(state::timestamp()) };
                     if let Some(notification) = notification {
                         state::timing(format!("notification_selected id={} completed={}", notification.id, notification.completed));
+                        let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
+                        let style = match character.visual { characters::ResolvedVisual::Chimera => render::AnnouncementStyle::Chimera, characters::ResolvedVisual::Video(_) => render::AnnouncementStyle::Video };
+                        renderer.set_style(style);
                         let lightning = capture_lightning.unwrap_or(settings.lightning);
                         renderer.set_lightning(lightning);
                         renderer.text = render::display_text(&notification.text);
                         let title = render::display_text(&notification.title);
                         renderer.title = if title.is_empty() { "Untitled session".into() } else { title };
                         let monitor = window.current_monitor().or_else(|| window.primary_monitor());
-                        let scale = monitor.as_ref().map_or_else(|| window.scale_factor(), |monitor| monitor.scale_factor());
-                        let max_height = monitor.as_ref().map(|m| (m.size().height as f64 / m.scale_factor() * 0.8) as u32).unwrap_or(700);
-                        let height = renderer.announcement_height(scale as f32, max_height);
+                        let scale = monitor.as_ref().map_or_else(|| window.scale_factor(), |monitor| style.fit_scale(monitor.size().width, monitor.size().height, monitor.scale_factor()));
+                        let max_height = monitor.as_ref().map(|m| {
+                            let logical_height = m.size().height as f64 / scale;
+                            match style { render::AnnouncementStyle::Chimera => (logical_height - 80.0) as u32, render::AnnouncementStyle::Video => (logical_height * 0.8) as u32 }
+                        }).unwrap_or(700);
+                        let layout = renderer.announcement_layout(scale as f32, max_height);
+                        let height = layout.height;
                         let position = monitor.as_ref().map(|monitor| {
                             let position = monitor.position();
-                            PhysicalPosition::new(position.x + monitor.size().width as i32 - (336.0 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32)
+                            PhysicalPosition::new(position.x + monitor.size().width as i32 - ((layout.width + 16) as f64 * scale) as i32, position.y + monitor.size().height as i32 - ((height + 64) as f64 * scale) as i32)
                         }).unwrap_or_else(|| PhysicalPosition::new(0, 0));
-                        let placement = CardPlacement { rect: PhysicalRect { x: position.x, y: position.y,
-                            width: (320.0 * scale) as u32, height: (height as f64 * scale) as u32 }, scale: scale as f32 };
+                        let placement = CardPlacement { style, rect: PhysicalRect { x: position.x, y: position.y,
+                            width: (f64::from(layout.width) * scale) as u32, height: (height as f64 * scale) as u32 }, scale: scale as f32 };
                         if let Err(error) = platform::physical_bounds(&window, placement.rect, placement.scale) {
                             state::log(&data, error); *control_flow = ControlFlow::Exit; return;
                         }
@@ -533,7 +545,6 @@ fn run() -> Result<(), String> {
                         });
                         #[cfg(not(target_os = "windows"))]
                         let entrance = None;
-                        let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
                         state::timing(format!("video_load_start id={}", notification.id));
                         let mut animation = match animation::Animation::open(&character.visual) {
@@ -680,10 +691,18 @@ fn run() -> Result<(), String> {
                                 platform::card_region(&window, active.placement.rect);
                             }
                             profile::time(profile::Stage::Present, || -> Result<(), String> {
+                                #[cfg(target_os = "windows")]
+                                if active.placement.style == render::AnnouncementStyle::Chimera {
+                                    return alpha_surface.present(width.get(), height.get(), &pixels);
+                                }
                                 surface.resize(width, height).map_err(|e| e.to_string())?;
                                 let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
                                 buffer.copy_from_slice(&pixels);
-                                buffer.present().map_err(|e| e.to_string())
+                                #[cfg(target_os = "windows")]
+                                let result = buffer.present();
+                                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                                let result = buffer.present(active.placement.style.pixel_format());
+                                result.map_err(|e| e.to_string())
                             })?;
                             if let Some(log) = &mut frame_log {
                                 let phase = render::announcement_phase(transition_time, active.end.is_some());
@@ -707,7 +726,7 @@ fn run() -> Result<(), String> {
                                 if let Some(path) = snapshot.take() {
                                     let preview = image::RgbaImage::from_fn(viewport.width, viewport.height, |x, y| {
                                         let color = pixels[(y * viewport.width + x) as usize];
-                                        image::Rgba([(color >> 16) as u8, (color >> 8) as u8, color as u8, if color == 0xff00ff { 0 } else { 255 }])
+                                        active.placement.style.pixel_format().rgba(color)
                                     });
                                     preview.save(path).map_err(|e| e.to_string())?;
                                 }

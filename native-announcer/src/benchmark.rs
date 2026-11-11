@@ -91,7 +91,7 @@ fn announcement(assets: &Path, settings: &Settings, preset: &str, options: &Opti
             #[cfg(target_os = "macos")]
             let layer = profile::time(profile::Stage::Present, || {
                 surface.copy_from_slice(&pixels);
-                crate::macos_surface::layer_pixels(&surface)
+                crate::macos_surface::layer_pixels(&surface, crate::pixels::PixelFormat::ColorKeyRgb)
             });
             #[cfg(not(target_os = "macos"))]
             let layer = pixels.clone().into_boxed_slice();

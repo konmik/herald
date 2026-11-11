@@ -162,7 +162,7 @@ impl Head {
         let shape = Shape::new(&outline, false);
         let shell = shell_lines(&shape, &anatomy);
         let (fixed, jaw) = rest_lines(&tract, &shape);
-        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 255])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), last_artic: None }
+        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 0])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), last_artic: None }
     }
 
     pub(super) fn draw(&mut self, pose: &super::Pose, elapsed: f64) {
@@ -175,12 +175,18 @@ impl Head {
         let level = if pose.level.is_finite() { f64::from(pose.level).clamp(0.0, 1.0) } else { 0.0 };
         let pitch = if level > 0.001 && pose.f0.is_finite() && pose.f0 > 0.0 { (pose.f0 / 110.0).log2().clamp(-1.0, 1.0) } else { 0.0 };
         let camera = Camera::new(self.image.width(), time, level, pitch);
-        self.image.pixels_mut().for_each(|p| *p = Rgba([0, 0, 0, 255]));
+        self.image.pixels_mut().for_each(|p| *p = Rgba([0, 0, 0, 0]));
         for line in self.fixed.iter().chain(self.moving.iter()) {
             draw_line(&mut self.image, line, &camera);
         }
         for line in eye_lines(time, level, pitch) {
             draw_line(&mut self.image, &line, &camera);
+        }
+        for pixel in self.image.pixels_mut() {
+            let alpha = u16::from(pixel.0[3]);
+            if alpha > 0 {
+                for channel in &mut pixel.0[..3] { *channel = (u16::from(*channel) * 255 / alpha).min(255) as u8; }
+            }
         }
     }
 
@@ -766,7 +772,7 @@ struct Camera {
 
 impl Camera {
     fn new(size: u32, time: f64, level: f64, pitch: f64) -> Self {
-        let azimuth = PI - 0.62 + 0.035 * (time * 0.31).sin();
+        let azimuth = PI - 0.62 + 0.075 * (time * 0.70).sin();
         let elevation: f64 = 0.2;
         let tangent = (12.0 * PI / 180.0).tan();
         Self {
@@ -776,8 +782,8 @@ impl Camera {
             distance: 1.1 * 15.2 / tangent,
             focal: size as f64 / (2.0 * tangent),
             center: size as f64 / 2.0,
-            nod: 0.014 * (time * 0.75).sin() + pitch * level * 0.045,
-            tilt: 0.012 * (time * 0.51).sin(),
+            nod: 0.035 * (time * 1.10).sin() + pitch * level * 0.045,
+            tilt: 0.022 * (time * 0.65).sin(),
         }
     }
 
@@ -792,20 +798,28 @@ impl Camera {
     }
 }
 
+fn beam_width(width: f64) -> f64 {
+    [0.6_f64, 0.85, 1.05, 1.3, 1.6, 2.1].into_iter().fold(0.6, |best, candidate| {
+        if (candidate - width).abs() < (best - width).abs() { candidate } else { best }
+    })
+}
+
 fn draw_line(image: &mut RgbaImage, line: &Line, camera: &Camera) {
     if line.points.len() < 2 || line.alpha <= 0.0 { return; }
-    let size_scale = (image.width() as f64 / 256.0).max(0.7);
-    let width = line.width * size_scale;
+    let size_scale = image.width() as f64 / f64::from(super::Head::LOGICAL_SIZE);
+    let width = beam_width(line.width) * size_scale;
     let radius = width * 0.5;
-    let glow = (width * 1.8).max(1.35);
+    let hot_radius = beam_width(line.width * 0.42) * size_scale * 0.5;
+    let glow = (width * 1.8).max(1.35 * size_scale);
+    let reach = glow.max(radius + 0.5);
     let mut before = camera.project(line.points[0]);
     for &point in &line.points[1..] {
         let after = camera.project(point);
         if before.iter().chain(after.iter()).all(|value| value.is_finite()) {
-            let x0 = (before[0].min(after[0]) - glow).floor().max(0.0) as u32;
-            let x1 = (before[0].max(after[0]) + glow).ceil().clamp(0.0, image.width().saturating_sub(1) as f64) as u32;
-            let y0 = (before[1].min(after[1]) - glow).floor().max(0.0) as u32;
-            let y1 = (before[1].max(after[1]) + glow).ceil().clamp(0.0, image.height().saturating_sub(1) as f64) as u32;
+            let x0 = (before[0].min(after[0]) - reach).floor().max(0.0) as u32;
+            let x1 = (before[0].max(after[0]) + reach).ceil().clamp(0.0, image.width().saturating_sub(1) as f64) as u32;
+            let y0 = (before[1].min(after[1]) - reach).floor().max(0.0) as u32;
+            let y1 = (before[1].max(after[1]) + reach).ceil().clamp(0.0, image.height().saturating_sub(1) as f64) as u32;
             let dx = after[0] - before[0];
             let dy = after[1] - before[1];
             let squared_length = (dx * dx + dy * dy).max(1e-9);
@@ -815,14 +829,19 @@ fn draw_line(image: &mut RgbaImage, line: &Line, camera: &Camera) {
                     let py = y as f64 + 0.5 - before[1];
                     let t = ((px * dx + py * dy) / squared_length).clamp(0.0, 1.0);
                     let distance = (px - t * dx).hypot(py - t * dy);
-                    if distance > glow { continue; }
-                    let core = (radius + 0.65 - distance).clamp(0.0, 1.0);
-                    let halo = 0.24 * (1.0 - distance / glow).powi(2);
+                    if distance > reach { continue; }
+                    let core = (radius + 0.5 - distance).clamp(0.0, width.min(1.0));
+                    let halo = 0.24 * (1.0 - distance / glow).max(0.0).powi(2);
                     let opacity = core.max(halo) * line.alpha * (before[2] + (after[2] - before[2]) * t);
-                    let hot = if line.hot { 0.55 * (radius * 0.42 + 0.4 - distance).clamp(0.0, 1.0) } else { 0.0 };
+                    let hot = if line.hot {
+                        (hot_radius + 0.5 - distance).clamp(0.0, (hot_radius * 2.0).min(1.0))
+                            * line.alpha * (before[2] + (after[2] - before[2]) * t)
+                    } else { 0.0 };
                     let pixel = image.get_pixel_mut(x, y);
+                    pixel.0[3] = pixel.0[3].max((opacity.clamp(0.0, 1.0) * 255.0) as u8);
                     for (channel, &color) in pixel.0[..3].iter_mut().zip(line.color.iter()) {
-                        let value = (f64::from(color) + (255.0 - f64::from(color)) * hot) * opacity;
+                        let color = f64::from(color);
+                        let value = (color * opacity).max((color + (255.0 - color) * 0.55) * hot);
                         *channel = (*channel).max(value.clamp(0.0, 255.0) as u8);
                     }
                 }

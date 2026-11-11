@@ -175,8 +175,10 @@ pub struct Head {
 }
 
 impl Head {
+    pub const LOGICAL_SIZE: f32 = 336.0;
+
     pub fn new() -> Self {
-        let mut renderer = head::Head::new(128);
+        let mut renderer = head::Head::new(384);
         renderer.draw(&Pose::neutral(), 0.0);
         Self { renderer, playback: None, capture_start: None, frames: 0, sample_position: 0 }
     }

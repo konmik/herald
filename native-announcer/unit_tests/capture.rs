@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn transparent_frames_composite_edges_onto_the_capture_background() {
+    let directory = std::env::temp_dir().join("opencode").join(format!("herald-alpha-capture-{}-{}", std::process::id(), crate::state::timestamp()));
+    let card = crate::render::CardPlacement { style: crate::render::AnnouncementStyle::Chimera,
+        rect: crate::render::PhysicalRect { x: 0, y: 0, width: 2, height: 1 }, scale: 1.0 };
+    let mut frames = Frames::new(&directory).unwrap();
+    frames.save_scene(&[0, 0x80402010], 2, 1, Duration::ZERO, None, card, None, card.rect, Some(0)).unwrap();
+    frames.finish().unwrap();
+    let image = image::open(directory.join("frame-000000.png")).unwrap().to_rgb8();
+    assert_eq!(image.get_pixel(0, 0).0, [32; 3]);
+    assert_eq!(image.get_pixel(1, 0).0, [79, 47, 31]);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn exports_only_rendered_pixels_with_a_plain_background_and_timing() {
     let directory = std::env::temp_dir().join("opencode").join(format!("herald-frames-{}-{}", std::process::id(), crate::state::timestamp()));
     let mut frames = Frames::new(&directory).unwrap();
@@ -24,7 +38,7 @@ fn exports_only_rendered_pixels_with_a_plain_background_and_timing() {
 #[test]
 fn expanded_and_restored_captures_keep_physical_geometry_and_the_sampled_phase() {
     let directory = std::env::temp_dir().join("opencode").join(format!("herald-scene-{}", std::process::id()));
-    let card = crate::render::CardPlacement { rect: crate::render::PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
+    let card = crate::render::CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: crate::render::PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
     let scene = crate::render::EntranceScene::new(crate::render::PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 }, card, 1234, crate::lightning::LightningSettings::default());
     let mut frames = Frames::new(&directory).unwrap();
     let pixels = vec![0x123456; scene.canvas.width as usize * scene.canvas.height as usize];

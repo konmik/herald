@@ -60,20 +60,16 @@ impl DerefMut for Buffer<'_> {
     fn deref_mut(&mut self) -> &mut [u32] { &mut self.0.pixels }
 }
 
-fn argb(color: u32) -> u32 {
-    if color == 0xff00ff { 0 } else { color | 0xff000000 }
-}
-
 /// The premultiplied ARGB copy handed to Core Animation, with the transparency key cleared.
-pub fn layer_pixels(pixels: &[u32]) -> Box<[u32]> { pixels.iter().map(|color| argb(*color)).collect() }
+pub fn layer_pixels(pixels: &[u32], format: crate::pixels::PixelFormat) -> Box<[u32]> { pixels.iter().map(|color| format.argb(*color)).collect() }
 
 impl Buffer<'_> {
-    pub fn present(self) -> Result<(), String> {
+    pub fn present(self, format: crate::pixels::PixelFormat) -> Result<(), String> {
         unsafe extern "C-unwind" fn release(_info: *mut c_void, data: NonNull<c_void>, size: usize) {
             drop(unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(data.cast::<u32>().as_ptr(), size / 4)) });
         }
         let surface = self.0;
-        let pixels = layer_pixels(&surface.pixels);
+        let pixels = layer_pixels(&surface.pixels, format);
         let length = pixels.len() * 4;
         let provider = unsafe { CGDataProvider::with_data(ptr::null_mut(), Box::into_raw(pixels).cast(), length, Some(release)) }
             .ok_or("Could not wrap the announcement pixels.")?;

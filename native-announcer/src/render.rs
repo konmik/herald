@@ -5,6 +5,60 @@ use std::time::Duration;
 use crate::settings::{FontPreference, Settings};
 use crate::lightning::LightningSettings;
 use crate::profile::{self, Stage};
+use crate::pixels::PixelFormat;
+
+mod chimera;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnnouncementStyle { Video, Chimera }
+
+#[derive(Clone, Copy, Debug)]
+pub struct AnnouncementLayout {
+    pub width: u32,
+    pub height: u32,
+    body: [f32; 4],
+    title: [f32; 4],
+    portrait: [f32; 4],
+    impact_right: [f32; 2],
+    impact_bottom: [f32; 2],
+    bubble_anchor: [f32; 2],
+}
+
+impl AnnouncementStyle {
+    pub fn pixel_format(self) -> PixelFormat {
+        match self { Self::Video => PixelFormat::ColorKeyRgb, Self::Chimera => PixelFormat::PremultipliedArgb }
+    }
+
+    pub fn fit_scale(self, monitor_width: u32, monitor_height: u32, requested: f64) -> f64 {
+        match self {
+            Self::Video => requested,
+            Self::Chimera => requested.min(f64::from(monitor_width) / 632.0).min(f64::from(monitor_height) / 512.0),
+        }
+    }
+
+    fn layout(self, height: u32, title_size: u16) -> AnnouncementLayout {
+        let h = height as f32;
+        match self {
+            Self::Video => AnnouncementLayout {
+                width: 320, height,
+                body: [26.0, 26.0, 268.0, h - 198.0],
+                title: [26.0, h - 188.0, 268.0, h - 180.0 + f32::from(title_size)],
+                portrait: [188.0, h - 140.0, 128.0, 128.0],
+                impact_right: [315.5, h - 70.0], impact_bottom: [252.0, h - 12.5],
+                bubble_anchor: [252.0, h - 134.0],
+            },
+            Self::Chimera => AnnouncementLayout {
+                width: 600, height,
+                body: [65.0, 90.0 + f32::from(title_size) * 1.3, 288.0, h - 178.0],
+                title: [65.0, 71.0, 288.0, 71.0 + f32::from(title_size) * 1.3],
+                portrait: [325.0, h - 348.0, crate::chimera::Head::LOGICAL_SIZE, crate::chimera::Head::LOGICAL_SIZE],
+                impact_right: [585.0, h - 168.0], impact_bottom: [508.0, h - 39.0],
+                bubble_anchor: [393.0, h - 158.0],
+            },
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PhysicalRect {
@@ -26,6 +80,7 @@ impl PhysicalRect {
 pub struct CardPlacement {
     pub rect: PhysicalRect,
     pub scale: f32,
+    pub style: AnnouncementStyle,
 }
 
 pub struct EntranceScene {
@@ -110,8 +165,9 @@ impl EntranceScene {
         let left = card.rect.x as f32;
         let bottom = card.rect.bottom() as f32;
         let from_right = seed & 1 != 0;
-        let impact = if from_right { [left + 315.5 * scale, bottom - 70.0 * scale] }
-            else { [left + 252.0 * scale, bottom - 12.5 * scale] };
+        let layout = card.style.layout((card.rect.height as f32 / scale).round() as u32, 14);
+        let local_impact = if from_right { layout.impact_right } else { layout.impact_bottom };
+        let impact = [left + local_impact[0] * scale, card.rect.y as f32 + local_impact[1] * scale];
         let source = if from_right {
             [monitor.right() as f32 - 1.0, (bottom + (40 + seed % 101) as f32 * scale).min(monitor.bottom() as f32 - 1.0)]
         } else {
@@ -208,7 +264,7 @@ impl EntranceScene {
             }
             distance += lengths[index];
         }
-        paint.composite(buffer);
+        paint.composite(buffer, self.card.style.pixel_format());
     }
 }
 
@@ -391,7 +447,7 @@ impl LightningPaint {
         distance
     }
 
-    fn composite(mut self, buffer: &mut [u32]) {
+    fn composite(mut self, buffer: &mut [u32], format: PixelFormat) {
         self.rasterize();
         let LightningSettings { halo_color: halo, core_color: core, .. } = self.lightning;
         use rayon::prelude::*;
@@ -399,9 +455,9 @@ impl LightningPaint {
         profile::time(Stage::Composite, || buffer.par_chunks_mut(band).zip(self.glow.par_chunks(band)).for_each(|(pixels, strengths)| {
             for (pixel, &strength) in pixels.iter_mut().zip(strengths) {
                 if strength == 0.0 { continue; }
-                let background = if *pixel == 0xff00ff { 0x080e20 } else { *pixel };
+                let background = if format == PixelFormat::ColorKeyRgb && *pixel == 0xff00ff { 0x080e20 } else { *pixel };
                 let color = blend(halo, core, (strength.min(1.0).powi(3) * 255.0) as u32);
-                *pixel = blend(background, color, (strength.min(1.0) * 255.0) as u32);
+                *pixel = format.over(background, color, (strength.min(1.0) * 255.0) as u32);
             }
         }));
     }
@@ -484,8 +540,11 @@ pub fn display_text(text: &str) -> String {
 
 pub struct Renderer {
     catalog: crate::fonts::FontCatalog,
+    style: AnnouncementStyle,
     body_font: Font,
     title_font: Font,
+    saved_body_preference: FontPreference,
+    saved_title_preference: FontPreference,
     body_preference: FontPreference,
     title_preference: FontPreference,
     pub text: String,
@@ -499,6 +558,7 @@ pub struct Renderer {
     glyph_cache: std::cell::RefCell<std::collections::HashMap<TextKey, std::sync::Arc<Vec<CachedGlyph>>>>,
     template: Option<CardTemplate>,
     portrait_warp: Option<(usize, Vec<PortraitTexel>)>,
+    chimera_template: Option<chimera::Frame>,
 }
 
 /// Identifies one laid-out text block; its glyph rasters do not change between frames.
@@ -508,6 +568,9 @@ struct TextKey {
     text: String,
     size: u32,
     y: u32,
+    x: u32,
+    width: u32,
+    line_height: u32,
     max_height: u32,
     scale: u32,
 }
@@ -524,9 +587,10 @@ struct CachedGlyph {
 fn layout_glyphs(font: &Font, block: &TextBlock<'_>, scale: f32) -> Vec<CachedGlyph> {
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.reset(&LayoutSettings {
-        x: 26.0 * scale,
+        x: block.x * scale,
         y: block.y * scale,
-        max_width: Some(268.0 * scale),
+        max_width: Some(block.width * scale),
+        line_height: block.line_height.map(|height| height * scale / font.horizontal_line_metrics(block.size * scale).unwrap().new_line_size).unwrap_or(1.0),
         ..LayoutSettings::default()
     });
     layout.append(&[font], &TextStyle::new(block.text, block.size * scale, 0));
@@ -601,7 +665,10 @@ impl CardTemplate {
 
 struct TextBlock<'a> {
     text: &'a str,
+    x: f32,
     y: f32,
+    width: f32,
+    line_height: Option<f32>,
     size: f32,
     color: u32,
     max_height: f32,
@@ -620,8 +687,11 @@ impl Renderer {
         let title_font = catalog.get(&settings.announcement_title_font.family);
         Ok(Self {
             catalog,
+            style: AnnouncementStyle::Video,
             body_font,
             title_font,
+            saved_body_preference: settings.announcement_body_font.clone(),
+            saved_title_preference: settings.announcement_title_font.clone(),
             body_preference: settings.announcement_body_font.clone(),
             title_preference: settings.announcement_title_font.clone(),
             text: String::new(),
@@ -635,15 +705,35 @@ impl Renderer {
             glyph_cache: Default::default(),
             template: None,
             portrait_warp: None,
+            chimera_template: None,
         })
     }
 
     pub fn set_preferences(&mut self, body: &FontPreference, title: &FontPreference) {
-        if &self.body_preference == body && &self.title_preference == title { return; }
-        self.body_preference = body.clone();
-        self.title_preference = title.clone();
-        self.body_font = self.catalog.get(&body.family);
-        self.title_font = self.catalog.get(&title.family);
+        if &self.saved_body_preference == body && &self.saved_title_preference == title { return; }
+        self.saved_body_preference = body.clone();
+        self.saved_title_preference = title.clone();
+        self.update_fonts();
+    }
+
+    pub fn set_style(&mut self, style: AnnouncementStyle) {
+        if self.style == style { return; }
+        self.style = style;
+        self.update_fonts();
+        self.contour_cache = None;
+    }
+
+    fn update_fonts(&mut self) {
+        let defaults = Settings::default();
+        self.body_preference = if self.style == AnnouncementStyle::Chimera && self.saved_body_preference == defaults.announcement_body_font {
+            FontPreference::new("Berkeley Mono", 14)
+        } else { self.saved_body_preference.clone() };
+        self.title_preference = if self.style == AnnouncementStyle::Chimera && self.saved_title_preference == defaults.announcement_title_font {
+            FontPreference::new("Berkeley Mono", 12)
+        } else { self.saved_title_preference.clone() };
+        self.body_font = self.catalog.get(&self.body_preference.family);
+        self.title_font = self.catalog.get(&self.title_preference.family);
+        self.glyph_cache.borrow_mut().clear();
     }
 
     pub fn set_lightning(&mut self, lightning: LightningSettings) { self.lightning = lightning; }
@@ -658,16 +748,28 @@ impl Renderer {
 
     pub fn message_height(&self, scale: f32) -> u32 {
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+        let size = f32::from(self.body_preference.size) * scale;
         layout.reset(&LayoutSettings {
-            max_width: Some(268.0 * scale),
+            max_width: Some(self.style.layout(432, self.title_preference.size).body[2] * scale),
+            line_height: if self.style == AnnouncementStyle::Chimera { size * 1.65 / self.body_font.horizontal_line_metrics(size).unwrap().new_line_size } else { 1.0 },
             ..LayoutSettings::default()
         });
         layout.append(&[&self.body_font], &TextStyle::new(&self.text, f32::from(self.body_preference.size) * scale, 0));
-        (layout.height() / scale).ceil() as u32
+        let height = if self.style == AnnouncementStyle::Chimera {
+            layout.glyphs().iter().map(|glyph| glyph.y + glyph.height as f32).fold(layout.height(), f32::max)
+        } else { layout.height() };
+        (height / scale).ceil() as u32
     }
 
     pub fn announcement_height(&self, scale: f32, max_height: u32) -> u32 {
-        (self.message_height(scale) + 238).min(max_height).max(240)
+        match self.style {
+            AnnouncementStyle::Video => (self.message_height(scale) + 238).min(max_height).max(240),
+            AnnouncementStyle::Chimera => (self.message_height(scale) + (268.0 + f32::from(self.title_preference.size) * 1.3).ceil() as u32).max(432).min(max_height.max(432)),
+        }
+    }
+
+    pub fn announcement_layout(&self, scale: f32, max_height: u32) -> AnnouncementLayout {
+        self.style.layout(self.announcement_height(scale, max_height), self.title_preference.size)
     }
 
     fn text(
@@ -680,6 +782,7 @@ impl Renderer {
         block: TextBlock<'_>,
     ) {
         let key = TextKey { font: font.file_hash(), text: block.text.to_owned(), size: (block.size * scale).to_bits(),
+            x: block.x.to_bits(), width: block.width.to_bits(), line_height: block.line_height.unwrap_or_default().to_bits(),
             y: (block.y * scale).to_bits(), max_height: (block.max_height * scale).to_bits(), scale: scale.to_bits() };
         let glyphs = self.glyph_cache.borrow().get(&key).cloned();
         let glyphs = glyphs.unwrap_or_else(|| {
@@ -705,7 +808,7 @@ impl Renderer {
                     }
                     if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
                         let index = y as usize * width + x as usize;
-                        buffer[index] = blend(
+                        buffer[index] = self.style.pixel_format().over(
                             buffer[index],
                             block.color,
                             pixels[row * glyph.width + column] as u32,
@@ -726,6 +829,10 @@ impl Renderer {
         interference: f32,
         entrance: Option<Duration>,
     ) {
+        if self.style == AnnouncementStyle::Chimera {
+            self.draw_chimera(buffer, width, height, scale, image, entrance);
+            return;
+        }
         let resized = image.filter(|frame| frame.dimensions() != (128, 128)).map(|frame| {
             image::imageops::resize(frame, 128, 128, image::imageops::FilterType::Triangle)
         });
@@ -738,7 +845,7 @@ impl Renderer {
             Some(LightningActivity::Closing(_, _)) => true,
             None => false,
         };
-        let mut coverage = (strike.is_some() || active).then(|| PaintCoverage::new(vec![false; width * height]));
+        let mut coverage = (strike.is_some() || active).then(|| PaintCoverage::new(vec![false; width * height], PixelFormat::ColorKeyRgb));
         let bottom = logical_height - 152.0;
         profile::time(Stage::Bubble, || {
             if !self.template.as_ref().is_some_and(|template| template.matches(width, height, scale, bottom)) {
@@ -755,6 +862,7 @@ impl Renderer {
             &self.body_font,
             TextBlock {
                 text: &self.text,
+                x: 26.0, width: 268.0, line_height: None,
                 y: 26.0,
                 size: f32::from(self.body_preference.size),
                 color: 0xeef2f7,
@@ -785,6 +893,7 @@ impl Renderer {
             &self.title_font,
             TextBlock {
                 text: &title,
+                x: 26.0, width: 268.0, line_height: None,
                 y: title_y,
                 size: f32::from(self.title_preference.size),
                 color: 0x9daabd,
@@ -914,18 +1023,24 @@ impl Renderer {
         self.portrait_warp = Some(warp);
         if let Some(start) = portrait { profile::add(Stage::Portrait, start); }
         if let Some(coverage) = coverage {
-            if let Some((pixels, contours)) = &self.contour_cache {
-                if *pixels == coverage.pixels { let _ = coverage.traced.set(contours.clone()); }
-            }
-            profile::time(Stage::Lightning, || if let Some(elapsed) = strike {
-                coverage.draw_entrance_lightning(buffer, width, height, scale, elapsed, self.impact.unwrap_or([187.5 * scale, height as f32 - 90.5 * scale]), self.lightning);
-            } else if let Some(activity) = self.lightning_activity {
-                coverage.draw_activity(buffer, width, height, scale, activity, self.lightning);
-            });
-            if let Some(contours) = coverage.traced.get() {
-                if !self.contour_cache.as_ref().is_some_and(|(_, cached)| std::sync::Arc::ptr_eq(cached, contours)) {
-                    self.contour_cache = Some((coverage.pixels, contours.clone()));
-                }
+            self.draw_lightning(buffer, width, height, scale, strike, coverage, self.style.layout((height as f32 / scale).round() as u32, self.title_preference.size));
+        }
+    }
+
+    fn draw_lightning(&mut self, buffer: &mut [u32], width: usize, height: usize, scale: f32, strike: Option<Duration>, coverage: PaintCoverage, layout: AnnouncementLayout) {
+        if let Some((pixels, contours)) = &self.contour_cache {
+            if *pixels == coverage.pixels { let _ = coverage.traced.set(contours.clone()); }
+        }
+        profile::time(Stage::Lightning, || if let Some(elapsed) = strike {
+            coverage.draw_entrance_lightning(buffer, width, height, scale, elapsed,
+                self.impact.unwrap_or(if self.style == AnnouncementStyle::Video { [187.5 * scale, height as f32 - 90.5 * scale] } else { [layout.impact_right[0] * scale, layout.impact_right[1] * scale] }),
+                [layout.bubble_anchor[0] * scale, layout.bubble_anchor[1] * scale], self.lightning);
+        } else if let Some(activity) = self.lightning_activity {
+            coverage.draw_activity(buffer, width, height, scale, activity, self.lightning);
+        });
+        if let Some(contours) = coverage.traced.get() {
+            if !self.contour_cache.as_ref().is_some_and(|(_, cached)| std::sync::Arc::ptr_eq(cached, contours)) {
+                self.contour_cache = Some((coverage.pixels, contours.clone()));
             }
         }
     }
@@ -943,7 +1058,7 @@ impl Renderer {
         let canvas = scene.canvas;
         let canvas_width = canvas.width as usize;
         let mut buffer = profile::time(Stage::Canvas, || {
-            let mut buffer = vec![0xff00ff; canvas_width * canvas.height as usize];
+            let mut buffer = vec![self.style.pixel_format().clear(); canvas_width * canvas.height as usize];
             let x = (card.rect.x - canvas.x) as usize;
             let y = (card.rect.y - canvas.y) as usize;
             for row in 0..height {
@@ -967,6 +1082,7 @@ impl Renderer {
 type Contours = std::sync::Arc<Vec<Vec<[f32; 2]>>>;
 
 struct PaintCoverage {
+    format: PixelFormat,
     pixels: Vec<bool>,
     traced: std::cell::OnceCell<Contours>,
 }
@@ -1118,7 +1234,7 @@ impl PaintCoverage {
                 for (index, strength) in glow.glow.iter_mut().enumerate() {
                     if !self.pixels[index] { *strength = 0.0; }
                 }
-                glow.composite(buffer);
+                glow.composite(buffer, self.format);
             }
             LightningActivity::Closing(elapsed, seed) => {
                 self.draw_exit(buffer, width, height, scale, elapsed, seed, lightning);
@@ -1165,6 +1281,7 @@ impl PaintCoverage {
         use rayon::prelude::*;
         let band = RASTER_BAND_ROWS * width;
         let covered = &self.pixels;
+        let format = self.format;
         buffer.par_chunks_mut(band).zip(glow.glow.par_chunks_mut(band)).enumerate().for_each(|(chunk, (pixels, strengths))| {
             for (offset, (pixel, strength)) in pixels.iter_mut().zip(strengths.iter_mut()).enumerate() {
                 let index = chunk * band + offset;
@@ -1172,12 +1289,12 @@ impl PaintCoverage {
                 // Before consumption the shade is zero, which leaves the pixel unchanged.
                 if let Some(distance) = &distance {
                     if distance[index] < reach {
-                        *pixel = 0xff00ff;
+                        *pixel = format.clear();
                         *strength = 0.0;
                         continue;
                     }
                     let shade = (consumption * 0.8 + (1.0 - (distance[index] - reach) / (12.0 * scale)).clamp(0.0, 1.0) * consumption).min(1.0);
-                    *pixel = blend(*pixel, 0x080b14, (shade * 255.0) as u32);
+                    *pixel = format.shade(*pixel, 0x080b14, (shade * 255.0) as u32);
                     let band = (1.0 - (distance[index] - reach) / (1.8 * scale)).clamp(0.0, 1.0);
                     let grain = crate::state::noise_hash(seed ^ ((index % width) / 3) as u32 ^ (((index / width) / 3) as u32).wrapping_mul(7919));
                     *strength = strength.max(band * if grain % 5 == 0 { 1.0 } else { 0.35 });
@@ -1185,10 +1302,10 @@ impl PaintCoverage {
                 *strength *= if progress < 0.88 { intensity } else { 0.0 };
             }
         });
-        glow.composite(buffer);
+        glow.composite(buffer, self.format);
     }
 
-    fn new(pixels: Vec<bool>) -> Self { Self { pixels, traced: std::cell::OnceCell::new() } }
+    fn new(pixels: Vec<bool>, format: PixelFormat) -> Self { Self { format, pixels, traced: std::cell::OnceCell::new() } }
 
     /// The painted outlines, traced once per coverage; the renderer reuses them while the card geometry is unchanged.
     fn contours(&self, width: usize, height: usize) -> Contours {
@@ -1233,7 +1350,7 @@ impl PaintCoverage {
         contours
     }
 
-    fn draw_entrance_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, impact: [f32; 2], lightning: LightningSettings) {
+    fn draw_entrance_lightning(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, elapsed: Duration, impact: [f32; 2], bubble_anchor: [f32; 2], lightning: LightningSettings) {
         let milliseconds = elapsed.as_secs_f32() * 1000.0 * lightning.speed;
         if milliseconds < 120.0 { return; }
         let mut paint = LightningPaint::new(width, height, lightning);
@@ -1258,7 +1375,7 @@ impl PaintCoverage {
             for (contour_index, contour) in contours.iter().enumerate() {
                 let length = contour.len();
                 let connected = contour_index == video;
-                let start = closest(contour, if connected { impact } else { [252.0 * scale, height as f32 - 134.0 * scale] });
+                let start = closest(contour, if connected { impact } else { bubble_anchor });
                 let delay = if connected { 0.0 } else { 55.0 };
                 if milliseconds < 180.0 + delay { continue; }
                 let progress = ((milliseconds - 180.0 - delay) / (270.0 - delay)).clamp(0.0, 1.0);
@@ -1296,7 +1413,7 @@ impl PaintCoverage {
                 }
             }
         }
-        paint.composite(buffer);
+        paint.composite(buffer, self.format);
     }
 }
 

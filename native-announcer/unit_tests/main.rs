@@ -55,7 +55,7 @@ fn waits_for_speech_and_minimum_display_time() {
         silent: false,
         animation: None,
         history_recorded: false,
-        placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
+        placement: CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
         entrance: None,
         transition_duration: state::TRANSITION_DURATION,
         presented_bounds: None,
@@ -107,7 +107,7 @@ fn pending_presentation_stays_hidden_until_ready() {
         readiness_timeout: speech_readiness_timeout(&live_settings),
         duration: Duration::from_secs(10),
         animation: None,
-        placement: CardPlacement { rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
+        placement: CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 100, y: 100, width: 320, height: 260 }, scale: 1.0 },
         entrance: None,
         transition_duration: state::TRANSITION_DURATION,
     });

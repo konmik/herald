@@ -187,7 +187,7 @@ impl Playback {
         renderer.title = "Lightning preview".into();
         let height = renderer.announcement_height(scale, 700);
         let stage = PhysicalRect { x: 0, y: 0, width: (352.0 * scale) as u32, height: ((height + 80) as f32 * scale) as u32 };
-        let card = CardPlacement { rect: PhysicalRect { x: (16.0 * scale) as i32, y: (16.0 * scale) as i32,
+        let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: (16.0 * scale) as i32, y: (16.0 * scale) as i32,
             width: (320.0 * scale) as u32, height: (height as f32 * scale) as u32 }, scale };
         let seed = rand::thread_rng().gen();
         let scene = EntranceScene::new(stage, card, seed, settings.lightning);

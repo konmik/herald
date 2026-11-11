@@ -12,6 +12,7 @@ pub struct Frames {
 
 struct CapturedFrame {
     pixels: Vec<u32>,
+    format: crate::pixels::PixelFormat,
     width: u32,
     height: u32,
     entry: serde_json::Value,
@@ -28,7 +29,7 @@ impl Frames {
             for frame in receiver {
                 let image = image::RgbImage::from_fn(frame.width, frame.height, |x, y| {
                     let color = frame.pixels[(y * frame.width + x) as usize];
-                    let color = if color == 0xff00ff { 0x202020 } else { color };
+                    let color = frame.format.on_background(color, 0x202020);
                     image::Rgb([(color >> 16) as u8, (color >> 8) as u8, color as u8])
                 });
                 let filename = frame.entry["file"].as_str().ok_or("Missing capture filename")?;
@@ -42,22 +43,22 @@ impl Frames {
 
     #[cfg(test)]
     pub fn save(&mut self, pixels: &[u32], width: u32, height: u32, elapsed: Duration, closing_start: Option<Duration>) -> Result<(), String> {
-        self.write(pixels, width, height, elapsed, closing_start, None, None)
+        self.write(pixels, width, height, elapsed, closing_start, None, None, crate::pixels::PixelFormat::ColorKeyRgb)
     }
 
     pub fn save_scene(&mut self, pixels: &[u32], width: u32, height: u32, elapsed: Duration, closing_start: Option<Duration>, card: crate::render::CardPlacement, scene: Option<&crate::render::EntranceScene>, viewport: crate::render::PhysicalRect, speech_sample: Option<u64>) -> Result<(), String> {
         let geometry = serde_json::json!({"monitor": scene.map(|scene| scene.monitor), "viewport": viewport,
             "card": card.rect, "scale": card.scale, "source": scene.map(|scene| scene.source), "impact": scene.map(|scene| scene.impact),
             "phase": crate::render::announcement_phase(if closing_start.is_some() { elapsed } else { elapsed.mul_f32(scene.map_or(1.0, |scene| scene.lightning().speed)) }, closing_start.is_some())});
-        self.write(pixels, width, height, elapsed, closing_start, Some(geometry), speech_sample)
+        self.write(pixels, width, height, elapsed, closing_start, Some(geometry), speech_sample, card.style.pixel_format())
     }
 
-    fn write(&mut self, pixels: &[u32], width: u32, height: u32, elapsed: Duration, closing_start: Option<Duration>, geometry: Option<serde_json::Value>, speech_sample: Option<u64>) -> Result<(), String> {
+    fn write(&mut self, pixels: &[u32], width: u32, height: u32, elapsed: Duration, closing_start: Option<Duration>, geometry: Option<serde_json::Value>, speech_sample: Option<u64>, format: crate::pixels::PixelFormat) -> Result<(), String> {
         let filename = format!("frame-{:06}.png", self.index);
         let mut entry = serde_json::json!({"file":filename,"elapsed":elapsed.as_secs_f64(),"closingStart":closing_start.map(|value| value.as_secs_f64())});
         if let Some(geometry) = geometry { entry["geometry"] = geometry; }
         if let Some(position) = speech_sample { entry["speechSample"] = position.into(); }
-        self.sender.as_ref().ok_or("Frame writer closed")?.send(CapturedFrame { pixels: pixels.to_vec(), width, height, entry }).map_err(|error| error.to_string())?;
+        self.sender.as_ref().ok_or("Frame writer closed")?.send(CapturedFrame { pixels: pixels.to_vec(), format, width, height, entry }).map_err(|error| error.to_string())?;
         self.index += 1;
         Ok(())
     }

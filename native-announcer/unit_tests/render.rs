@@ -1,5 +1,129 @@
 use super::*;
 
+const CHIMERA_MESSAGE: &str = "Attention, human. The build is ready and the checks have passed. Please admire my moving mouth, glowing tongue, and deeply questionable voice. Mission complete.";
+
+#[test]
+fn chimera_preserves_partial_alpha_through_text_head_and_lightning() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
+    renderer.title = "CHIMERA announcement".into();
+    let head = crate::chimera::Head::new();
+    let mut pixels = vec![0; 600 * 432];
+    renderer.draw(&mut pixels, 600, 432, 1.0, Some(head.frame()), 0.0, None);
+    assert!(pixels.chunks(600).flat_map(|row| &row[405..]).any(|pixel| (1..255).contains(&(pixel >> 24))));
+    assert_eq!(pixels[410 * 600 + 330], 0);
+    for phase in [None, Some(Duration::from_millis(140)), Some(Duration::from_millis(300))] {
+        renderer.draw(&mut pixels, 600, 432, 1.0, Some(head.frame()), 0.0, phase);
+        assert!(pixels.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+    }
+    for milliseconds in [700, 1200, 3000] {
+        renderer.lightning_activity = Some(LightningActivity::Holding(Duration::from_millis(milliseconds), Duration::from_secs(5), 1234));
+        renderer.draw(&mut pixels, 600, 432, 1.0, Some(head.frame()), 0.0, None);
+        assert!(pixels.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+    }
+    for milliseconds in [100, 300, 650] {
+        renderer.lightning_activity = Some(LightningActivity::Closing(Duration::from_millis(milliseconds), 1234));
+        renderer.draw(&mut pixels, 600, 432, 1.0, Some(head.frame()), 0.0, None);
+        assert!(pixels.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+    }
+}
+
+#[test]
+fn chimera_card_fits_small_and_high_density_monitors() {
+    let style = AnnouncementStyle::Chimera;
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(style);
+    for (width, height, requested) in [(1440, 1080, 2.5), (1280, 720, 2.0), (800, 600, 1.5), (640, 480, 1.0), (3840, 2160, 2.5)] {
+        let scale = style.fit_scale(width, height, requested);
+        for message in [CHIMERA_MESSAGE.to_owned(), CHIMERA_MESSAGE.repeat(6)] {
+            renderer.text = message;
+            let layout = renderer.announcement_layout(scale as f32, (f64::from(height) / scale - 80.0) as u32);
+            assert!((f64::from(layout.width) + 32.0) * scale <= f64::from(width) + 0.001);
+            assert!((f64::from(layout.height) + 80.0) * scale <= f64::from(height) + 0.001);
+        }
+        assert_eq!(AnnouncementStyle::Video.fit_scale(width, height, requested), requested);
+    }
+}
+
+#[test]
+fn chimera_text_fits_the_ribbed_frame_at_display_scales() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    for message in ["Ready.", CHIMERA_MESSAGE, &CHIMERA_MESSAGE.repeat(3)] {
+        renderer.text = message.into();
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let layout = renderer.announcement_layout(scale, 1800);
+            let block = TextBlock {
+                text: &renderer.text, x: layout.body[0], y: layout.body[1], width: layout.body[2],
+                line_height: Some(f32::from(renderer.body_preference.size) * 1.65),
+                size: f32::from(renderer.body_preference.size), color: 0xffffff, max_height: f32::MAX,
+            };
+            let glyphs = layout_glyphs(&renderer.body_font, &block, scale);
+            assert!(glyphs.iter().all(|glyph| glyph.y + glyph.height as f32 <= layout.body[3] * scale), "Text clipped at {scale}, message length {}, last glyph bottom {}, cutoff {}, measured height {}", message.len(), glyphs.iter().map(|glyph| glyph.y + glyph.height as f32).fold(0.0, f32::max), layout.body[3] * scale, renderer.message_height(scale));
+            assert!(glyphs.iter().all(|glyph| glyph.x + glyph.width as f32 <= (layout.body[0] + layout.body[2]) * scale + 1.0));
+            assert_eq!(layout.width, 600);
+            assert_eq!(layout.portrait[2], 336.0);
+        }
+    }
+}
+
+#[test]
+fn chimera_style_switch_restores_video_fonts_and_rendering() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.text = CHIMERA_MESSAGE.into();
+    renderer.title = "CHIMERA announcement".into();
+    let mut original = vec![0; 320 * 300];
+    renderer.draw(&mut original, 320, 300, 1.0, None, 0.0, None);
+    renderer.set_style(AnnouncementStyle::Chimera);
+    assert_eq!(renderer.body_preference, FontPreference::new("Berkeley Mono", 14));
+    assert_eq!(renderer.title_preference, FontPreference::new("Berkeley Mono", 12));
+    let mut chimera = vec![0; 600 * 432];
+    renderer.draw(&mut chimera, 600, 432, 1.0, None, 0.0, None);
+    renderer.set_style(AnnouncementStyle::Video);
+    let mut restored = vec![0; original.len()];
+    renderer.seed = 567891;
+    renderer.draw(&mut restored, 320, 300, 1.0, None, 0.0, None);
+    assert_eq!(original, restored);
+    renderer.set_preferences(&FontPreference::new("Consolas", 17), &FontPreference::new("Consolas", 15));
+    renderer.set_style(AnnouncementStyle::Chimera);
+    assert_eq!(renderer.body_preference, FontPreference::new("Consolas", 17));
+    assert_eq!(renderer.title_preference, FontPreference::new("Consolas", 15));
+}
+
+#[test]
+fn chimera_portrait_keeps_transparent_corners_and_a_mouth_gap() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    let mut head = crate::chimera::Head::new();
+    let speech = crate::chimera::prepare("Attention human. Please admire my mouth.", &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    head.attach_capture(speech, Duration::ZERO);
+    for elapsed in [0.0, 0.4, 0.8, 1.5, 2.2, 4.5, 6.7, 9.0, 12.2] {
+        head.advance(Duration::from_secs_f64(elapsed));
+        for (x, _, pixel) in head.frame().enumerate_pixels().filter(|(_, _, pixel)| pixel.0[3] > 0) {
+            assert!(325.0 + x as f32 / head.frame().width() as f32 * 336.0 < 600.0, "Head clipped at {elapsed}s, pixel {x}: {:?}", pixel.0);
+        }
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let width = (600.0 * scale) as usize;
+            let height = (432.0 * scale) as usize;
+            let mut pixels = vec![0; width * height];
+            renderer.draw(&mut pixels, width, height, scale, None, 0.0, None);
+            let transparent_corner = pixels[(100.0 * scale) as usize * width + (330.0 * scale) as usize];
+            renderer.draw(&mut pixels, width, height, scale, Some(head.frame()), 0.0, None);
+            assert_eq!(pixels[(100.0 * scale) as usize * width + (330.0 * scale) as usize], transparent_corner);
+            assert_eq!(pixels[(410.0 * scale) as usize * width + (330.0 * scale) as usize], 0);
+            for y in (225.0 * scale) as usize..(310.0 * scale) as usize {
+                let row = &pixels[y * width..(y + 1) * width];
+                let bubble_right = row[..(405.0 * scale) as usize].iter().rposition(|pixel| *pixel != 0);
+                let head_left = row[(405.0 * scale) as usize..].iter().position(|pixel| *pixel != 0).map(|x| x + (405.0 * scale) as usize);
+                if let (Some(bubble_right), Some(head_left)) = (bubble_right, head_left) {
+                    assert!(head_left - bubble_right >= (12.0 * scale) as usize, "Mouth gap closed at {elapsed}s, scale {scale}, row {y}: {bubble_right}..{head_left}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn xorshift_jump_matches_repeated_draws() {
     let mut state = 0x1234_5678_u32;
@@ -56,11 +180,11 @@ fn card_template_matches_direct_bubble_and_scanline_painting() {
         let template = CardTemplate::new(width, height, scale, bottom);
         for fill in [0x191f2a, 0x000000, 0xffffff, 0x080908, 0xff00ff] {
             let mut expected = vec![0xff00ff; width * height];
-            let mut expected_coverage = PaintCoverage::new(vec![false; width * height]);
+            let mut expected_coverage = PaintCoverage::new(vec![false; width * height], PixelFormat::ColorKeyRgb);
             draw_bubble(&mut expected, width, height, scale, bottom, fill, Some(&mut expected_coverage));
             shade_bubble_scanlines(&mut expected, width, height, scale, bottom);
             let mut actual = vec![0xff00ff; width * height];
-            let mut coverage = PaintCoverage::new(vec![false; width * height]);
+            let mut coverage = PaintCoverage::new(vec![false; width * height], PixelFormat::ColorKeyRgb);
             template.paint(&mut actual, fill, Some(&mut coverage));
             template.shade(&mut actual);
             assert!(actual == expected, "Template pixels differ at scale {scale}, fill {fill:06x}");
@@ -75,7 +199,7 @@ fn every_exposed_parameter_changes_actual_lightning_pixels() {
         let mut paint = LightningPaint::new(320, 260, lightning);
         paint.bolt([15.0, 235.0], [290.0, 25.0], 1.0, 567891, 0.7, 1.0);
         let mut pixels = vec![0xff00ff; 320 * 260];
-        paint.composite(&mut pixels);
+        paint.composite(&mut pixels, PixelFormat::ColorKeyRgb);
         let mut renderer = Renderer::with_settings(&Settings { lightning, ..Settings::default() }).unwrap();
         for time in [1000, 1250, 1500, 1750, 2000] {
             let mut frame = vec![0; 320 * 260];
@@ -116,12 +240,12 @@ fn all_presets_preserve_characterized_bolts_entrance_holding_and_exit_pixels() {
             let mut paint = LightningPaint::new(320, 260, preset.settings);
             paint.bolt([15.0, 235.0], [290.0, 25.0], scale, seed, preset.settings.pulse_profile.entrance(160.0), reveal);
             let mut pixels = vec![0xff00ff; 320 * 260];
-            paint.composite(&mut pixels);
+            paint.composite(&mut pixels, PixelFormat::ColorKeyRgb);
             pin(&pixels);
         }
         let monitor = PhysicalRect { x: -800, y: -200, width: 800, height: 1100 };
         for scale in [1.0, 1.5] {
-            let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 250, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+            let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 250, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
             for seed in [1234, 1235] {
                 let scene = EntranceScene::new(monitor, card, seed, preset.settings);
                 let mut renderer = Renderer::with_settings(&Settings { lightning: preset.settings, ..Settings::default() }).unwrap();
@@ -155,7 +279,7 @@ fn saved_reload_changes_the_next_snapshot_without_changing_an_active_scene() {
     let mut store = crate::settings::Store::new(&data).unwrap();
     let mut renderer = Renderer::with_settings(&store.current).unwrap();
     let monitor = PhysicalRect { x: 0, y: 0, width: 420, height: 380 };
-    let card = CardPlacement { rect: PhysicalRect { x: 20, y: 20, width: 320, height: 260 }, scale: 1.0 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 20, y: 20, width: 320, height: 260 }, scale: 1.0 };
     let active = EntranceScene::new(monitor, card, 1234, store.current.lightning);
     let before = renderer.draw_scene(&active, None, 0.0, Some(Duration::from_millis(260)));
     settings.lightning = crate::lightning::PRESETS[1].settings;
@@ -176,7 +300,7 @@ fn saved_reload_changes_the_next_snapshot_without_changing_an_active_scene() {
 #[should_panic]
 fn mismatched_scene_and_renderer_snapshots_are_rejected() {
     let mut renderer = Renderer::new().unwrap();
-    let card = CardPlacement { rect: PhysicalRect { x: 20, y: 20, width: 320, height: 260 }, scale: 1.0 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 20, y: 20, width: 320, height: 260 }, scale: 1.0 };
     let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 420, height: 380 }, card, 1234, crate::lightning::PRESETS[1].settings);
     renderer.draw_scene(&scene, None, 0.0, Some(Duration::from_millis(140)));
 }
@@ -187,7 +311,7 @@ fn incoming_bolt_uses_the_scene_snapshot_for_leader_and_return_stroke() {
     for preset in crate::lightning::PRESETS {
         let lightning = preset.settings;
         for scale in [1.0, 1.5] {
-            let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 250, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+            let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 250, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
             for seed in [1234, 1235] {
                 let mut scene = EntranceScene::new(monitor, card, seed, lightning);
                 scene.channel = vec![scene.source, scene.impact];
@@ -201,7 +325,7 @@ fn incoming_bolt_uses_the_scene_snapshot_for_leader_and_return_stroke() {
                     let mut paint = LightningPaint::new(width, height, lightning);
                     paint.stroke(from, to, scale, 0.9, intensity);
                     let mut expected = vec![0xff00ff; width * height];
-                    paint.composite(&mut expected);
+                    paint.composite(&mut expected, PixelFormat::ColorKeyRgb);
                     let mut pixels = vec![0xff00ff; width * height];
                     scene.draw_incoming_bolt(&mut pixels, Duration::from_millis(time));
                     assert_eq!(pixels, expected, "Wrong incoming paint for {} at {time}ms", preset.label);
@@ -223,7 +347,7 @@ fn lightning_variations_are_distinct_and_repeatable() {
         let mut paint = LightningPaint::new(160, 100, lightning);
         paint.bolt([15.0, 85.0], [145.0, 15.0], 1.0, 1234, lightning.pulse_profile.entrance(160.0), 1.0);
         let mut pixels = vec![0xff00ff; 160 * 100];
-        paint.composite(&mut pixels);
+        paint.composite(&mut pixels, PixelFormat::ColorKeyRgb);
         pixels
     };
     let settings = crate::lightning::PRESETS.map(|preset| preset.settings);
@@ -241,7 +365,7 @@ fn lightning_variations_keep_screen_edge_sources_and_video_impacts() {
     let monitor = PhysicalRect { x: -1920, y: -200, width: 1920, height: 1400 };
     for preset in &crate::lightning::PRESETS[1..] {
         for scale in [1.0, 1.5, 2.0] {
-            let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 300, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+            let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 300, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
             for seed in 0..40 {
                 let scene = EntranceScene::new(monitor, card, seed, preset.settings);
                 assert!(scene.source[0] == -1.0 || scene.source[1] == 1199.0);
@@ -260,7 +384,7 @@ fn lightning_variations_keep_screen_edge_sources_and_video_impacts() {
 fn sources_use_only_bottom_and_right_edges_across_seeds_and_scales() {
     for scale in [1.0, 1.5, 2.0] {
         let monitor = PhysicalRect { x: -1920, y: -200, width: 1920, height: 1400 };
-        let card = CardPlacement { rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 300, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
+        let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: -(336.0 * scale) as i32, y: 300, width: (320.0 * scale) as u32, height: (260.0 * scale) as u32 }, scale };
         for seed in 0..40 {
             let scene = EntranceScene::new(monitor, card, seed, LightningSettings::default());
             assert!(scene.source[0] == -1.0 || scene.source[1] == 1199.0);
@@ -318,14 +442,14 @@ fn sporadic_flashes_stay_near_the_outline_without_projecting_outward() {
     let mut renderer = Renderer::new().unwrap();
     let mut plain = vec![0; 320 * 260];
     renderer.draw(&mut plain, 320, 260, 1.0, None, 0.0, None);
-    let coverage = PaintCoverage::new(plain.iter().map(|pixel| *pixel != 0xff00ff).collect());
+    let coverage = PaintCoverage::new(plain.iter().map(|pixel| *pixel != 0xff00ff).collect(), PixelFormat::ColorKeyRgb);
     let mut early = LightningPaint::new(320, 260, LightningSettings::default());
     let mut late = LightningPaint::new(320, 260, LightningSettings::default());
     draw_ambient_edges(&coverage, &mut early, 1.0, 1234, 1.0, 0.0);
     draw_ambient_edges(&coverage, &mut late, 1.0, 1234, 1.0, 1.0);
     let lit = |paint: &mut LightningPaint| { paint.rasterize(); paint.glow.iter().filter(|strength| **strength > 0.2).count() };
     assert!(lit(&mut late) > lit(&mut early) * 3);
-    let card = CardPlacement { rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 400, y: 400, width: 320, height: 260 }, scale: 1.0 };
     let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1234, LightningSettings::default());
     let time = (3000..4500).find(|time| ambient_burst(Duration::from_millis(*time), Duration::from_secs(5), 1234, LightningSettings::default()).is_some_and(|(_, intensity, _)| intensity > 0.8)).unwrap();
     renderer.seed = 567891;
@@ -368,7 +492,7 @@ fn holding_frequency_and_speed_control_event_count_and_flash_duration() {
 #[test]
 fn speed_scales_the_complete_entrance_and_exit() {
     let monitor = PhysicalRect { x: 0, y: 0, width: 800, height: 700 };
-    let card = CardPlacement { rect: PhysicalRect { x: 400, y: 300, width: 320, height: 260 }, scale: 1.0 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 400, y: 300, width: 320, height: 260 }, scale: 1.0 };
     let render = |speed, time, closing: bool| {
         let lightning = LightningSettings { speed, ..LightningSettings::default() };
         let scene = EntranceScene::new(monitor, card, 1234, lightning);
@@ -489,7 +613,7 @@ fn holding_has_frequent_bursts_and_exit_consumes_both_interiors() {
 
 #[test]
 fn seeded_screen_edge_channel_is_stable_forked_tapered_and_outside_the_card_until_video_hit() {
-    let card = CardPlacement { rect: PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: -504, y: 250, width: 480, height: 390 }, scale: 1.5 };
     let monitor = PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 };
     let scene = EntranceScene::new(monitor, card, 7345, LightningSettings::default());
     let repeated = EntranceScene::new(monitor, card, 7345, LightningSettings::default());
@@ -518,7 +642,7 @@ fn seeded_screen_edge_channel_is_stable_forked_tapered_and_outside_the_card_unti
     let mut paint = LightningPaint::new(100, 40, LightningSettings::default());
     paint.stroke([10.0, 20.0], [90.0, 20.0], 1.0, 1.0, 1.0);
     let mut pixels = vec![0xff00ff; 4000];
-    paint.composite(&mut pixels);
+    paint.composite(&mut pixels, PixelFormat::ColorKeyRgb);
     assert_eq!(pixels[20 * 100 + 50], 0xf7fbff);
     assert!(pixels[23 * 100 + 50] & 255 > (pixels[23 * 100 + 50] >> 16) & 255);
     assert_eq!(pixels[30 * 100 + 50], 0xff00ff);
@@ -527,20 +651,20 @@ fn seeded_screen_edge_channel_is_stable_forked_tapered_and_outside_the_card_unti
 #[test]
 fn disconnected_bubble_receives_charge_through_its_tail_after_the_video() {
     let mut pixels = vec![0xff00ff; 320 * 260];
-    let mut coverage = PaintCoverage::new(vec![false; pixels.len()]);
+    let mut coverage = PaintCoverage::new(vec![false; pixels.len()], PixelFormat::ColorKeyRgb);
     draw_bubble(&mut pixels, 320, 260, 1.0, 88.0, 0x191f2a, Some(&mut coverage));
     for y in 120..248 {
         for x in 188..316 { coverage.pixels[y * 320 + x] = true; pixels[y * 320 + x] = 0x191f2a; }
     }
     let plain = pixels.clone();
-    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(200), [187.5, 169.5], LightningSettings::default());
+    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(200), [187.5, 169.5], [252.0, 126.0], LightningSettings::default());
     assert_eq!(&pixels[..110 * 320], &plain[..110 * 320]);
     assert!(pixels[170 * 320 + 188] & 255 > 200);
     pixels.copy_from_slice(&plain);
-    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(260), [187.5, 169.5], LightningSettings::default());
+    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(260), [187.5, 169.5], [252.0, 126.0], LightningSettings::default());
     assert!(pixels[110 * 320 + 252] & 255 > 100, "No visible transfer to the bubble tail");
     pixels.copy_from_slice(&plain);
-    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(480), [187.5, 169.5], LightningSettings::default());
+    coverage.draw_entrance_lightning(&mut pixels, 320, 260, 1.0, Duration::from_millis(480), [187.5, 169.5], [252.0, 126.0], LightningSettings::default());
     let bright_top = (3..10).flat_map(|y| (40..280).map(move |x| y * 320 + x))
         .filter(|index| pixels[*index] & 255 > 220).count();
     assert!(bright_top >= 100, "Charge never reached the full far bubble edge");
@@ -548,7 +672,7 @@ fn disconnected_bubble_receives_charge_through_its_tail_after_the_video() {
 
 #[test]
 fn restored_scene_is_identical_to_the_normal_card_without_changing_the_portrait_stream() {
-    let card = CardPlacement { rect: PhysicalRect { x: 700, y: 500, width: 320, height: 260 }, scale: 1.0 };
+    let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 700, y: 500, width: 320, height: 260 }, scale: 1.0 };
     let scene = EntranceScene::new(PhysicalRect { x: 0, y: 0, width: 1200, height: 900 }, card, 1, LightningSettings::default());
     let mut renderer = Renderer::new().unwrap();
     let mut normal = vec![0; 320 * 260];
@@ -568,7 +692,7 @@ fn screen_edge_leader_hits_video_before_bidirectional_full_outline_charge() {
             let width = (320.0 * scale) as usize;
             let height = (logical_height as f32 * scale) as usize;
             let bottom = logical_height as f32 - 152.0;
-            let card = CardPlacement { rect: PhysicalRect { x: 1400, y: 600, width: width as u32, height: height as u32 }, scale };
+            let card = CardPlacement { style: crate::render::AnnouncementStyle::Video, rect: PhysicalRect { x: 1400, y: 600, width: width as u32, height: height as u32 }, scale };
             let scene = EntranceScene::new(PhysicalRect { x: -200, y: -100, width: 2600, height: 1700 }, card, 1234, LightningSettings::default());
             let zones = [(150.0, 6.0), (6.0, 50.0), (100.0, bottom), (244.0, bottom + 8.0),
                 (294.0, bottom + 12.0), (188.0, bottom + 76.0), (315.0, bottom + 76.0), (252.0, bottom + 139.0)];
@@ -621,7 +745,7 @@ fn screen_edge_leader_hits_video_before_bidirectional_full_outline_charge() {
                 } else {
                     assert_eq!(reached, [true; 8], "Missing complete outline at scale {scale}, height {logical_height}");
                     assert!(white > 50);
-                    let mut coverage = PaintCoverage::new(vec![false; width * height]);
+                    let mut coverage = PaintCoverage::new(vec![false; width * height], PixelFormat::ColorKeyRgb);
                     let mut mask = vec![0; width * height];
                     draw_bubble(&mut mask, width, height, scale, bottom, 0, Some(&mut coverage));
                     for y in ((logical_height as f32 - 140.0) * scale) as usize..((logical_height as f32 - 12.0) * scale) as usize {
@@ -700,7 +824,7 @@ fn displayed_text_removes_tags_and_collapses_spaces() {
     for (input, expected) in [
         ("[excited] Added Ctrl+A  and preserved scroll position; verified.", "Added Ctrl+A and preserved scroll position; verified."),
         (" [happy]  Done [pause]   successfully. [laughs] ", "Done successfully."),
-        ("[excited][laughs] Hello   世界 😀", "Hello 世界 😀"),
+        ("[excited][laughs] Hello   ä¸–ç•Œ ðŸ˜€", "Hello ä¸–ç•Œ ðŸ˜€"),
         ("First  line.\nSecond   line.", "First line.\nSecond line."),
         ("Ordinary text.", "Ordinary text."),
         ("Keep [unfinished", "Keep [unfinished"),
@@ -809,7 +933,7 @@ fn renderer_scanlines_shade_bubble_contents_but_not_background() {
         draw_bubble(&mut unshaded, 320, 260, 1.0, 108.0, 0x191f2a, None);
         let background = unshaded.clone();
         renderer.text(&mut unshaded, 320, 260, 1.0, font, TextBlock {
-            text, y, size: f32::from(size), color, max_height: cutoff,
+            text, x: 26.0, width: 268.0, line_height: None, y, size: f32::from(size), color, max_height: cutoff,
         });
         let mut glyph_pixels = [0; 2];
         for index in 0..unshaded.len() {

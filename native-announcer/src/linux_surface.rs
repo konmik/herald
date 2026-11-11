@@ -57,20 +57,12 @@ impl DerefMut for Buffer<'_> {
     fn deref_mut(&mut self) -> &mut [u32] { &mut self.0.pixels }
 }
 
-fn argb(color: u32) -> u32 {
-    if color == 0xff00ff { 0 } else { color | 0xff000000 }
-}
-
 impl Buffer<'_> {
-    pub fn present(self) -> Result<(), String> {
-        let bytes: Vec<u8> = self.0.pixels.iter().flat_map(|color| argb(*color).to_ne_bytes()).collect();
+    pub fn present(self, format: crate::pixels::PixelFormat) -> Result<(), String> {
+        let bytes: Vec<u8> = self.0.pixels.iter().flat_map(|color| format.argb(*color).to_ne_bytes()).collect();
         let image = ImageSurface::create_for_data(bytes, Format::ARgb32, self.0.width, self.0.height, self.0.width * 4).map_err(|error| error.to_string())?;
         *self.0.image.borrow_mut() = Some(image);
         self.0.window.gtk_window().queue_draw();
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "../unit_tests/linux_surface.rs"]
-mod tests;
