@@ -772,6 +772,20 @@ impl Renderer {
         self.style.layout(self.announcement_height(scale, max_height), self.title_preference.size)
     }
 
+    fn glyphs(&self, font: &Font, block: &TextBlock<'_>, scale: f32) -> std::sync::Arc<Vec<CachedGlyph>> {
+        let key = TextKey { font: font.file_hash(), text: block.text.to_owned(), size: (block.size * scale).to_bits(),
+            x: block.x.to_bits(), width: block.width.to_bits(), line_height: block.line_height.unwrap_or_default().to_bits(),
+            y: (block.y * scale).to_bits(), max_height: (block.max_height * scale).to_bits(), scale: scale.to_bits() };
+        let glyphs = self.glyph_cache.borrow().get(&key).cloned();
+        glyphs.unwrap_or_else(|| {
+            let glyphs = std::sync::Arc::new(layout_glyphs(font, block, scale));
+            let mut cache = self.glyph_cache.borrow_mut();
+            if cache.len() >= 8 { cache.clear(); }
+            cache.insert(key, glyphs.clone());
+            glyphs
+        })
+    }
+
     fn text(
         &self,
         buffer: &mut [u32],
@@ -781,17 +795,7 @@ impl Renderer {
         font: &Font,
         block: TextBlock<'_>,
     ) {
-        let key = TextKey { font: font.file_hash(), text: block.text.to_owned(), size: (block.size * scale).to_bits(),
-            x: block.x.to_bits(), width: block.width.to_bits(), line_height: block.line_height.unwrap_or_default().to_bits(),
-            y: (block.y * scale).to_bits(), max_height: (block.max_height * scale).to_bits(), scale: scale.to_bits() };
-        let glyphs = self.glyph_cache.borrow().get(&key).cloned();
-        let glyphs = glyphs.unwrap_or_else(|| {
-            let glyphs = std::sync::Arc::new(layout_glyphs(font, &block, scale));
-            let mut cache = self.glyph_cache.borrow_mut();
-            if cache.len() >= 8 { cache.clear(); }
-            cache.insert(key, glyphs.clone());
-            glyphs
-        });
+        let glyphs = self.glyphs(font, &block, scale);
         for glyph in glyphs.iter() {
             let pixels = &glyph.pixels;
             for row in 0..glyph.height {

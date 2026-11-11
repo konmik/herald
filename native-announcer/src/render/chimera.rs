@@ -5,18 +5,24 @@ pub(super) struct Frame {
     width: usize,
     height: usize,
     scale: u32,
+    body_glyphs: std::sync::Arc<Vec<CachedGlyph>>,
     pixels: Vec<u32>,
     coverage: Vec<bool>,
 }
 
 impl Frame {
-    pub(super) fn matches(&self, width: usize, height: usize, scale: f32) -> bool {
-        self.width == width && self.height == height && self.scale == scale.to_bits()
+    pub(super) fn matches(&self, width: usize, height: usize, scale: f32, body_glyphs: &std::sync::Arc<Vec<CachedGlyph>>) -> bool {
+        self.width == width && self.height == height && self.scale == scale.to_bits() && std::sync::Arc::ptr_eq(&self.body_glyphs, body_glyphs)
     }
 
-    fn new(width: usize, height: usize, scale: f32) -> Self {
+    fn new(width: usize, height: usize, scale: f32, body_glyphs: std::sync::Arc<Vec<CachedGlyph>>, body_y: f32) -> Self {
         let mut raster = Pixmap::new(width as u32, height as u32).unwrap();
-        let extra = (height as f32 / scale - 432.0).max(0.0);
+        let text_bottom = body_glyphs.iter().filter(|glyph| glyph.width > 0 && glyph.height > 0).filter_map(|glyph| {
+            glyph.pixels.iter().rposition(|alpha| *alpha > 0)
+                .map(|last| (glyph.y as i32 + (last / glyph.width) as i32 + 1) as f32 / scale)
+        }).fold(body_y, f32::max);
+        let original_bottom = 306.0 + (height as f32 / scale - 432.0).max(0.0);
+        let extra = (original_bottom + text_bottom) * 0.5 - 306.0;
         let transform = Transform::from_scale(scale, scale);
         let skin = gradient([30.0, 40.0], [415.0, 290.0 + extra], &[(0.0, 0x0b1c29, 0.96), (1.0, 0x06121a, 0.97)]);
         let edge = gradient([16.0, 74.0], [429.0, 291.0 + extra], &[(0.0, 0x8eb9ef, 0.5), (0.45, 0x96daff, 0.9), (1.0, 0x72c6dc, 0.3)]);
@@ -40,7 +46,7 @@ impl Frame {
             pixels.push(u32::from(pixel.alpha()) << 24 | u32::from(pixel.red()) << 16 | u32::from(pixel.green()) << 8 | u32::from(pixel.blue()));
             coverage.push(covered);
         }
-        Self { width, height, scale: scale.to_bits(), pixels, coverage }
+        Self { width, height, scale: scale.to_bits(), body_glyphs, pixels, coverage }
     }
 }
 
@@ -64,7 +70,9 @@ use Command::{Close, Cubic, Line, Move};
 
 fn path(commands: &[Command], extra: f32) -> Path {
     let mut builder = PathBuilder::new();
-    let y = |value: f32| if value > 150.0 { value + extra } else { value };
+    let y = |value: f32| if value <= 150.0 { value }
+        else if extra < 0.0 { 150.0 + (value - 150.0) * (156.0 + extra) / 156.0 }
+        else { value + extra };
     for command in commands {
         match *command {
             Move(x, top) => builder.move_to(x + 10.0, y(top)),
@@ -79,6 +87,11 @@ fn path(commands: &[Command], extra: f32) -> Path {
 impl Renderer {
     pub(super) fn draw_chimera(&mut self, buffer: &mut [u32], width: usize, height: usize, scale: f32, image: Option<&RgbaImage>, entrance: Option<Duration>) {
         let layout = self.style.layout((height as f32 / scale).round() as u32, self.title_preference.size);
+        let body = TextBlock {
+            text: &self.text, x: layout.body[0], y: layout.body[1], width: layout.body[2], max_height: layout.body[3],
+            size: f32::from(self.body_preference.size), color: 0xecf6fc, line_height: Some(f32::from(self.body_preference.size) * 1.65),
+        };
+        let body_glyphs = self.glyphs(&self.body_font, &body, scale);
         let strike = entrance.filter(|elapsed| !elapsed.is_zero() && *elapsed < self.lightning.transition_duration());
         let active = match self.lightning_activity {
             Some(LightningActivity::Holding(elapsed, duration, seed)) => ambient_burst(elapsed, duration, seed, self.lightning).is_some(),
@@ -86,8 +99,8 @@ impl Renderer {
             None => false,
         };
         profile::time(Stage::Bubble, || {
-            if !self.chimera_template.as_ref().is_some_and(|frame| frame.matches(width, height, scale)) {
-                self.chimera_template = Some(Frame::new(width, height, scale));
+            if !self.chimera_template.as_ref().is_some_and(|frame| frame.matches(width, height, scale, &body_glyphs)) {
+                self.chimera_template = Some(Frame::new(width, height, scale, body_glyphs, body.y));
             }
             buffer.copy_from_slice(&self.chimera_template.as_ref().unwrap().pixels);
         });
@@ -102,10 +115,7 @@ impl Renderer {
                 text: &title, x: layout.title[0], y: layout.title[1], width: layout.title[2], max_height: layout.title[3],
                 size: f32::from(self.title_preference.size), color: 0x9cceeb, line_height: None,
             });
-            self.text(buffer, width, height, scale, &self.body_font, TextBlock {
-                text: &self.text, x: layout.body[0], y: layout.body[1], width: layout.body[2], max_height: layout.body[3],
-                size: f32::from(self.body_preference.size), color: 0xecf6fc, line_height: Some(f32::from(self.body_preference.size) * 1.65),
-            });
+            self.text(buffer, width, height, scale, &self.body_font, body);
         });
         profile::time(Stage::Portrait, || {
             if let Some(image) = image {

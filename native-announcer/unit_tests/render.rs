@@ -69,6 +69,60 @@ fn chimera_text_fits_the_ribbed_frame_at_display_scales() {
 }
 
 #[test]
+fn chimera_halves_bottom_padding_without_moving_text_or_head() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.title = "CHIMERA announcement".into();
+    for message in ["Ready.".to_owned(), CHIMERA_MESSAGE.into(), CHIMERA_MESSAGE.repeat(3)] {
+        renderer.text = message;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let layout = renderer.announcement_layout(scale, 1800);
+            let width = (layout.width as f32 * scale).round() as usize;
+            let height = (layout.height as f32 * scale).round() as usize;
+            let body = TextBlock {
+                text: &renderer.text, x: layout.body[0], y: layout.body[1], width: layout.body[2],
+                line_height: Some(f32::from(renderer.body_preference.size) * 1.65),
+                size: f32::from(renderer.body_preference.size), color: 0xffffff, max_height: layout.body[3],
+            };
+            let glyphs = layout_glyphs(&renderer.body_font, &body, scale);
+            let mut text = vec![0; width * height];
+            renderer.text(&mut text, width, height, scale, &renderer.body_font, body);
+            let text_bottom = (text.chunks(width).rposition(|row| row.iter().any(|pixel| *pixel != 0)).unwrap() + 1) as f32;
+            let mut pixels = vec![0; width * height];
+            renderer.draw(&mut pixels, width, height, scale, None, 0.0, None);
+            let bubble_bottom = (pixels.chunks(width).rposition(|row| row.iter().any(|pixel| *pixel != 0)).unwrap() + 1) as f32;
+            let original_padding = height as f32 - 126.0 * scale - text_bottom;
+            assert!((bubble_bottom - text_bottom - original_padding * 0.5).abs() <= 2.0,
+                "Bottom padding was not halved at {scale}, text bottom {text_bottom}, bubble bottom {bubble_bottom}, original padding {original_padding}");
+            for glyph in glyphs.iter().filter(|glyph| glyph.pixels.iter().any(|alpha| *alpha > 0)) {
+                for y in glyph.y as usize - 1..=glyph.y as usize + glyph.height {
+                    for x in glyph.x as usize - 1..=glyph.x as usize + glyph.width {
+                        assert!(pixels[y * width + x] >> 24 >= 240, "Text reaches the curved rim at {scale}, pixel {x}, {y}");
+                    }
+                }
+            }
+            assert_eq!(layout.body[0..3], [65.0, 105.6, 288.0]);
+            assert_eq!(layout.portrait, [325.0, layout.height as f32 - 348.0, 336.0, 336.0]);
+        }
+    }
+}
+
+#[test]
+fn chimera_remeasures_padding_when_same_size_messages_change() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    let mut previous_bottom = None;
+    for message in ["Ready.", "The build passed.\nThe tests passed.\nDeployment finished.", "Ready."] {
+        renderer.text = message.into();
+        let mut pixels = vec![0; 600 * 432];
+        renderer.draw(&mut pixels, 600, 432, 1.0, None, 0.0, None);
+        let bottom = pixels.chunks(600).rposition(|row| row.iter().any(|pixel| *pixel != 0)).unwrap();
+        if let Some(previous) = previous_bottom { assert_ne!(bottom, previous); }
+        previous_bottom = Some(bottom);
+    }
+}
+
+#[test]
 fn chimera_style_switch_restores_video_fonts_and_rendering() {
     let mut renderer = Renderer::new().unwrap();
     renderer.text = CHIMERA_MESSAGE.into();
@@ -95,6 +149,7 @@ fn chimera_style_switch_restores_video_fonts_and_rendering() {
 fn chimera_portrait_keeps_transparent_corners_and_a_mouth_gap() {
     let mut renderer = Renderer::new().unwrap();
     renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
     let mut head = crate::chimera::Head::new();
     let speech = crate::chimera::prepare("Attention human. Please admire my mouth.", &std::sync::atomic::AtomicBool::new(false)).unwrap();
     head.attach_capture(speech, Duration::ZERO);
