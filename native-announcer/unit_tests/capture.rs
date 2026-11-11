@@ -28,11 +28,13 @@ fn expanded_and_restored_captures_keep_physical_geometry_and_the_sampled_phase()
     let scene = crate::render::EntranceScene::new(crate::render::PhysicalRect { x: -1920, y: -200, width: 1920, height: 1080 }, card, 1234, crate::lightning::LightningSettings::default());
     let mut frames = Frames::new(&directory).unwrap();
     let pixels = vec![0x123456; scene.canvas.width as usize * scene.canvas.height as usize];
-    frames.save_scene(&pixels, scene.canvas.width, scene.canvas.height, Duration::from_millis(140), None, card, Some(&scene), scene.canvas).unwrap();
-    frames.save_scene(&vec![0; 480 * 390], 480, 390, Duration::from_millis(700), None, card, Some(&scene), card.rect).unwrap();
+    frames.save_scene(&pixels, scene.canvas.width, scene.canvas.height, Duration::from_millis(140), None, card, Some(&scene), scene.canvas, Some(0)).unwrap();
+    frames.save_scene(&vec![0; 480 * 390], 480, 390, Duration::from_millis(700), None, card, Some(&scene), card.rect, Some(2400)).unwrap();
     frames.finish().unwrap();
     let timeline = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
     let entries: Vec<serde_json::Value> = timeline.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(entries[0]["speechSample"], 0);
+    assert_eq!(entries[1]["speechSample"], 2400);
     assert_eq!(entries[0]["geometry"]["phase"], "impact");
     assert_eq!(entries[0]["geometry"]["monitor"]["y"], -200);
     assert_eq!(entries[0]["geometry"]["source"][1], 879.0);

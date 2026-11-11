@@ -33,7 +33,7 @@ impl Animation {
     }
 
     pub fn fps(&self) -> f64 {
-        match self { Self::Video(video) => video.fps(), Self::Chimera(_) => 30.0 }
+        match self { Self::Video(video) => video.fps(), Self::Chimera(_) => 60.0 }
     }
 
     pub fn decoded_frames(&self) -> u64 {

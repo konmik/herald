@@ -47,7 +47,21 @@ impl Utterance {
         if position == 0 || position >= self.samples.len() as u64 {
             Pose::neutral()
         } else {
-            self.poses[(position as usize / POSE_HOP).min(self.poses.len() - 1)].clone()
+            let index = position as usize / POSE_HOP;
+            let start = index * POSE_HOP;
+            let count = POSE_HOP.min(self.samples.len() - start);
+            let fraction = (position as usize - start) as f64 / count as f64;
+            let before = &self.poses[index];
+            let after = &self.poses[index + 1];
+            let mut artic = before.artic.to_array();
+            for (value, next) in artic.iter_mut().zip(after.artic.to_array()) {
+                *value += (next - *value) * fraction;
+            }
+            Pose {
+                artic: HumanArtic::from_array(&artic),
+                f0: before.f0 + (after.f0 - before.f0) * fraction,
+                level: before.level + (after.level - before.level) * fraction as f32,
+            }
         }
     }
 }
@@ -155,6 +169,7 @@ pub fn prepare(text: &str, cancelled: &AtomicBool) -> Result<Arc<Utterance>, Str
 pub struct Head {
     renderer: head::Head,
     playback: Option<Arc<Playback>>,
+    capture_start: Option<Duration>,
     frames: u64,
     sample_position: u64,
 }
@@ -163,16 +178,26 @@ impl Head {
     pub fn new() -> Self {
         let mut renderer = head::Head::new(128);
         renderer.draw(&Pose::neutral(), 0.0);
-        Self { renderer, playback: None, frames: 0, sample_position: 0 }
+        Self { renderer, playback: None, capture_start: None, frames: 0, sample_position: 0 }
     }
 
     pub fn attach(&mut self, playback: Arc<Playback>) {
         self.playback = Some(playback);
+        self.capture_start = None;
         self.sample_position = 0;
+    }
+
+    pub fn attach_capture(&mut self, utterance: Arc<Utterance>, speech_start: Duration) {
+        self.attach(Arc::new(Playback::new(utterance)));
+        self.capture_start = Some(speech_start);
     }
 
     pub fn advance(&mut self, elapsed: Duration) {
         let pose = if let Some(playback) = self.playback.as_ref() {
+            if let Some(start) = self.capture_start {
+                let position = elapsed.saturating_sub(start).as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000;
+                playback.position.store(position.min(playback.utterance.samples.len() as u128) as u64, Ordering::Release);
+            }
             self.sample_position = playback.sample_position();
             if playback.stopped.load(Ordering::Acquire) || self.sample_position >= playback.utterance.samples.len() as u64 {
                 self.playback = None;
@@ -196,7 +221,7 @@ impl Head {
     }
 
     pub fn sample_position(&self) -> u64 {
-        self.playback.as_ref().map_or(self.sample_position, |playback| playback.sample_position())
+        self.sample_position
     }
 }
 

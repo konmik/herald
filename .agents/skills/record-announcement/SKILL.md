@@ -31,9 +31,11 @@ Done when Pillow imports, FFmpeg works, a compatible binary exists and complete 
 
 ## 3. Capture
 
-Save the MP4, PNG preview and JSON verification under `./temp` with a descriptive, versioned filename. For another recording of the same message, increment the highest existing version and keep earlier videos. Use `--last --session <id>` for saved messages, `--text 'The exact message.'` for supplied text, or `--history` for a particular history file; pass only arguments supported by the helper.
+Save only the MP4 under `./temp` with a descriptive, versioned filename. Keep the PNG preview and JSON verification in the recording's system temporary directory. For another recording of the same message, increment the highest existing version and keep earlier videos. Use `--last --session <id>` for saved messages, `--text 'The exact message.'` for supplied text, or `--history` for a particular history file; pass only arguments supported by the helper.
 
 Launch an isolated, muted announcer with disposable settings and presence. Put only the chosen video in its isolated library and select that character explicitly. Preserve the live settings and process.
+
+For CHIMERA, select its native character and voice, and pass the complete narration duration with `--capture-speech-seconds` alongside `--capture-frames`. This drives the native head from the narration's sample position after the opening transition. Capture that window directly; do not export head frames into a video for replay. Require each captured `speechSample` to match the narration position at that frame's `elapsed` time, including delayed frames.
 
 Capture the actual desktop with FFmpeg `gdigrab`; a plain background or wallpaper composite is not desktop capture. Start before the announcement appears and continue after it disappears. Use DPI-aware physical window bounds to crop the announcer plus desktop padding: add 15% of the original window width on the left and 15% of its height above, rounded to pixels. Preserve the original content size. Record a user-specified padding override instead when supplied. Check that the requested crop fits on screen.
 
@@ -41,7 +43,7 @@ Align captured desktop timestamps with announcement appearance and the recorded 
 
 Close only the isolated announcer and screen recorder started for this recording. Remove their temporary frames, desktop footage and audio on success, failure or cancellation.
 
-Done when both owned processes have exited, scratch files are removed and the MP4, preview and verification exist under `./temp`.
+Done when both owned processes have exited and the MP4 exists under `./temp`; all other recording files stay in system temp until verification and cleanup.
 
 ## 4. Verify and deliver
 

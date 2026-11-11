@@ -536,7 +536,7 @@ fn run() -> Result<(), String> {
                         let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
                         state::timing(format!("video_load_start id={}", notification.id));
-                        let animation = match animation::Animation::open(&character.visual) {
+                        let mut animation = match animation::Animation::open(&character.visual) {
                             Ok(animation) => Some(animation),
                             Err(error) => {
                                 state::log(&data, format!("Video: {error}"));
@@ -554,7 +554,17 @@ fn run() -> Result<(), String> {
                         };
                         state::timing(format!("video_load_end id={}", notification.id));
                         let transition_duration = lightning.transition_duration();
-                        let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + transition_duration).unwrap_or_default());
+                        let mut duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + transition_duration).unwrap_or_default());
+                        if muted && capture_speech_seconds.is_some() {
+                            if let Some(animation::Animation::Chimera(head)) = &mut animation {
+                                let utterance = match chimera::prepare(&notification.text, &stop) {
+                                    Ok(utterance) => utterance,
+                                    Err(error) => { state::log(&data, error); *control_flow = ControlFlow::Exit; return; }
+                                };
+                                duration = duration.max(Duration::from_secs_f64(utterance.samples.len() as f64 / f64::from(utterance.sample_rate())) + transition_duration);
+                                head.attach_capture(utterance, transition_duration);
+                            }
+                        }
                         let readiness_timeout = speech_readiness_timeout(settings);
                         let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, animation, placement, entrance, transition_duration };
                         if muted {
@@ -687,7 +697,11 @@ fn run() -> Result<(), String> {
                                 active.presented_bounds = Some(viewport);
                             }
                             if let Some(frames) = &mut frames {
-                                frames.save_scene(&pixels, viewport.width, viewport.height, elapsed, active.end.map(|end| end.duration_since(active.started)), active.placement, active.entrance.as_ref(), viewport)?;
+                                let speech_sample = active.animation.as_ref().and_then(|animation| match animation {
+                                    animation::Animation::Chimera(_) => Some(animation.sample_position()),
+                                    animation::Animation::Video(_) => None,
+                                });
+                                frames.save_scene(&pixels, viewport.width, viewport.height, elapsed, active.end.map(|end| end.duration_since(active.started)), active.placement, active.entrance.as_ref(), viewport, speech_sample)?;
                             }
                             if elapsed >= active.transition_duration && active.end.is_none() {
                                 if let Some(path) = snapshot.take() {

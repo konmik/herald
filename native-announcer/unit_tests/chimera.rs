@@ -63,6 +63,56 @@ fn stopping_playback_closes_the_mouth_and_releases_audio() {
 }
 
 #[test]
+fn mouth_pose_interpolates_at_the_played_sample_including_the_short_final_block() {
+    let poses = (0..3).map(|index| Pose {
+        artic: HumanArtic::from_array(&[index as f64; 17]),
+        f0: 100.0 + 100.0 * index as f64,
+        level: index as f32 * 0.25,
+    }).collect();
+    let utterance = Utterance { samples: vec![0; POSE_HOP + POSE_HOP / 2], poses };
+    for (position, fraction) in [(POSE_HOP / 2, 0.5), (POSE_HOP, 1.0), (POSE_HOP + POSE_HOP / 4, 1.5)] {
+        let pose = utterance.pose(position as u64);
+        assert!(pose.artic.to_array().iter().all(|value| (*value - fraction).abs() < 1e-9));
+        assert_eq!(pose.f0, 100.0 + 100.0 * fraction);
+        assert_eq!(pose.level, fraction as f32 * 0.25);
+    }
+    assert_eq!(utterance.pose(0).artic, Pose::neutral().artic);
+    assert_eq!(utterance.pose(utterance.samples.len() as u64).artic, Pose::neutral().artic);
+}
+
+#[test]
+fn capture_and_live_render_the_same_pose_after_delayed_frames() {
+    let utterance = speech();
+    let playback = Arc::new(Playback::new(Arc::clone(&utterance)));
+    let mut live = Head::new();
+    live.attach(Arc::clone(&playback));
+    let mut capture = Head::new();
+    capture.attach_capture(Arc::clone(&utterance), Duration::from_millis(650));
+    for milliseconds in [0, 300, 650, 701, 900, 1200, 1800, 2400, 10_000] {
+        let elapsed = Duration::from_millis(milliseconds);
+        let expected = ((milliseconds.saturating_sub(650) * u64::from(SAMPLE_RATE)) / 1000).min(utterance.samples.len() as u64);
+        playback.position.store(expected, Ordering::Release);
+        live.advance(elapsed);
+        capture.advance(elapsed);
+        assert_eq!(capture.sample_position(), expected);
+        assert_eq!(capture.frame(), live.frame());
+    }
+}
+
+#[test]
+fn displayed_sample_position_stays_with_the_rendered_frame() {
+    let playback = Arc::new(Playback::new(speech()));
+    let mut head = Head::new();
+    head.attach(Arc::clone(&playback));
+    playback.position.store(4800, Ordering::Release);
+    head.advance(Duration::from_secs(1));
+    playback.position.store(9600, Ordering::Release);
+    assert_eq!(head.sample_position(), 4800);
+    head.advance(Duration::from_secs(2));
+    assert_eq!(head.sample_position(), 9600);
+}
+
+#[test]
 fn completed_playback_releases_audio() {
     let utterance = speech();
     let playback = Arc::new(Playback::new(Arc::clone(&utterance)));
