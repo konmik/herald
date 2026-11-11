@@ -22,6 +22,18 @@ fn ffmpeg_is_found_outside_the_minimal_path_of_a_finder_launch() {
 use super::*;
 
 #[test]
+fn chimera_preview_is_not_paired_with_an_unrelated_voice() {
+    let directory = std::env::temp_dir().join(format!("herald-chimera-preview-{}", std::process::id()));
+    let library = directory.join("videos");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(library.join("chimera.mp4"), []).unwrap();
+    assert_eq!(select_path(&directory, "claude"), directory.join("claude/neutral.mp4"));
+    std::fs::write(library.join("ordinary.mp4"), []).unwrap();
+    assert_eq!(select_path(&directory, "claude"), library.join("ordinary.mp4"));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn decoder_failure_preserves_the_last_frame_and_stops_retrying() {
     struct FailingSource(bool);
     impl FrameSource for FailingSource {

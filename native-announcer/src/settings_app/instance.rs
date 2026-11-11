@@ -63,6 +63,12 @@ impl InstanceGuard {
 
     pub(super) fn register(&self, window: &gpui_kit::Window) -> Result<(), String> {
         let hwnd = hwnd(window)?;
+        let disabled = 1i32;
+        let result = unsafe { windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+            &disabled as *const _ as _, std::mem::size_of_val(&disabled) as u32,
+        ) };
+        if result < 0 { return Err(format!("Could not configure settings window transitions: {result:#x}")); }
         if unsafe { windows_sys::Win32::UI::Shell::SetWindowSubclass(hwnd, Some(desktop_message), SHOW_ON_DESKTOP, 0) } == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }

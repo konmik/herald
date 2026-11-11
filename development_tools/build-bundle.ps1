@@ -45,7 +45,7 @@ try {
         $runtime = Join-Path $stage 'native-announcer'
         New-Item -ItemType Directory -Path "$runtime/bin", "$runtime/resources" -Force | Out-Null
         Copy-Item -LiteralPath "$target/$rustTarget/release/herald.exe" -Destination "$runtime/bin/herald-win32-$arch.exe"
-        foreach ($name in @('characters.json', 'videos')) {
+        foreach ($name in @('characters.json', 'videos', 'licenses')) {
             $destination = Join-Path $runtime "resources/$name"
             New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $root "native-announcer/resources/$name") -Destination $destination -Recurse -Force

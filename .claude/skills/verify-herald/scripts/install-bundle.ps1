@@ -13,9 +13,11 @@ $oldClaude = $env:CLAUDE_CONFIG_DIR
 $oldData = $env:HERALD_DATA
 $data = Join-Path $scratch 'saved-settings-data'
 $process = $null
+$cache = $null
+$hostChecks = @{ claude = 'skipped'; opencode = 'skipped' }
 $transcribing = $false
 if (Test-Path -LiteralPath $evidencePath) { throw 'Use a new evidence directory' }
-New-Item -ItemType Directory -Path $evidencePath, $scratch, (Split-Path $config -Parent) -Force | Out-Null
+New-Item -ItemType Directory -Path $evidencePath, $scratch -Force | Out-Null
 try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
@@ -30,49 +32,62 @@ try {
     if ([Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath)) -cne $savedSettings) { throw 'Installation changed saved native settings' }
     . (Join-Path $app 'install.ps1')
     Test-Bundle $app | Out-Null
-    $env:CLAUDE_CONFIG_DIR = $profile
-    Register-ClaudeBundle $app $profile
-    $cache = @(Get-ClaudeInstallations $profile)[0].installPath
-    Get-PayloadFiles $cache | Out-Null
-    if (Get-ChildItem -LiteralPath $cache -Recurse -File | Where-Object Name -in @('node.exe', 'bridge.mjs', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE')) { throw 'Installed Claude cache contains a removed Node runtime payload' }
+    $commands = Get-BundleHostCommands
     $manifest = Get-Content -LiteralPath (Join-Path $app 'bundle-manifest.json') -Raw | ConvertFrom-Json
-    foreach ($file in $manifest.files | Where-Object { $_.path.StartsWith('claude-plugin/') }) {
-        $path = Join-Path $cache $file.path.Substring('claude-plugin/'.Length)
-        if (-not (Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path).Hash -ne $file.sha256) { throw "Claude cache differs from the bundle at $($file.path)" }
-    }
-    $original = '{/* preserved */ "plugins": [{"package": ' + (ConvertTo-Json ([string]$root)) + ', "options": {"minimumSeconds": 90}}, "unrelated-plugin"], "model": "preserved"}'
-    [IO.File]::WriteAllText($config, $original)
-    Register-OpenCodeBundle $app @($config)
-    $registered = Get-Content -LiteralPath $config -Raw
-    if ($registered.Contains($root.Replace('\', '\\')) -or -not $registered.Contains('/* preserved */') -or -not $registered.Contains('"minimumSeconds": 90') -or -not $registered.Contains('"unrelated-plugin"')) { throw 'OpenCode migration did not preserve settings or remove the checkout reference' }
-    $marketplace = Get-Content -LiteralPath (Join-Path $profile 'plugins/known_marketplaces.json') -Raw | ConvertFrom-Json
-    if ($marketplace.'herald-local'.source.path -ne (Join-Path $app 'claude-plugin')) { throw 'Claude marketplace does not use the installed source' }
+    if ($commands.claude) {
+        $env:CLAUDE_CONFIG_DIR = $profile
+        Register-ClaudeBundle $app $profile
+        $cache = @(Get-ClaudeInstallations $profile)[0].installPath
+        Get-PayloadFiles $cache | Out-Null
+        if (Get-ChildItem -LiteralPath $cache -Recurse -File | Where-Object Name -in @('node.exe', 'bridge.mjs', 'runtime.mjs', 'session-title.mjs', 'node-LICENSE')) { throw 'Installed Claude cache contains a removed Node runtime payload' }
+        foreach ($file in $manifest.files | Where-Object { $_.path.StartsWith('claude-plugin/') }) {
+            $path = Join-Path $cache $file.path.Substring('claude-plugin/'.Length)
+            if (-not (Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path).Hash -ne $file.sha256) { throw "Claude cache differs from the bundle at $($file.path)" }
+        }
+        $marketplace = Get-Content -LiteralPath (Join-Path $profile 'plugins/known_marketplaces.json') -Raw | ConvertFrom-Json
+        if ($marketplace.'herald-local'.source.path -ne (Join-Path $app 'claude-plugin')) { throw 'Claude marketplace does not use the installed source' }
+    } else { $profile = $null }
+    $configs = @()
+    if ($commands.opencode) {
+        New-Item -ItemType Directory -Path (Split-Path $config -Parent) -Force | Out-Null
+        $original = '{/* preserved */ "plugins": [{"package": ' + (ConvertTo-Json ([string]$root)) + ', "options": {"minimumSeconds": 90}}, "unrelated-plugin"], "model": "preserved"}'
+        [IO.File]::WriteAllText($config, $original)
+        $configs = @($config)
+        Register-OpenCodeBundle $app $configs -OpenCodeCommand $commands.opencode
+        $registered = Get-Content -LiteralPath $config -Raw
+        if ($registered.Contains($root.Replace('\', '\\')) -or -not $registered.Contains('/* preserved */') -or -not $registered.Contains('"minimumSeconds": 90') -or -not $registered.Contains('"unrelated-plugin"')) { throw 'OpenCode migration did not preserve settings or remove the checkout reference' }
+    } else { $config = $null }
     $binary = Join-Path $app "native-announcer/bin/herald-win32-$($manifest.arch).exe"
     Install-SettingsShortcut $binary $programs
     $shortcut = Read-NativeShortcut (Join-Path $programs 'Herald settings.lnk')
     if ($shortcut.TargetPath -ne $binary -or $shortcut.Arguments -ne '--settings') { throw 'Installed shortcut points outside the bundle' }
-    Invoke-Checked 'claude' @('plugin', 'marketplace', 'add', (Join-Path $root 'claude-plugin'), '--scope', 'user')
+    if ($commands.claude) { Invoke-Checked $commands.claude @('plugin', 'marketplace', 'add', (Join-Path $root 'claude-plugin'), '--scope', 'user') }
     $blockedPrograms = Join-Path $scratch 'blocked-programs'
     New-Item -ItemType Directory -Path $blockedPrograms | Out-Null
     $blockedShortcut = Join-Path $blockedPrograms 'Herald settings.lnk'
     Write-NativeShortcut $blockedShortcut (Join-Path $env:SystemRoot 'notepad.exe') '' $env:SystemRoot
-    $rollbackPaths = @($config, (Join-Path $profile 'settings.json'), (Join-Path $profile 'plugins/known_marketplaces.json'), (Join-Path $profile 'plugins/installed_plugins.json'), $blockedShortcut)
+    $rollbackPaths = @($blockedShortcut) + $configs
+    if ($profile) { $rollbackPaths += @('settings.json', 'plugins/known_marketplaces.json', 'plugins/installed_plugins.json') | ForEach-Object { Join-Path $profile $_ } }
     $rollbackBytes = @{}
     foreach ($path in $rollbackPaths) { $rollbackBytes[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
-    $cacheBefore = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
+    $cacheBefore = @(if ($cache) { Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName } })
     $rejected = $false
-    try { Register-BundleHosts $app @($config) $profile $binary $blockedPrograms } catch { $rejected = $true }
+    try { Register-BundleHosts $app $configs $profile $binary $blockedPrograms -OpenCodeCommand $commands.opencode } catch { $rejected = $true }
     if (-not $rejected) { throw 'An unrelated shortcut did not reject real host registration' }
     foreach ($path in $rollbackPaths) {
         if ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -cne $rollbackBytes[$path]) { throw "Real host rollback changed $path" }
     }
-    $cacheAfter = @(Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName })
-    if (@(Compare-Object $cacheBefore $cacheAfter).Count) { throw 'Real host rollback changed the previous cache' }
-    Register-BundleHosts $app @($config) $profile $binary $programs
+    $cacheAfter = @(if ($cache) { Get-PayloadFiles $cache | Sort-Object FullName | ForEach-Object { Get-PayloadHash $_.FullName } })
+    if ($cache -and @(Compare-Object $cacheBefore $cacheAfter).Count) { throw 'Real host rollback changed the previous cache' }
+    Register-BundleHosts $app $configs $profile $binary $programs -OpenCodeCommand $commands.opencode
+    if ($commands.claude) { $hostChecks.claude = 'passed' }
     Remove-DeploymentDirectory $extract
     if (Test-Path -LiteralPath (Join-Path $app 'node_modules')) { throw 'Installed package must not contain checkout dependencies' }
-    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'boot-bundle.ps1') -AppDirectory $app -Evidence (Join-Path $evidencePath 'opencode-bootstrap')
-    if ($LASTEXITCODE -ne 0) { throw 'Real installed OpenCode bootstrap failed' }
+    if ($commands.opencode) {
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'boot-bundle.ps1') -AppDirectory $app -Evidence (Join-Path $evidencePath 'opencode-bootstrap')
+        if ($LASTEXITCODE -ne 0) { throw 'Real installed OpenCode bootstrap failed' }
+        $hostChecks.opencode = 'passed'
+    }
     $again = Install-Payload $app (Join-Path $scratch 'installed')
     if ($again -ne $app) { throw 'Repeated installation changed its location' }
     if ([Convert]::ToHexString([IO.File]::ReadAllBytes($settingsPath)) -cne $savedSettings) { throw 'Host registration or reinstall changed saved native settings' }
@@ -91,11 +106,11 @@ try {
     Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $evidencePath 'preserved-settings.json')
     $stopped = @(Stop-OwnedAnnouncers @((Join-Path $app 'native-announcer')))
     if ($stopped.Count -ne 1 -or $stopped[0].binary -ne $binary -or -not $process.WaitForExit(5000) -or $stopped[0].assets.TrimEnd('\', '/') -ne (Join-Path $app 'native-announcer/resources').TrimEnd('\', '/')) { throw 'Owned installed announcer was not stopped correctly' }
-    @{ archive = [IO.Path]::GetFullPath($Archive); app = $app; claudePlugin = $cache; claudeConfig = $profile; openCodeConfig = $config; programs = $programs; scratch = $scratch; rollbackPassed = $true; extractionRemoved = -not (Test-Path -LiteralPath $extract); passed = $true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
-    Copy-Item -LiteralPath $config -Destination (Join-Path $evidencePath 'opencode.jsonc')
-    Write-Output "PASS: real bundle installation, host registrations, physical Claude cache, shortcut and owned process handover. App saved at $app"
+    @{ archive = [IO.Path]::GetFullPath($Archive); app = $app; claudePlugin = $cache; claudeConfig = $profile; openCodeConfig = $config; programs = $programs; scratch = $scratch; hostChecks = $hostChecks; rollbackPassed = $true; extractionRemoved = -not (Test-Path -LiteralPath $extract); passed = $true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
+    if ($config) { Copy-Item -LiteralPath $config -Destination (Join-Path $evidencePath 'opencode.jsonc') }
+    Write-Output "PASS: real bundle installation, available host registrations, shortcut and owned process handover. App saved at $app"
 } catch {
-    @{ scratch = $scratch; app = $app; claudePlugin = $cache; passed = $false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
+    @{ scratch = $scratch; app = $app; claudePlugin = $cache; hostChecks = $hostChecks; passed = $false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidencePath 'installation.json')
     $_ | Out-String | Set-Content -LiteralPath (Join-Path $evidencePath 'failure.txt')
     throw
 } finally {

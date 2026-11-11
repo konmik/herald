@@ -182,6 +182,7 @@ async function buildPayload(stage, binary, arch) {
   await mkdir(join(runtime, 'resources'), { recursive: true })
   await copyFile(join(root, 'native-announcer/resources/characters.json'), join(runtime, 'resources/characters.json'))
   await cp(join(root, 'native-announcer/resources/videos'), join(runtime, 'resources/videos'), { recursive: true })
+  await cp(join(root, 'native-announcer/resources/licenses'), join(runtime, 'resources/licenses'), { recursive: true })
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   const exports = Object.fromEntries(Object.entries(pkg.exports).map(([key, value]) => [key, value.replace(/\.ts$/, '.js')]))
   await writeFile(join(payload, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, type: 'module', private: true, exports, pi: pkg.pi }, null, 2) + '\n')
@@ -280,6 +281,7 @@ async function makeApplication(stage, { binary, icon, payload, version }) {
   // Contents/Resources is the default asset folder of a bundled executable; the helper reads the same folder.
   await copyFile(join(root, 'native-announcer/resources/characters.json'), join(contents, 'Resources/characters.json'))
   await cp(join(root, 'native-announcer/resources/videos'), join(contents, 'Resources/videos'), { recursive: true })
+  await cp(join(root, 'native-announcer/resources/licenses'), join(contents, 'Resources/licenses'), { recursive: true })
   await cp(payload, join(contents, 'Resources/herald'), { recursive: true })
   const helper = join(bundle, HELPER_PATH)
   await makeBundle(helper, HELPER, { binary, icon, version })

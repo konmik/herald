@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn editing_chimera_preserves_its_physical_voice() {
+    let mut character = Character { voice: CharacterVoice::Chimera, ..Character::default() };
+    assert_eq!(voice_id_text(&character.voice), "");
+    capture_draft_voice(&mut character, "");
+    capture_draft_voice(&mut character, "remote-voice");
+    assert_eq!(character.voice, CharacterVoice::Chimera);
+}
+
+#[test]
 fn reading_the_resolved_video_keeps_the_portable_bundled_path() {
     let assets = Path::new("C:/herald/resources");
     let mut character = Character { animation_path: Some(PathBuf::from("videos/royal.mp4")), ..Character::default() };

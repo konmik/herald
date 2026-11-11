@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn procedural_history_has_character_identity_without_a_video() {
+    let notification: Notification = serde_json::from_value(serde_json::json!({
+        "id":"chimera-history", "sessionID":"test", "completed":10, "text":"Done.", "character":"codex"
+    })).unwrap();
+    let data = std::env::temp_dir().join(format!("herald-chimera-history-{}", std::process::id()));
+    std::fs::create_dir_all(&data).unwrap();
+    record_with_identity(&data, &notification, "chimera", None, Utc::now()).unwrap();
+    let contents = std::fs::read_to_string(data.join("history.jsonl")).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+    assert_eq!(entry["characterId"], "chimera");
+    assert_eq!(entry["source"], "opencode");
+    assert!(entry.get("video").is_none());
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
 fn appends_messages_with_display_time_and_actual_selected_character() {
     let data = std::env::temp_dir().join("opencode").join(format!(
         "herald-history-{}-{}",
@@ -49,7 +65,7 @@ fn custom_history_keeps_profile_identity_separate_from_integration_source() {
         "id":"custom", "sessionID":"session", "completed":10, "text":"Done.", "character":"claude"
     })).unwrap();
     let video = Path::new("C:/Videos/royal-herald.mp4");
-    record_with_identity(&data, &notification, "royal-herald", video, Utc::now()).unwrap();
+    record_with_identity(&data, &notification, "royal-herald", Some(video), Utc::now()).unwrap();
     let entry: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(data.join("history.jsonl")).unwrap()).unwrap();
     assert_eq!(entry["character"], "royal-herald");
     assert_eq!(entry["characterId"], "royal-herald");
@@ -91,9 +107,9 @@ fn pi_history_records_selected_library_character_and_shared_video_fallback() {
         })).unwrap();
         let selected = crate::characters::resolve(&settings, &assets, notification.character(), None);
         assert_eq!(selected.history_identity(), "hatted-herald-01");
-        assert_eq!(selected.video_path, assets.join("videos/hatted-herald-01.mp4"));
-        assert!(selected.video_path.is_file());
-        record_with_identity(&data, &notification, selected.history_identity(), &selected.video_path, Utc::now()).unwrap();
+        assert_eq!(selected.visual.video_path().unwrap(), assets.join("videos/hatted-herald-01.mp4").as_path());
+        assert!(selected.visual.video_path().unwrap().is_file());
+        record_with_identity(&data, &notification, selected.history_identity(), selected.visual.video_path(), Utc::now()).unwrap();
         let contents = std::fs::read_to_string(data.join("history.jsonl")).unwrap();
         let entry: serde_json::Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(entry["source"], expected);
@@ -103,8 +119,8 @@ fn pi_history_records_selected_library_character_and_shared_video_fallback() {
     }
     settings.characters.get_mut("hatted-herald-01").unwrap().animation_path = Some(data.join("missing.mp4"));
     let fallback = crate::characters::resolve(&settings, &assets, "pi", None);
-    assert_eq!(fallback.video_path.parent(), Some(assets.join("videos").as_path()));
-    assert!(fallback.video_path.is_file());
+    assert_eq!(fallback.visual.video_path().unwrap().parent(), Some(assets.join("videos").as_path()));
+    assert!(fallback.visual.video_path().unwrap().is_file());
     assert_eq!(crate::video::select_path(&assets, "pi").parent(), Some(assets.join("videos").as_path()));
     std::fs::remove_dir_all(data).unwrap();
 }

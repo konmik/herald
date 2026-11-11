@@ -177,7 +177,7 @@ try {
   assert.equal(report.passiveWindow, true)
   assert.equal(report.focusChecked, true)
   assert.equal(report.focusUnchanged, true)
-  assert.ok(report.decodedVideoFrames > 0)
+  assert.ok(report.decodedVideoFrames + report.proceduralFrames > 0)
   await request('thread/archive', { threadId: sessionID })
   const result = { passed: true, scenario, sessionID, announcementID: renderedID, originalContext: true }
   if (cancelled) result.cancellation = { commandID: cancelled.params.item.id, exitCode: cancelled.params.item.exitCode, turnID: cancelled.params.turnId }

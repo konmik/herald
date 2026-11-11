@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn chimera_resolves_without_a_video_or_remote_voice() {
+    let mut settings = Settings::default();
+    settings.characters.insert("chimera".into(), character(CharacterVoice::Chimera));
+    settings.elevenlabs_api_key = Some("unrelated-key".into());
+    let resolved = resolve(&settings, Path::new("missing-assets"), "codex", Some("chimera"));
+    assert_eq!(resolved.voice, ResolvedVoice::Chimera);
+    assert_eq!(resolved.visual, ResolvedVisual::Chimera);
+    assert_eq!(resolved.history_identity(), "chimera");
+    assert!(resolved.video_warning.is_none());
+    assert!(resolved.visual.video_path().is_none());
+    assert_eq!(serde_json::to_value(CharacterVoice::Chimera).unwrap(), serde_json::json!({"type":"chimera"}));
+    assert_eq!(bundled_characters().contains_key("chimera"), cfg!(target_os = "windows"));
+    assert_eq!(validate_registry(&settings.characters, None).is_ok(), cfg!(target_os = "windows"));
+}
+
 fn character(voice: CharacterVoice) -> Character {
     Character {
         name: "Royal herald".into(),
@@ -22,6 +38,7 @@ fn random_choices_use_selected_characters_or_the_entire_registry() {
         let resolved = resolve(&settings, Path::new("missing-assets"), "opencode", None);
         assert!(matches!(resolved.id.as_deref(), Some("herald" | "robot")));
         assert_eq!(resolved.voice, match &settings.characters[resolved.id.as_ref().unwrap()].voice {
+            CharacterVoice::Chimera => ResolvedVoice::Chimera,
             CharacterVoice::Local { speaker } => ResolvedVoice::Local { speaker: speaker.clone() },
             CharacterVoice::ElevenLabs { voice_id } => ResolvedVoice::ElevenLabs { voice_id: voice_id.clone() },
         });
@@ -75,7 +92,7 @@ fn missing_custom_video_keeps_remote_voice_and_reports_default_video() {
     let resolved = resolve(&settings, Path::new("missing-assets"), "opencode", Some("royal-herald"));
     assert_eq!(resolved.voice, ResolvedVoice::ElevenLabs { voice_id: "saved-voice".into() });
     assert!(resolved.video_warning.is_some());
-    assert_eq!(resolved.video_path, Path::new("missing-assets/opencode/neutral.mp4"));
+    assert_eq!(resolved.visual.video_path().unwrap(), Path::new("missing-assets/opencode/neutral.mp4"));
 }
 
 #[test]
@@ -103,7 +120,7 @@ fn bundled_relative_video_uses_the_runtime_asset_root() {
     let mut settings = Settings::default();
     settings.selected_character = Some("hatted-herald-01".into());
     let resolved = resolve(&settings, &directory, "opencode", Some("hatted-herald-01"));
-    assert_eq!(resolved.video_path, video);
+    assert_eq!(resolved.visual.video_path().unwrap(), video.as_path());
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -118,7 +135,7 @@ fn absolute_custom_video_path_remains_absolute() {
     settings.characters.get_mut("custom").unwrap().animation_path = Some(video.clone());
     settings.selected_character = Some("custom".into());
     let resolved = resolve(&settings, Path::new("relocated-assets"), "opencode", Some("custom"));
-    assert_eq!(resolved.video_path, video);
+    assert_eq!(resolved.visual.video_path().unwrap(), video.as_path());
     std::fs::remove_dir_all(directory).unwrap();
 }
 

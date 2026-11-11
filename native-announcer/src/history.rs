@@ -18,7 +18,8 @@ struct ShownMessage<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     character_id: Option<&'a str>,
     source: &'a str,
-    video: &'a Path,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video: Option<&'a Path>,
 }
 
 pub fn record(
@@ -32,14 +33,14 @@ pub fn record(
         .and_then(|name| name.to_str())
         .filter(|name| *name != "neutral")
         .unwrap_or_else(|| notification.character());
-    record_with_values(data, notification, character, None, video, shown_at)
+    record_with_values(data, notification, character, None, Some(video), shown_at)
 }
 
 pub fn record_with_identity(
     data: &Path,
     notification: &Notification,
     character: &str,
-    video: &Path,
+    video: Option<&Path>,
     shown_at: DateTime<Utc>,
 ) -> Result<(), String> {
     record_with_values(data, notification, character, Some(character), video, shown_at)
@@ -50,7 +51,7 @@ fn record_with_values(
     notification: &Notification,
     character: &str,
     character_id: Option<&str>,
-    video: &Path,
+    video: Option<&Path>,
     shown_at: DateTime<Utc>,
 ) -> Result<(), String> {
     let entry = ShownMessage {

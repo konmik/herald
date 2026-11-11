@@ -1,5 +1,49 @@
 use super::*;
 
+#[cfg(target_os = "windows")]
+#[test]
+fn output_clock_accepts_samples_bytes_and_milliseconds() {
+    use windows::Win32::Media::{MMTIME, MMTIME_0, TIME_BYTES, TIME_MS, TIME_SAMPLES};
+    assert_eq!(output_sample_position(MMTIME { wType: TIME_SAMPLES, u: MMTIME_0 { sample: 480 } }, 48000), Some(480));
+    assert_eq!(output_sample_position(MMTIME { wType: TIME_BYTES, u: MMTIME_0 { cb: 960 } }, 48000), Some(480));
+    assert_eq!(output_sample_position(MMTIME { wType: TIME_MS, u: MMTIME_0 { ms: 10 } }, 48000), Some(480));
+    assert_eq!(output_sample_position(MMTIME { wType: 0, ..MMTIME::default() }, 48000), None);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "Uses Windows audio output"]
+fn real_output_clock_excludes_warmup_and_waits_for_presentation() {
+    use std::sync::{Arc, atomic::AtomicU64};
+    use std::time::Duration;
+    let cursor = Arc::new(AtomicU64::new(0));
+    let observed = cursor.clone();
+    let completed = Arc::new(AtomicBool::new(false));
+    let observer_done = completed.clone();
+    let observer = std::thread::spawn(move || {
+        let mut intermediate = false;
+        while !observer_done.load(Ordering::Acquire) {
+            let position = observed.load(Ordering::Acquire);
+            intermediate |= position > 0 && position < 48000;
+            assert!(position <= 48000);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        intermediate
+    });
+    let start = SpeechStart::new(1, || {
+        assert_eq!(cursor.load(Ordering::Acquire), 0);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(cursor.load(Ordering::Acquire), 0);
+        true
+    });
+    let result = play_pcm_with_clock(&vec![0; 48000], 48000, &AtomicU16::new(0), None, &AtomicBool::new(false), Some(start), Some(&cursor));
+    completed.store(true, Ordering::Release);
+    let intermediate = observer.join().unwrap();
+    result.unwrap();
+    assert!(intermediate);
+    assert_eq!(cursor.load(Ordering::Acquire), 48000);
+}
+
 #[test]
 fn warmup_is_exact_zero_pcm_and_fully_drains_before_activation_and_speech() {
     use std::time::{Duration, Instant};

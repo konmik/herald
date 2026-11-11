@@ -15,7 +15,8 @@ if (-not $PSCmdlet.ShouldProcess($InstallDirectory, 'Test, build a release bundl
 Push-Location $Repository
 try {
     Invoke-Checked 'pnpm' @('run', 'check')
-    Invoke-Checked 'claude' @('plugin', 'validate', (Join-Path $Repository 'claude-plugin'))
+    $commands = Get-BundleHostCommands
+    if ($commands.claude) { Invoke-Checked $commands.claude @('plugin', 'validate', (Join-Path $Repository 'claude-plugin')) }
     $zip = & "$PSScriptRoot/build-bundle.ps1"
     $zip = @($zip)[-1]
     Invoke-Checked 'pwsh' @('-NoProfile', '-File', (Join-Path $Repository '.claude/skills/verify-herald/scripts/install-bundle.ps1'), '-Archive', $zip)

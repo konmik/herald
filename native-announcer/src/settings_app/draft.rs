@@ -69,12 +69,14 @@ impl SettingsDraft {
 
 pub(super) fn voice_id_text(voice: &CharacterVoice) -> &str {
     match voice {
+        CharacterVoice::Chimera => "",
         CharacterVoice::Local { .. } => "",
         CharacterVoice::ElevenLabs { voice_id } => voice_id,
     }
 }
 
 pub(super) fn capture_draft_voice(draft: &mut Character, entered_id: &str) {
+    if matches!(draft.voice, CharacterVoice::Chimera) { return; }
     let voice_id = entered_id.trim();
     if !voice_id.is_empty() {
         if !matches!(&draft.voice, CharacterVoice::ElevenLabs { voice_id: current } if current == voice_id) {

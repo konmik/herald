@@ -1,4 +1,4 @@
-param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture, [switch]$CaptureFrames)
+param([string]$Evidence = ('temp/verification/' + [guid]::NewGuid()), [string]$AppDirectory, [string]$ClaudePluginDirectory, [ValidateSet('OpenCode', 'Claude')][string]$Runtime = 'OpenCode', [switch]$Speech, [switch]$Meeting, [switch]$Quiet, [string]$AppearanceSettings, [switch]$SummaryTitle, [ValidateRange(0, 10)][int]$SilentSoundSeconds = 0, [switch]$SpeechFixture, [switch]$CaptureFrames, [string]$CharacterId, [ValidateRange(0, 100)][int]$Volume = 35)
 $ErrorActionPreference = 'Stop'
 $expectedTitle = if ($SummaryTitle) { 'Checks passed' } else { 'Verification session' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
@@ -48,7 +48,13 @@ try {
     Start-Transcript -Path (Join-Path $evidencePath 'actions.txt') | Out-Null
     $transcribing = $true
     $env:HERALD_DATA = $scratch
-    $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = 35; useGpu = $false }
+    $settings = @{ quietMode = (-not $Speech -or [bool]$Quiet); scheduleEnabled = $false; volume = $Volume; useGpu = $false }
+    if ($CharacterId) {
+        $character = (Get-Content (Join-Path $assets 'characters.json') -Raw | ConvertFrom-Json -AsHashtable)[$CharacterId]
+        if (-not $character) { throw 'The requested verification character is not bundled.' }
+        $character.selected = $true
+        $settings.characters = @{ $CharacterId = $character }
+    }
     if ($PSBoundParameters.ContainsKey('SilentSoundSeconds')) { $settings.silentSoundSeconds = $SilentSoundSeconds }
     if ($SpeechFixture) {
         $addressFile = Join-Path $scratch 'speech-api-address.txt'
@@ -98,6 +104,7 @@ try {
             if ($process.MainWindowHandle -eq [IntPtr]::Zero -and -not (Test-Path (Join-Path $scratch 'inbox'))) { throw 'Announcer not ready' }
             Write-Output "Doctor passed: owned PID $($process.Id), SHA256 $hash, isolated inbox"
             $message = @{ type = 'notify'; id = 'verification-result'; sessionID = 'claude:verification'; completed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); title = 'Verification session'; text = 'The verification task passed.'; character = 'claude'; emotion = 'neutral' }
+            if ($CharacterId) { $message.characterID = $CharacterId }
             if ($SummaryTitle) { $message.text = ' Checks passed | The verification task passed. ' }
             $message | ConvertTo-Json | Set-Content (Join-Path $evidencePath 'notification.json')
             Write-Output 'Send notification through the production bridge; keep session presence alive.'
@@ -109,11 +116,16 @@ try {
     if ($process.ExitCode -ne 0) { throw "Announcer exited $($process.ExitCode)" }
     if (Test-Path (Join-Path $scratch 'errors.log')) { throw (Get-Content (Join-Path $scratch 'errors.log') -Raw) }
     $report = Get-Content (Join-Path $evidencePath 'report.json') -Raw | ConvertFrom-Json
-    if ($report.shown -ne 1 -or $report.finished -ne 1 -or -not $report.passiveWindow -or -not $report.focusChecked -or -not $report.focusUnchanged -or $report.decodedVideoFrames -le 0 -or $report.sessionTitles[0] -ne $expectedTitle) { throw 'Notification did not render, complete, or preserve focus' }
-    $shouldSpeak = $Speech -and -not $Meeting -and -not $Quiet
+    $renderedFrames = $report.decodedVideoFrames + $report.proceduralFrames
+    if ($report.shown -ne 1 -or $report.finished -ne 1 -or -not $report.passiveWindow -or -not $report.focusChecked -or -not $report.focusUnchanged -or $renderedFrames -le 0 -or $report.sessionTitles[0] -ne $expectedTitle) { throw 'Notification did not render, complete, or preserve focus' }
+    $shouldSpeak = $Speech -and $Volume -gt 0 -and -not $Meeting -and -not $Quiet
     if (($shouldSpeak -and $report.speechStarted -ne 1) -or (-not $shouldSpeak -and ($report.speechStarted -ne 0 -or $report.mutedAnnouncements -ne 1))) { throw 'Speech policy failed' }
     $history = Get-Content (Join-Path $scratch 'history.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
     if (@($history).Count -ne 1 -or $history.id -ne 'verification-result' -or $history.text -ne 'The verification task passed.' -or $history.title -ne $expectedTitle) { throw 'Shown history does not match notification' }
+    if ($CharacterId -and $history.characterId -cne $CharacterId) { throw 'The requested character was not shown.' }
+    if ($CharacterId -eq 'chimera' -and ($report.decodedVideoFrames -ne 0 -or $history.PSObject.Properties.Name -contains 'video')) { throw 'CHIMERA playback used a video instead of the native head.' }
+    if ($CharacterId -eq 'chimera' -and (($shouldSpeak -and $report.maxPlayedSamples -le 0) -or (-not $shouldSpeak -and $report.maxPlayedSamples -ne 0))) { throw 'CHIMERA mouth timing did not follow the speech policy.' }
+    if ($CharacterId -eq 'chimera' -and $report.preSpeechPlayedSamples -ne 0) { throw 'CHIMERA speech advanced before the presentation gate opened.' }
     Copy-Item (Join-Path $scratch 'history.jsonl') (Join-Path $evidencePath 'history.jsonl')
     Copy-Item (Join-Path $scratch 'queue.json') (Join-Path $evidencePath 'queue.json')
     if (@(Get-Content (Join-Path $evidencePath 'queue.json') -Raw | ConvertFrom-Json).Count -ne 0) { throw 'Completed notification remained queued' }

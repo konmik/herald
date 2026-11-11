@@ -52,5 +52,38 @@ class OpeningGapTests(unittest.TestCase):
             self.check([(2, 0)])
 
 
+class ChimeraAudioTests(unittest.TestCase):
+    def write(self, path, amplitudes, channels=1):
+        samples = array.array('h')
+        for amplitude in amplitudes:
+            samples.extend(([amplitude] * channels + [-amplitude] * channels) * 240)
+        with wave.open(str(path), 'wb') as output:
+            output.setnchannels(channels)
+            output.setsampwidth(2)
+            output.setframerate(48000)
+            output.writeframes(samples.tobytes())
+
+    def test_finds_scaled_stereo_speech_after_unrelated_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / 'speech.wav'
+            recorded = Path(directory) / 'loopback.wav'
+            envelope = [500 + (index * index * 113 % 8000) for index in range(200)]
+            self.write(reference, envelope)
+            self.write(recorded, [100] * 50 + [value // 10 for value in envelope] + [0] * 20, 2)
+            proof = verifier.verify_chimera_audio(recorded, reference)
+            self.assertGreater(proof['correlation'], 0.99)
+            self.assertEqual(proof['speechAtSeconds'], 0.5)
+
+    def test_rejects_silence_and_unrelated_constant_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / 'speech.wav'
+            recorded = Path(directory) / 'loopback.wav'
+            self.write(reference, [500 + (index * index * 113 % 8000) for index in range(200)])
+            for amplitude in (0, 1000):
+                self.write(recorded, [amplitude] * 300, 2)
+                with self.assertRaisesRegex(AssertionError, 'speech was not found'):
+                    verifier.verify_chimera_audio(recorded, reference)
+
+
 if __name__ == '__main__':
     unittest.main()

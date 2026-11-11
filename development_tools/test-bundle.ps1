@@ -291,6 +291,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     Assert-Rejected { Register-CodexBundle $app } 'An unowned Codex marketplace was replaced'
     $openCode = Join-Path $temporary 'opencode'
     New-Item -ItemType Directory -Path $openCode | Out-Null
+    $bunCommand = (Get-Command bun -CommandType Application,ExternalScript | Select-Object -First 1).Source
     $parentBun = [Environment]::GetEnvironmentVariable('BUN_BE_BUN', 'Process')
     $failedProbe = Join-Path $openCode 'failed-probe.ps1'
     'if ($env:BUN_BE_BUN -ne ''1'') { exit 9 }; exit 7' | Set-Content -LiteralPath $failedProbe
@@ -315,7 +316,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $writer = [IO.File]::Open($config, 'Open', 'ReadWrite', 'None')
     $script:hostTouched = $false
     try {
-        Assert-Rejected { Register-OpenCodeBundle $app @($config) { $script:hostTouched = $true } } 'Exclusive config writer was ignored'
+        Assert-Rejected { Register-OpenCodeBundle $app @($config) { $script:hostTouched = $true } -OpenCodeCommand $bunCommand } 'Exclusive config writer was ignored'
         Assert-True (-not $script:hostTouched) 'Blocked registration changed the host'
     } finally { $writer.Dispose() }
     Assert-True ([IO.File]::ReadAllText($config) -ceq $userConfig) 'Blocked registration overwrote the user version'
@@ -323,7 +324,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     [IO.File]::WriteAllBytes($config, $withBom)
     Register-OpenCodeBundle $app @($config) {
         Assert-Rejected { [IO.File]::Open($config, 'Open', 'ReadWrite', 'ReadWrite').Dispose() } 'Renderer released the exclusive config lock'
-    }
+    } -OpenCodeCommand $bunCommand
     $registered = [IO.File]::ReadAllBytes($config)
     Assert-True ([Convert]::ToHexString($registered[0..2]) -eq 'EFBBBF') 'Registration lost the UTF-8 BOM'
     Assert-True ([IO.File]::ReadAllText($config).Contains('/* user version */')) 'Registration lost config comments'
@@ -332,16 +333,16 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $secondWriter = [IO.File]::Open($secondConfig, 'Open', 'ReadWrite', 'None')
     $before = [IO.File]::ReadAllBytes($config)
     try {
-        Assert-Rejected { Register-OpenCodeBundle $app @($config, $secondConfig) { $script:hostTouched = $true } } 'Second config lock was ignored'
+        Assert-Rejected { Register-OpenCodeBundle $app @($config, $secondConfig) { $script:hostTouched = $true } -OpenCodeCommand $bunCommand } 'Second config lock was ignored'
     } finally { $secondWriter.Dispose() }
     Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($config)) -eq [Convert]::ToHexString($before)) 'Lock failure partially changed the first config'
     Assert-True (-not $script:hostTouched) 'Second config lock failure changed the host'
     $utf16 = [byte[]]([Text.Encoding]::Unicode.GetPreamble() + [Text.Encoding]::Unicode.GetBytes($userConfig))
     [IO.File]::WriteAllBytes($config, $utf16)
-    Register-OpenCodeBundle $app @($config)
+    Register-OpenCodeBundle $app @($config) -OpenCodeCommand $bunCommand
     Assert-True ([Convert]::ToHexString(([IO.File]::ReadAllBytes($config))[0..1]) -eq 'FFFE') 'Registration lost UTF-16 encoding'
     [IO.File]::WriteAllText($config, '{invalid}')
-    Assert-Rejected { Register-OpenCodeBundle $app @($config) { $script:hostTouched = $true } } 'Invalid config was accepted'
+    Assert-Rejected { Register-OpenCodeBundle $app @($config) { $script:hostTouched = $true } -OpenCodeCommand $bunCommand } 'Invalid config was accepted'
     Assert-True (-not $script:hostTouched) 'Invalid config changed the host before validation'
     [IO.File]::WriteAllText($config, $userConfig)
     '{"unrelated":"preserve"}' | Set-Content "$profile/settings.json"
@@ -349,7 +350,7 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $successPrograms = Join-Path $temporary 'successful-programs'
     $binary = "$app/native-announcer/bin/herald-win32-$arch.exe"
     $script:mutateClaude = $false
-    Register-BundleHosts $app @($config) $profile $binary $successPrograms -PiAgentDirectory $piProfile
+    Register-BundleHosts $app @($config) $profile $binary $successPrograms -PiAgentDirectory $piProfile -OpenCodeCommand $bunCommand
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Successful host registration changed native settings'
     $rollbackPrograms = Join-Path $temporary 'rollback-programs'
     New-Item -ItemType Directory -Path $rollbackPrograms | Out-Null
@@ -360,16 +361,16 @@ await waitForPresence((message) => message.type === 'presence' && Array.isArray(
     $beforeRollback = @{}
     foreach ($path in $rollbackPaths) { $beforeRollback[$path] = [Convert]::ToHexString([IO.File]::ReadAllBytes($path)) }
     $script:mutateClaude = $true
-    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $piProfile } 'An unrelated shortcut did not fail host registration'
+    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $piProfile -OpenCodeCommand $bunCommand } 'An unrelated shortcut did not fail host registration'
     foreach ($path in $rollbackPaths) {
         Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($path)) -ceq $beforeRollback[$path]) "Host rollback did not restore $path"
     }
     Assert-SettingsPreserved $settingsPath $settingsBytes 'Host registration rollback changed native settings'
     $absentConfig = Join-Path $openCode 'previously-absent.jsonc'
-    Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms } 'Fresh config rollback did not fail'
+    Assert-Rejected { Register-BundleHosts $app @($absentConfig) $profile $binary $rollbackPrograms -OpenCodeCommand $bunCommand } 'Fresh config rollback did not fail'
     Assert-True (-not (Test-Path -LiteralPath $absentConfig)) 'Rollback left a newly created OpenCode configuration'
     $absentPi = Join-Path $temporary 'absent-pi'
-    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $absentPi } 'Fresh Pi config rollback did not fail'
+    Assert-Rejected { Register-BundleHosts $app @($config) $profile $binary $rollbackPrograms -PiAgentDirectory $absentPi -OpenCodeCommand $bunCommand } 'Fresh Pi config rollback did not fail'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $absentPi 'settings.json'))) 'Rollback left a newly created Pi configuration'
     Assert-True (@(Get-ChildItem (Split-Path $cache -Parent) -Force | Where-Object Name -Like '.herald-*').Count -eq 0) 'Host rollback left a cache backup'
     $script:mutateClaude = $false

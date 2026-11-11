@@ -12,6 +12,7 @@ node_modules/
 !/native-announcer/resources/herald.ico
 !/native-announcer/resources/portraits/
 !/native-announcer/resources/videos/
+!/native-announcer/resources/licenses/
 /native-announcer/bin/
 claude-plugin/.claude-plugin/types/
 native-announcer/target/

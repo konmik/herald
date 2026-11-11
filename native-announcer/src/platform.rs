@@ -225,7 +225,7 @@ impl SpeechGate {
 }
 
 pub enum SpeechEvent {
-    Ready { id: String },
+    Ready { id: String, animation: Option<Arc<crate::chimera::Playback>> },
     Finished { id: String, result: Result<(), String> },
 }
 
@@ -309,7 +309,11 @@ impl Speech {
     }
 
     fn should_preload(settings: &Settings, minute: u32, meeting: bool) -> bool {
-        settings.elevenlabs_api_key.is_none() && settings.volume > 0 && !settings.quiet_at(minute) && !meeting
+        let selected = settings.characters.values().any(|character| character.selected);
+        let local = settings.characters.is_empty() || settings.characters.values().any(|character| {
+            (!selected || character.selected) && !matches!(character.voice, crate::characters::CharacterVoice::Chimera)
+        });
+        local && settings.elevenlabs_api_key.is_none() && settings.volume > 0 && !settings.quiet_at(minute) && !meeting
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -344,12 +348,27 @@ impl Speech {
                 crate::state::timing(format!("speech_start id={id}"));
                 let ready_events = events.clone();
                 let ready_id = id.clone();
+                let prepared = if matches!(voice, ResolvedVoice::Chimera) {
+                    if cfg!(target_os = "windows") {
+                        crate::chimera::prepare(&text, &cancelled).map(|utterance| Some(Arc::new(crate::chimera::Playback::new(utterance))))
+                    } else { Err("CHIMERA requires Windows audio output synchronization.".into()) }
+                } else { Ok(None) };
+                let animation = prepared.as_ref().ok().and_then(Clone::clone);
                 let ready = move || {
                     crate::state::timing(format!("speech_ready id={ready_id}"));
-                    let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone() });
+                    let _ = ready_events.send(SpeechEvent::Ready { id: ready_id.clone(), animation: animation.clone() });
                 };
                 let playback = SpeechPlayback { gate: &gate, ready: &ready, warmup: warmup.as_deref() };
-                let result = speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback));
+                let result = match prepared {
+                    Err(_) if cancelled.load(Ordering::Relaxed) => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(Some(animation)) => {
+                        let result = speak_chimera(&animation, &volume, &cancelled, &settings, &playback);
+                        animation.stop();
+                        result
+                    }
+                    Ok(None) => speak(&text, &voice, &source_character, local_speaker.as_deref(), &volume, &cancelled, &settings, Some(&playback)),
+                };
                 #[cfg(target_os = "windows")]
                 if !retain_engine || settings.elevenlabs_api_key.is_some() { crate::tts::release_engine(); }
                 #[cfg(not(target_os = "windows"))]
@@ -423,6 +442,19 @@ use crate::tts::speak;
 mod linux_speech;
 #[cfg(target_os = "linux")]
 use linux_speech::speak;
+fn speak_chimera(animation: &crate::chimera::Playback, volume: &AtomicU16, cancelled: &AtomicBool, settings: &Settings, playback: &SpeechPlayback<'_>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let start = crate::audio::SpeechStart::new(settings.silent_sound_seconds, || playback.begin(cancelled));
+        crate::audio::play_pcm_with_clock(&animation.utterance.samples, animation.utterance.sample_rate(), volume, settings.output_device.as_deref(), cancelled, Some(start), Some(&animation.position))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (animation, volume, cancelled, settings, playback);
+        Err("CHIMERA requires Windows audio output synchronization.".into())
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use linux_speech::espeak_program;
 
@@ -439,6 +471,7 @@ fn speak(
 ) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let preferred = match voice {
+        ResolvedVoice::Chimera => return Err("CHIMERA requires its synchronized native speech player.".into()),
         ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
         ResolvedVoice::ElevenLabs { .. } => local_speaker,
     };
@@ -646,7 +679,7 @@ impl Preview {
             loop {
                 if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
                 match speech.events.recv_timeout(Duration::from_millis(50)) {
-                    Ok(SpeechEvent::Ready { id }) if id == "settings-preview" => {
+                    Ok(SpeechEvent::Ready { id, .. }) if id == "settings-preview" => {
                         crate::audio::play_noise(&signal.path, settings.volume, settings.output_device.as_deref(), &stop)?;
                         if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
                         speech.release("settings-preview");
@@ -693,7 +726,7 @@ fn play_example_speech(settings: &Settings, text: &str, stop: &Arc<AtomicBool>, 
     loop {
         if stop.load(Ordering::Relaxed) { speech.cancel(); return Ok(()); }
         match speech.events.recv_timeout(Duration::from_millis(50)) {
-            Ok(SpeechEvent::Ready { id }) => speech.release(&id),
+            Ok(SpeechEvent::Ready { id, .. }) => speech.release(&id),
             Ok(SpeechEvent::Finished { result, .. }) => return result,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Preview speech stopped unexpectedly.".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}

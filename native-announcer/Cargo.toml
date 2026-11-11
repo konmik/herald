@@ -18,6 +18,8 @@ fontdue = "0.9"
 chrono = "0.4"
 rand = "0.8.8"
 rayon = "1.12"
+chimera_voice = { package = "chimera", git = "https://github.com/jamesondh/chimera-vocal-synth", rev = "59d1e818b24ad3f44228665470534e06d54a9d0a" }
+flate2 = "1.1"
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 gpui-kit = "=0.7.1"
@@ -50,6 +52,9 @@ winresource = "0.1"
 
 [profile.dev]
 debug = 0
+
+[profile.dev.package.chimera]
+opt-level = 3
 
 [profile.release]
 debug = 0

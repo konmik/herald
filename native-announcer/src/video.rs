@@ -10,6 +10,7 @@ pub fn select_path(assets: &Path, character: &str) -> PathBuf {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file() && path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")))
+        .filter(|path| !path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("chimera.mp4")))
         .collect();
     if paths.is_empty() {
         assets.join(if character == "pi" { "opencode" } else { character }).join("neutral.mp4")

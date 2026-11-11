@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn chimera_selection_does_not_preload_a_different_voice() {
+    let mut settings = Settings::default();
+    settings.characters.insert("chimera".into(), crate::characters::Character {
+        name: "CHIMERA".into(), selected: true, voice: crate::characters::CharacterVoice::Chimera,
+        ..crate::characters::Character::default()
+    });
+    assert!(!Speech::should_preload(&settings, 720, false));
+    settings.characters.get_mut("chimera").unwrap().selected = false;
+    assert!(Speech::should_preload(&settings, 720, false));
+}
+
+#[test]
 fn prepared_speech_waits_for_warmup_then_release_and_cancels_cleanly() {
     for early in [true, false] {
         let warmup = Arc::new(Warmup { ready: SpeechGate::new(), cancelled: AtomicBool::new(false) });

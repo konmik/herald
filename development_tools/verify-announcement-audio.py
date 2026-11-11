@@ -2,11 +2,67 @@ import argparse
 import array
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import subprocess
 import time
 import uuid
 import wave
+
+def speech_envelope(path):
+    with wave.open(str(path), "rb") as recording:
+        if recording.getsampwidth() != 2:
+            raise AssertionError("Expected 16-bit PCM speech")
+        samples = array.array("h", recording.readframes(recording.getnframes()))
+        window = recording.getframerate() // 100 * recording.getnchannels()
+    return [math.sqrt(sum(value * value for value in samples[offset:offset + window]) / window)
+            for offset in range(0, len(samples) - window + 1, window)]
+
+
+def verify_chimera_audio(recording_path, reference_path):
+    import numpy as np
+
+    reference = speech_envelope(reference_path)
+    recorded = speech_envelope(recording_path)
+    if not reference:
+        raise AssertionError("CHIMERA reference speech is empty")
+    mean = sum(reference) / len(reference)
+    centered = [value - mean for value in reference]
+    reference_energy = sum(value * value for value in centered)
+    if reference_energy <= 0 or max(reference) < 10:
+        raise AssertionError("CHIMERA reference speech is silent")
+    best = (-1.0, 0, 0.0)
+    count = len(reference)
+    for offset in range(len(recorded) - count + 1):
+        candidate = recorded[offset:offset + count]
+        candidate_mean = sum(candidate) / count
+        energy = sum((value - candidate_mean) ** 2 for value in candidate)
+        if energy <= 0:
+            continue
+        correlation = sum(a * b for a, b in zip(centered, candidate)) / math.sqrt(reference_energy * energy)
+        if correlation > best[0]:
+            best = correlation, offset / 100, max(candidate)
+    def waveform(path):
+        with wave.open(str(path), "rb") as recording:
+            samples = np.frombuffer(recording.readframes(recording.getnframes()), dtype="<i2")
+            return recording.getframerate(), np.diff(samples.reshape(-1, recording.getnchannels()).mean(axis=1))
+
+    rate, samples = waveform(recording_path)
+    reference_rate, expected = waveform(reference_path)
+    if rate != reference_rate or len(samples) < len(expected):
+        raise AssertionError("CHIMERA output and reference need matching sample rates and a complete recording")
+    expected -= expected.mean()
+    size = 1 << (len(samples) + len(expected) - 2).bit_length()
+    correlation = np.fft.irfft(np.fft.rfft(samples, size) * np.fft.rfft(expected[::-1], size), size)[len(expected) - 1:len(samples)]
+    squares = np.concatenate(([0], np.cumsum(samples * samples)))
+    energy = squares[len(expected):] - squares[:-len(expected)]
+    normalized = correlation / np.sqrt(np.maximum(1, energy) * np.sum(expected * expected))
+    offset = int(np.argmax(normalized))
+    proof = {"correlation": float(normalized[offset]), "envelopeCorrelation": best[0], "speechAtSeconds": offset / rate, "peakRms": best[2], "reference": str(reference_path)}
+    if proof["correlation"] < 0.6 or best[0] < 0.5 or best[2] < 10:
+        raise AssertionError(f"CHIMERA speech was not found in actual output: {proof}")
+    return proof
+
 
 def audio_activity(path):
     with wave.open(str(path), "rb") as recording:
@@ -99,13 +155,16 @@ def verify_preview_order(path, evidence, delay_seconds, started_at):
 
 
 def main():
-    parser = argparse.ArgumentParser(epilog="Capture requires PyAudioWPatch. Install it with python -m pip install PyAudioWPatch.")
+    parser = argparse.ArgumentParser(epilog="Capture requires PyAudioWPatch. CHIMERA waveform checks also require numpy.")
     parser.add_argument("--evidence", default=f"temp/verification/audio-{uuid.uuid4()}")
     parser.add_argument("--check", type=Path)
     parser.add_argument("--delay-seconds", type=int, choices=range(11), default=0)
     parser.add_argument("--settings-previews", action="store_true")
     parser.add_argument("--app-directory", type=Path)
+    parser.add_argument("--chimera-reference", type=Path)
     args = parser.parse_args()
+    if args.chimera_reference and args.settings_previews:
+        parser.error("CHIMERA waveform verification requires announcement playback")
     recording_path = args.check
     if recording_path is None:
         import pyaudiowpatch as audio
@@ -123,6 +182,8 @@ def main():
                 command = ["pwsh", "-NoProfile", "-File", str(root / ".claude/skills/verify-herald/scripts" / helper)]
                 if args.settings_previews:
                     command.extend(["-Feature", "VoicePreview", "-Audible"])
+                elif args.chimera_reference:
+                    command.extend(["-Speech", "-CharacterId", "chimera", "-CaptureFrames", "-Volume", "100"])
                 else:
                     command.extend(["-Speech", "-SpeechFixture"])
                 command.extend(["-Evidence", str((evidence / "playback").relative_to(root)), "-SilentSoundSeconds", str(args.delay_seconds)])
@@ -150,6 +211,12 @@ def main():
                         except subprocess.TimeoutExpired:
                             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True, timeout=10)
                             process.wait(timeout=10)
+    if args.chimera_reference:
+        proof = verify_chimera_audio(recording_path, args.chimera_reference)
+        if args.check is None:
+            (evidence / "chimera-audio.json").write_text(json.dumps(proof, indent=2), encoding="utf-8")
+        print(f"PASS: CHIMERA speech captured on the actual output, correlation {proof['correlation']:.3f}")
+        return
     if args.check is None:
         verifier = verify_preview_order if args.settings_previews else verify_announcement_order
         proof = verifier(recording_path, evidence / "playback", args.delay_seconds, started_at)

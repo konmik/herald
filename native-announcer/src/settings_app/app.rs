@@ -1486,6 +1486,7 @@ impl SettingsView {
                 .child(div().absolute().inset_0().child(Scrollbar::vertical(&self.character_scroll).viewport_from_layout()))
                 .reveal("reveal-character-list", &self.page_scroll).w_full())
             .child(Button::new("new-character").label("New").accessibility_id("new-character").secondary().on_click(cx.listener(|view, _, window, cx| view.add_character(window, cx))).reveal("reveal-new-character", &self.page_scroll));
+        let procedural = self.active_character.as_ref().and_then(|id| self.draft.characters.get(id)).is_some_and(|character| matches!(character.voice, CharacterVoice::Chimera));
         let editor = if self.active_character.is_some() {
             let selected = self
                 .active_character
@@ -1499,10 +1500,11 @@ impl SettingsView {
                 .gap_2()
                 .child(div().text_sm().child("Character name"))
                 .child(Input::new(&self.character_name_input).accessibility_id("character-name").aria_label("Character name").focus_ring(false).border_color(self.input_border_color(&self.character_name_input, window, cx)).w_full().reveal("reveal-character-name", &self.page_scroll).w_full())
-                .child(div().text_sm().child("Character video"))
+                .when(procedural, |editor| editor.child(div().text_sm().child("CHIMERA voice and animated head")))
+                .when(!procedural, |editor| editor.child(div().text_sm().child("Character video"))
                 .child(h_flex().w_full().gap_2().when(layout.compact, |row| row.flex_col().items_start()).child(Input::new(&self.character_video_input).accessibility_id("character-video").aria_label("Character video").readonly(true).focus_ring(false).border_color(self.input_border_color(&self.character_video_input, window, cx)).w_full().reveal("reveal-character-video", &self.page_scroll).flex_1().when(layout.compact, |field| field.w_full())).child(Button::new("browse-video").label("Browse").on_click(cx.listener(|view, _, window, cx| view.browse_video(window, cx))).reveal("reveal-browse-video", &self.page_scroll)))
                 .child(div().text_sm().child("ElevenLabs voice ID"))
-                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").aria_label("ElevenLabs voice ID").focus_ring(false).border_color(self.input_border_color(&self.character_voice_input, window, cx)).w_full().reveal("reveal-character-voice", &self.page_scroll).w_full())
+                .child(Input::new(&self.character_voice_input).accessibility_id("character-voice-id").aria_label("ElevenLabs voice ID").focus_ring(false).border_color(self.input_border_color(&self.character_voice_input, window, cx)).w_full().reveal("reveal-character-voice", &self.page_scroll).w_full()))
                 .child(
                     h_flex()
                         .flex_wrap()

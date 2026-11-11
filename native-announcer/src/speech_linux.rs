@@ -16,6 +16,7 @@ pub(super) fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, l
     if cancelled.load(Ordering::Relaxed) || volume.load(Ordering::Relaxed) == 0 || text.trim().is_empty() { return Ok(()); }
     if text.contains('\0') { return Err("Announcement text contains a null character".into()); }
     let voice_id = match voice {
+        ResolvedVoice::Chimera => return Err("CHIMERA requires its synchronized native speech player.".into()),
         ResolvedVoice::ElevenLabs { voice_id } => voice_id.as_str(),
         ResolvedVoice::Local { .. } => settings.default_voice_id.as_str(),
     };
@@ -33,6 +34,7 @@ pub(super) fn speak(text: &str, voice: &ResolvedVoice, source_character: &str, l
     }
     if cancelled.load(Ordering::Relaxed) { return Ok(()); }
     let preferred = match voice {
+        ResolvedVoice::Chimera => return Err("CHIMERA requires its synchronized native speech player.".into()),
         ResolvedVoice::Local { speaker } => speaker.as_deref().or(local_speaker),
         ResolvedVoice::ElevenLabs { .. } => local_speaker,
     };

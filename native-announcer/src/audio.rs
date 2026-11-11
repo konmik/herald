@@ -191,8 +191,15 @@ impl PlaybackProgress {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &AtomicU16, selected: Option<&str>, cancelled: &AtomicBool, mut start: Option<SpeechStart<'_>>) -> Result<(), String> {
+pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &AtomicU16, selected: Option<&str>, cancelled: &AtomicBool, start: Option<SpeechStart<'_>>) -> Result<(), String> {
+    play_pcm_with_clock(samples, sample_rate, volume, selected, cancelled, start, None)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn play_pcm_with_clock(samples: &[i16], sample_rate: u32, volume: &AtomicU16, selected: Option<&str>, cancelled: &AtomicBool, mut start: Option<SpeechStart<'_>>, position: Option<&std::sync::atomic::AtomicU64>) -> Result<(), String> {
     use windows::Win32::Media::Audio::*;
+    use windows::Win32::Media::{MMTIME, TIME_SAMPLES};
+    if let Some(position) = position { position.store(0, Ordering::Release); }
     if cancelled.load(Ordering::Relaxed) || samples.is_empty() { return Ok(()); }
     if !(8000..=192000).contains(&sample_rate) { return Err("Invalid announcement sample rate".into()); }
     let format = WAVEFORMATEX { wFormatTag: 1, nChannels: 1, nSamplesPerSec: sample_rate, nAvgBytesPerSec: sample_rate * 2, nBlockAlign: 2, wBitsPerSample: 16, cbSize: 0 };
@@ -211,6 +218,13 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
         let mut blocks: Vec<_> = (0..2).map(|_| Box::new(Block { header: WAVEHDR::default(), samples: vec![0; sample_rate as usize / 25], prepared: false })).collect();
         let size = std::mem::size_of::<WAVEHDR>() as u32;
         let mut progress = PlaybackProgress::new(samples.len(), sample_rate, start.as_ref().map(|start| start.silence), std::time::Instant::now());
+        let mut speech_origin = start.is_none().then_some(0);
+        let output_samples = || -> Result<u64, u32> {
+            let mut time = MMTIME { wType: TIME_SAMPLES, ..MMTIME::default() };
+            let result = waveOutGetPosition(output, &mut time, std::mem::size_of::<MMTIME>() as u32);
+            if result != 0 { return Err(result); }
+            output_sample_position(time, sample_rate).ok_or(1)
+        };
         let warming = start.as_ref().is_some_and(|start| !start.silence.is_zero());
         if warming { crate::state::timing(format!("warmup_start seconds={}", start.as_ref().unwrap().silence.as_secs())); }
         while !cancelled.load(Ordering::Relaxed) {
@@ -238,7 +252,19 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
             if progress.phase == PlaybackPhase::Activation {
                 if warming { crate::state::timing("warmup_end"); }
                 let allowed = start.take().is_some_and(|start| (start.activate)()) && !cancelled.load(Ordering::Relaxed);
+                if allowed && position.is_some() {
+                    match output_samples() {
+                        Ok(samples) => speech_origin = Some(samples),
+                        Err(error) => { result = error; break; }
+                    }
+                }
                 progress.activate(allowed, std::time::Instant::now());
+            }
+            if let (Some(position), Some(origin)) = (position, speech_origin) {
+                match output_samples() {
+                    Ok(played) => { position.fetch_max(played.saturating_sub(origin).min(samples.len() as u64), Ordering::Release); }
+                    Err(error) => { result = error; break; }
+                }
             }
             if progress.phase == PlaybackPhase::Finished { break; }
             if progress.timed_out(std::time::Instant::now()) { result = 1; break; }
@@ -252,6 +278,19 @@ pub(crate) fn play_pcm_with_start(samples: &[i16], sample_rate: u32, volume: &At
         if result != 0 { return Err(format!("Could not play announcement audio: {result}")); }
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn output_sample_position(time: windows::Win32::Media::MMTIME, sample_rate: u32) -> Option<u64> {
+    use windows::Win32::Media::{TIME_BYTES, TIME_MS, TIME_SAMPLES};
+    unsafe {
+        match time.wType {
+            TIME_SAMPLES => Some(u64::from(time.u.sample)),
+            TIME_BYTES => Some(u64::from(time.u.cb) / 2),
+            TIME_MS => Some(u64::from(time.u.ms) * u64::from(sample_rate) / 1000),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

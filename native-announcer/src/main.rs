@@ -24,6 +24,8 @@ mod settings_app;
 #[cfg(target_os = "windows")]
 mod tts;
 mod video;
+mod animation;
+mod chimera;
 mod window;
 
 use chrono::Timelike;
@@ -50,8 +52,7 @@ struct Active {
     speaking: bool,
     speech_finished: bool,
     silent: bool,
-    video: Option<video::Video>,
-    video_path: PathBuf,
+    animation: Option<animation::Animation>,
     history_recorded: bool,
     placement: CardPlacement,
     entrance: Option<EntranceScene>,
@@ -65,8 +66,7 @@ struct Pending {
     requested: Instant,
     readiness_timeout: Duration,
     duration: Duration,
-    video: Option<video::Video>,
-    video_path: PathBuf,
+    animation: Option<animation::Animation>,
     placement: CardPlacement,
     entrance: Option<EntranceScene>,
     transition_duration: Duration,
@@ -127,8 +127,7 @@ impl Pending {
             speaking: false,
             speech_finished: silent,
             silent,
-            video: self.video,
-            video_path: self.video_path,
+            animation: self.animation,
             history_recorded: false,
             placement: self.placement,
             entrance: self.entrance,
@@ -386,6 +385,10 @@ fn run() -> Result<(), String> {
     let mut static_frames = 0;
     let mut animation_frames = 0;
     let mut decoded_video_frames = 0;
+    let mut procedural_frames = 0;
+    let mut max_played_samples = 0;
+    let mut pre_speech_played_samples = 0;
+    let mut selected_visuals = Vec::new();
     let mut video_loops = 0;
     let mut selected_videos = Vec::new();
     let mut video_frame_rates = Vec::new();
@@ -465,9 +468,10 @@ fn run() -> Result<(), String> {
                 }
                 for event in speech.events.try_iter() {
                     match event {
-                        SpeechEvent::Ready { id } => {
+                        SpeechEvent::Ready { id, animation } => {
                             state::timing(format!("speech_ready_received id={id}"));
-                            if let Some(pending) = current.take_preparing(Some(&id)) {
+                            if let Some(mut pending) = current.take_preparing(Some(&id)) {
+                                if let (Some(visual), Some(playback)) = (&mut pending.animation, animation) { visual.attach(playback); }
                                 if muted { speech.cancel(); }
                                 activation = Some((pending, muted));
                             }
@@ -531,19 +535,17 @@ fn run() -> Result<(), String> {
                         let entrance = None;
                         let mut character = characters::resolve(settings, &assets, notification.character(), notification.character_id.as_deref());
                         if let Some(warning) = &character.video_warning { state::log(&data, warning); }
-                        let mut path = character.video_path.clone();
                         state::timing(format!("video_load_start id={}", notification.id));
-                        let video = match video::Video::open(&path) {
-                            Ok(video) => Some(video),
+                        let animation = match animation::Animation::open(&character.visual) {
+                            Ok(animation) => Some(animation),
                             Err(error) => {
                                 state::log(&data, format!("Video: {error}"));
                                 let default_video = video::select_path(&assets, notification.character());
-                                if character.id.is_some() && default_video != path {
+                                if character.id.is_some() && character.visual.video_path().is_some_and(|path| default_video != path) {
                                     match video::Video::open(&default_video) {
                                         Ok(video) => {
-                                            path = default_video;
-                                            character.video_path = path.clone();
-                                            Some(video)
+                                            character.visual = characters::ResolvedVisual::Video(default_video);
+                                            Some(animation::Animation::Video(video))
                                         }
                                         Err(error) => { state::log(&data, format!("Default video: {error}")); None }
                                     }
@@ -554,7 +556,7 @@ fn run() -> Result<(), String> {
                         let transition_duration = lightning.transition_duration();
                         let duration = state::display_duration(&notification.text).max(capture_speech_seconds.map(|speech| speech + transition_duration).unwrap_or_default());
                         let readiness_timeout = speech_readiness_timeout(settings);
-                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, video, video_path: path, placement, entrance, transition_duration };
+                        let pending = Pending { notification, character, requested: Instant::now(), readiness_timeout, duration, animation, placement, entrance, transition_duration };
                         if muted {
                             activation = Some((pending, true));
                         } else {
@@ -576,9 +578,10 @@ fn run() -> Result<(), String> {
                     shown += 1;
                     titles.push(renderer.title.clone());
                     if active.silent { muted_announcements += 1; }
-                    if let Some(video) = &active.video {
-                        selected_videos.push(active.video_path.to_string_lossy().into_owned());
-                        video_frame_rates.push(video.fps());
+                    selected_visuals.push(match &active.character.visual { characters::ResolvedVisual::Chimera => "chimera", characters::ResolvedVisual::Video(_) => "video" });
+                    if let (Some(animation), Some(path)) = (&active.animation, active.character.visual.video_path()) {
+                        selected_videos.push(path.to_string_lossy().into_owned());
+                        video_frame_rates.push(animation.fps());
                     }
                     if !active.silent { signal.play(settings); }
                     inbox.save(Some(&active.notification));
@@ -615,7 +618,7 @@ fn run() -> Result<(), String> {
                     Presentation::Playing(active) if active.started.elapsed() < active.transition_duration => ANIMATION_FRAME,
                     Presentation::Playing(active) if active.end.is_some() => ANIMATION_FRAME,
                     Presentation::Playing(active) if renderer.ambient_active(active.started.elapsed(), active.expires.duration_since(active.started), active.seed()) => ANIMATION_FRAME,
-                    Presentation::Playing(active) => Duration::from_millis(((1000.0 / active.video.as_ref().map(|video| video.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33)),
+                    Presentation::Playing(active) => Duration::from_millis(((1000.0 / active.animation.as_ref().map(|animation| animation.fps()).unwrap_or(state::VIDEO_FPS as f64)) as u64).min(33)),
                     Presentation::Idle => Duration::from_millis(250),
                 };
                 next_frame = now + interval;
@@ -632,14 +635,18 @@ fn run() -> Result<(), String> {
                             let transition_time = active.end.map(|end| frame_now.saturating_duration_since(end)).unwrap_or(elapsed);
                             let interference = state::visual_interference_amount(transition_time, active.notification.completed as u32);
                             if interference > 0.0 { static_frames += 1; } else { animation_frames += 1; }
-                            if let Some(video) = &mut active.video {
-                                let previous_frames = video.decoded_frames;
-                                let previous_loops = video.loops;
-                                if let Err(error) = video.advance(elapsed) {
-                                    state::log(&data, format!("Video playback: {error}"));
+                            if let Some(animation) = &mut active.animation {
+                                let previous_frames = animation.decoded_frames();
+                                let previous_loops = animation.loops();
+                                let previous_procedural = animation.procedural_frames();
+                                if let Err(error) = animation.advance(elapsed) {
+                                    state::log(&data, format!("Animation playback: {error}"));
                                 }
-                                decoded_video_frames += video.decoded_frames - previous_frames;
-                                video_loops += video.loops - previous_loops;
+                                decoded_video_frames += animation.decoded_frames() - previous_frames;
+                                video_loops += animation.loops() - previous_loops;
+                                procedural_frames += animation.procedural_frames() - previous_procedural;
+                                max_played_samples = max_played_samples.max(animation.sample_position());
+                                if !active.speaking { pre_speech_played_samples = pre_speech_played_samples.max(animation.sample_position()); }
                             }
                             renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
                             let seed = active.seed();
@@ -648,7 +655,7 @@ fn run() -> Result<(), String> {
                             } else if entrance_time.is_none() {
                                 Some(render::LightningActivity::Holding(elapsed, active.expires.duration_since(active.started), seed))
                             } else { None };
-                            let image = active.video.as_ref().map(video::Video::frame);
+                            let image = active.animation.as_ref().map(animation::Animation::frame);
                             let pixels = if let Some(scene) = &active.entrance {
                                 renderer.draw_scene(scene, image, interference, entrance_time)
                             } else {
@@ -694,9 +701,9 @@ fn run() -> Result<(), String> {
                             if !active.history_recorded {
                                 state::timing(format!("visual_presented id={}", active.notification.id));
                                 let result = if active.character.id.is_some() {
-                                    history::record_with_identity(&data, &active.notification, active.character.history_identity(), &active.video_path, chrono::Utc::now())
+                                    history::record_with_identity(&data, &active.notification, active.character.history_identity(), active.character.visual.video_path(), chrono::Utc::now())
                                 } else {
-                                    history::record(&data, &active.notification, &active.video_path, chrono::Utc::now())
+                                    history::record(&data, &active.notification, active.character.visual.video_path().expect("Default character has a video"), chrono::Utc::now())
                                 };
                                 match result {
                                     Ok(()) => active.history_recorded = true,
@@ -721,7 +728,7 @@ fn run() -> Result<(), String> {
                 if let Some(timer) = wake_timer.take() { timer.remove(); }
                 inbox.save(current.notification());
                 if let Some(path) = &report {
-                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": video_frame_rates.first().copied().unwrap_or(state::VIDEO_FPS as f64), "selectedVideos": selected_videos, "videoFrameRates": video_frame_rates, "decodedVideoFrames": decoded_video_frames, "videoLoops": video_loops, "decodedFrameLimit": 1});
+                    let report = serde_json::json!({"focusUnchanged": focus_unchanged, "focusChecked": before != 0, "externalFocusChanged": external_focus_changed, "passiveWindow": passive_window_ok, "windowOpacityUpdates": window_opacity_updates, "abruptWindowSucceeded": abrupt_window_ok, "shown": shown, "finished": finished, "visibleSeconds": max_visible, "durations": durations, "sessionTitles": titles, "speechStarted": speech_started, "mutedAnnouncements": muted_announcements, "staticFrames": static_frames, "animationFrames": animation_frames, "videoFPS": video_frame_rates.first().copied().unwrap_or(state::VIDEO_FPS as f64), "selectedVideos": selected_videos, "videoFrameRates": video_frame_rates, "decodedVideoFrames": decoded_video_frames, "proceduralFrames": procedural_frames, "maxPlayedSamples": max_played_samples, "preSpeechPlayedSamples": pre_speech_played_samples, "selectedVisuals": selected_visuals, "videoLoops": video_loops, "decodedFrameLimit": 1});
                     let _ = std::fs::write(path, report.to_string());
                 }
             }

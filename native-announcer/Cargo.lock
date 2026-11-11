@@ -973,6 +973,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chimera"
+version = "0.1.0"
+source = "git+https://github.com/jamesondh/chimera-vocal-synth?rev=59d1e818b24ad3f44228665470534e06d54a9d0a#59d1e818b24ad3f44228665470534e06d54a9d0a"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3508,7 +3518,9 @@ version = "0.3.0"
 dependencies = [
  "atspi",
  "base64",
+ "chimera",
  "chrono",
+ "flate2",
  "fontdue",
  "gpui-kit",
  "gtk",

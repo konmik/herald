@@ -208,7 +208,7 @@ export async function verify(options) {
       assert.equal(report.shown, 1)
       assert.equal(report.finished, 1)
       for (const key of ['passiveWindow', 'focusChecked', 'focusUnchanged']) assert.equal(report[key], true)
-      assert.ok(report.decodedVideoFrames > 0 && statSync(join(options.evidence, 'render.png')).size > 0)
+      assert.ok(report.decodedVideoFrames + report.proceduralFrames > 0 && statSync(join(options.evidence, 'render.png')).size > 0)
       result = { ...result, passed: true, sessionID: completed.task.sessionID, announcementID: shown.id, foregroundMilliseconds: completed.task.milliseconds, originalContext: true, mainTranscriptUnchanged: true, nativeAnimationAndFocus: true }
     }
   } catch (error) {

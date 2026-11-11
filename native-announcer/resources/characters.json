@@ -1,4 +1,9 @@
 {
+  "chimera": {
+    "name": "CHIMERA",
+    "animationPath": "videos/chimera.mp4",
+    "voice": { "type": "chimera" }
+  },
   "hatted-herald-01": {
     "name": "Crimson Court Herald",
     "animationPath": "videos/hatted-herald-01.mp4"

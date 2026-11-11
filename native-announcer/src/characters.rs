@@ -8,13 +8,16 @@ static BUNDLED_CHARACTERS: OnceLock<BTreeMap<String, Character>> = OnceLock::new
 
 pub fn bundled_characters() -> &'static BTreeMap<String, Character> {
     BUNDLED_CHARACTERS.get_or_init(|| {
-        serde_json::from_str(include_str!("../resources/characters.json")).expect("Bundled character catalog is invalid")
+        let mut characters: BTreeMap<String, Character> = serde_json::from_str(include_str!("../resources/characters.json")).expect("Bundled character catalog is invalid");
+        if !cfg!(target_os = "windows") { characters.remove("chimera"); }
+        characters
     })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CharacterVoice {
+    Chimera,
     Local {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
@@ -64,8 +67,21 @@ impl Default for Character {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ResolvedVoice {
+    Chimera,
     Local { speaker: Option<String> },
     ElevenLabs { voice_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvedVisual {
+    Video(PathBuf),
+    Chimera,
+}
+
+impl ResolvedVisual {
+    pub fn video_path(&self) -> Option<&Path> {
+        match self { Self::Video(path) => Some(path), Self::Chimera => None }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +91,7 @@ pub struct ResolvedCharacter {
     pub voice: ResolvedVoice,
     pub source_character: String,
     pub local_speaker: Option<String>,
-    pub video_path: PathBuf,
+    pub visual: ResolvedVisual,
     pub video_warning: Option<String>,
 }
 
@@ -109,15 +125,18 @@ pub fn resolve(settings: &Settings, assets: &Path, source_character: &str, chara
     if let Some(id) = character_id {
         if let Some(character) = settings.characters.get(id) {
             let resolved_animation = character.animation_path.as_ref().map(|path| animation_path(id, path, assets));
-            let (video_path, video_warning) = match resolved_animation.as_ref() {
-                Some(path) if path.is_file() => (path.clone(), None),
+            let (visual, video_warning) = if matches!(character.voice, CharacterVoice::Chimera) {
+                (ResolvedVisual::Chimera, None)
+            } else { match resolved_animation.as_ref() {
+                Some(path) if path.is_file() => (ResolvedVisual::Video(path.clone()), None),
                 Some(path) => (
-                    default_video.clone(),
+                    ResolvedVisual::Video(default_video.clone()),
                     Some(format!("Character video is unavailable: {}", path.display())),
                 ),
-                None => (default_video, None),
-            };
+                None => (ResolvedVisual::Video(default_video), None),
+            }};
             let voice = match &character.voice {
+                CharacterVoice::Chimera => ResolvedVoice::Chimera,
                 CharacterVoice::Local { speaker } => ResolvedVoice::Local { speaker: speaker.clone() },
                 CharacterVoice::ElevenLabs { voice_id } => ResolvedVoice::ElevenLabs { voice_id: voice_id.clone() },
             };
@@ -127,7 +146,7 @@ pub fn resolve(settings: &Settings, assets: &Path, source_character: &str, chara
                 voice,
                 source_character: source_character.to_owned(),
                 local_speaker,
-                video_path,
+                visual,
                 video_warning,
             };
         }
@@ -138,7 +157,7 @@ pub fn resolve(settings: &Settings, assets: &Path, source_character: &str, chara
         voice: ResolvedVoice::Local { speaker: local_speaker.clone() },
         source_character: source_character.to_owned(),
         local_speaker,
-        video_path: default_video,
+        visual: ResolvedVisual::Video(default_video),
         video_warning: None,
     }
 }
@@ -159,6 +178,9 @@ pub fn validate_registry(characters: &BTreeMap<String, Character>, selected: Opt
             validate_path(path)?;
         }
         match &character.voice {
+            CharacterVoice::Chimera => {
+                if !cfg!(target_os = "windows") { return Err("CHIMERA requires Windows audio output synchronization.".into()); }
+            }
             CharacterVoice::Local { speaker } => {
                 if let Some(speaker) = speaker {
                     validate_text(speaker, "Local speaker", 256, false)?;

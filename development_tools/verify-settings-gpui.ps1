@@ -1,7 +1,7 @@
 param(
     [string]$Binary = (Join-Path (Split-Path $PSScriptRoot -Parent) 'native-announcer/target/release/herald.exe'),
     [string]$Evidence = ('temp/verification/gpui-settings-' + [guid]::NewGuid()),
-    [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Announcements', 'Lightning', 'All')]
+    [ValidateSet('Settings', 'Theme', 'Quiet', 'Output', 'Preview', 'Characters', 'Chimera', 'Announcements', 'Lightning', 'All')]
     [string]$Feature = 'All'
 )
 
@@ -1200,6 +1200,45 @@ function Try-CharacterDraft {
     $true
 }
 
+function Select-Chimera {
+    Select-Page 'Characters'
+    $character = Find-Semantic 'CHIMERA' -AutomationIds @('character-chimera') -Names @('CHIMERA')
+    Select-UiaItem $character 'CHIMERA'
+    Wait-Until { (Get-UiaValue (Get-Control 'characterName' 'Value')) -ceq 'CHIMERA' } 'CHIMERA did not open in the character editor.'
+    foreach ($id in @('character-video', 'character-voice-id')) {
+        if (Find-Semantic $id -AutomationIds @($id) -Optional) { throw "CHIMERA exposes an unrelated control: $id" }
+    }
+}
+
+function Verify-ChimeraDraft {
+    Select-Chimera
+    $before = Read-Bytes $script:settingsPath
+    $selected = Find-Semantic 'Selected' -AutomationIds @('character-selected') -Names @('Selected') -PatternKind 'Toggle'
+    Set-UiaToggle $selected $true 'CHIMERA selected'
+    Set-UiaValue (Get-Control 'characterPrompt' 'Value') 'Speak with the CHIMERA voice.' 'CHIMERA summary prompt'
+    $preview = Find-Semantic 'CHIMERA preview' -AutomationIds @('character-preview') -PatternKind 'Invoke'
+    Invoke-Uia $preview 'Play voice example'
+    Wait-TextMatch @('Playing voice example.') 'CHIMERA preview did not start.' | Out-Null
+    Invoke-Uia (Find-Semantic 'CHIMERA preview' -AutomationIds @('character-preview') -PatternKind 'Invoke') 'Stop example'
+    Wait-TextMatch @('Voice preview stopped.') 'CHIMERA preview did not stop.' | Out-Null
+    Invoke-Uia (Find-Semantic 'CHIMERA preview' -AutomationIds @('character-preview') -PatternKind 'Invoke') 'Play voice example'
+    Wait-TextMatch @('Voice preview finished.') 'CHIMERA voice preview did not finish.' 45 | Out-Null
+    if (-not (Bytes-Equal $before (Read-Bytes $script:settingsPath))) { throw 'CHIMERA preview saved the draft.' }
+    Assert-SpeechUnloaded
+    Save-UiaSnapshot 'uia-chimera-preview' | Out-Null
+    Capture-Window 'chimera-editor' | Out-Null
+    Write-Action 'chimera-preview' @{ started = $true; stopped = $true; completed = $true; draftBytesUnchanged = $true }
+}
+
+function Verify-ChimeraReopened {
+    Select-Chimera
+    $selected = Find-Semantic 'Selected' -AutomationIds @('character-selected') -Names @('Selected') -PatternKind 'Toggle'
+    if ((Get-UiaToggleState $selected) -ne 'On' -or (Get-UiaValue (Get-Control 'characterPrompt' 'Value')) -cne 'Speak with the CHIMERA voice.') { throw 'CHIMERA changes did not survive reopening.' }
+    $settings = Get-Content -LiteralPath $script:settingsPath -Raw | ConvertFrom-Json
+    if ($settings.characters.chimera.voice.type -cne 'chimera') { throw 'Saving changed the native CHIMERA character type.' }
+    Write-Action 'chimera-reopened' @{ selected = $true; prompt = $true; nativeVoice = $true; nativeVisual = $true }
+}
+
 function Assert-SpeechUnloaded {
     Assert-ActiveProcess
     $modules = @($script:activeRecord.Process.Modules | ForEach-Object ModuleName)
@@ -1606,10 +1645,11 @@ try {
         voices = [ordered]@{ claude = 'Mark' }
         summaryPrompt = 'Fixture prompt.'
     }
+    if ($Feature -eq 'Chimera') { $fixture.volume = 35; $fixture.outputDevice = $null }
     $fixture | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
     Save-SettingsEvidence 'settings-before' | Out-Null
     $firstLaunchBytes = Read-Bytes $settingsPath
-    Write-Action 'fixture' @{ volume = 0; scheduleEnabled = $false; missingOutput = $true; seededVoice = 'Mark'; legacyEnvironmentKey = 'ignored' }
+    Write-Action 'fixture' @{ volume = $fixture.volume; scheduleEnabled = $false; missingOutput = ($null -ne $fixture.outputDevice); seededVoice = 'Mark'; legacyEnvironmentKey = 'ignored' }
 
     Launch-Settings 'first-launch'
     Assert-NoRuntimeErrors 'ready'
@@ -1639,6 +1679,7 @@ try {
     $runOutput = $Feature -in @('All', 'Settings', 'Output')
     $runPreview = $Feature -in @('All', 'Settings', 'Preview')
     $runCharacters = $Feature -in @('All', 'Settings', 'Characters')
+    $runChimera = $Feature -eq 'Chimera'
     $runAnnouncements = $Feature -in @('All', 'Settings', 'Announcements')
     $runLightning = $Feature -in @('All', 'Settings', 'Lightning')
     if ($runTheme) { Verify-Theme | Out-Null }
@@ -1647,8 +1688,9 @@ try {
     if ($runAnnouncements) { Set-AnnouncementDraft }
     if ($runCharacters) { $characterCreated = Try-CharacterDraft } else { $characterCreated = $false }
     if ($runPreview) { Run-SilentPreview }
+    if ($runChimera) { Verify-ChimeraDraft }
 
-    $needsApply = $runQuiet -or $runOutput -or ($runCharacters -and $characterCreated) -or $runAnnouncements
+    $needsApply = $runQuiet -or $runOutput -or ($runCharacters -and $characterCreated) -or $runAnnouncements -or $runChimera
     if ($needsApply) {
         Select-Page 'Audio'
         Invoke-Apply
@@ -1684,6 +1726,7 @@ try {
         $themeAfterReopen = [ordered]@{ appearance = $appearance; selector = $selector; theme = $themeVerification.finalTheme }
     }
     Verify-ReopenedValues $runQuiet $runOutput $runAnnouncements ($runCharacters -and $characterCreated)
+    if ($runChimera) { Verify-ChimeraReopened }
     if ($runPreview -and -not $runOutput) { Select-Page 'Audio'; if ([math]::Abs((Get-UiaRangeValue (Get-Control 'volume' 'RangeValue')) - 0) -gt 0.01) { throw 'Reopening did not restore zero volume after preview.' } }
     $reopenedBytes = Read-Bytes $settingsPath
     if (-not (Bytes-Equal $script:appliedBytes $reopenedBytes)) { throw 'Reopening changed saved settings bytes.' }
@@ -1710,7 +1753,7 @@ try {
         snapshots = $script:snapshotPaths
         screenshots = $screenshots
         savedValues = [ordered]@{ quiet = $runQuiet; theme = $runTheme; output = $runOutput; previewSilent = $runPreview; characters = ($runCharacters -and $characterCreated); announcements = $runAnnouncements; discardedOnClose = ($Feature -in @('All', 'Settings') -and $runAnnouncements); reopened = $true; voicesPreserved = $true }
-        audiblePreview = $false
+        audiblePreview = $runChimera
         featureGaps = $script:featureGaps
         actions = $script:actionRecords.Count
         actionTranscript = (Join-Path $evidencePath 'actions.txt')
