@@ -669,6 +669,7 @@ fn run() -> Result<(), String> {
                                 max_played_samples = max_played_samples.max(animation.sample_position());
                                 if !active.speaking { pre_speech_played_samples = pre_speech_played_samples.max(animation.sample_position()); }
                             }
+                            renderer.set_anatomy_paths(active.animation.as_ref().map_or(&[], animation::Animation::anatomy_paths));
                             renderer.text_interference = if elapsed < state::TRANSITION_DURATION || active.end.is_some() { interference } else { 0.0 };
                             let seed = active.seed();
                             renderer.lightning_activity = if active.end.is_some() {

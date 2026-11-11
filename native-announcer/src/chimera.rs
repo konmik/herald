@@ -218,6 +218,10 @@ impl Head {
         self.renderer.frame()
     }
 
+    pub fn anatomy_paths(&self) -> &[Vec<[f32; 2]>] {
+        self.renderer.anatomy_paths()
+    }
+
     pub fn frames(&self) -> u64 {
         self.frames
     }

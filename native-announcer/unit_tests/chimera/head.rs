@@ -50,6 +50,67 @@ fn neutral_animation_blinks_without_speech_motion() {
 }
 
 #[test]
+fn anatomy_paths_follow_visible_anatomy_through_articulation_and_camera_motion() {
+    for size in [128, 384] {
+        let mut head = Head::new(size);
+        for artic in [NEUTRAL, HumanArtic { larynx: -0.5, jaw: 1.5, lip_ap: 1.0, ..NEUTRAL }, HumanArtic { larynx: 0.8, jaw: 0.0, lip_ap: 0.0, ..NEUTRAL }] {
+            for time in [0.0, 2.0, 3.9, 4.01, 4.12, 7.0] {
+                head.draw(&pose(artic), time);
+                assert!(!head.anatomy_paths().is_empty());
+                for path in head.anatomy_paths() {
+                    assert!(path.len() >= 2);
+                    assert!(path.iter().flatten().all(|coordinate| (0.0..=1.0).contains(coordinate)));
+                    for pair in path.windows(2) {
+                        for fraction in [0.0, 0.5, 1.0] {
+                            let x = ((pair[0][0] + (pair[1][0] - pair[0][0]) * fraction) * size as f32).floor() as i32;
+                            let y = ((pair[0][1] + (pair[1][1] - pair[0][1]) * fraction) * size as f32).floor() as i32;
+                            let on_anatomy = (y - 1..=y + 1).any(|row| (x - 1..=x + 1).any(|column| {
+                                if row < 0 || column < 0 || row >= size as i32 || column >= size as i32 { return false; }
+                                let pixel = head.frame().get_pixel(column as u32, row as u32).0;
+                                pixel[3] > 0 && pixel[..3].iter().any(|channel| *channel > 40)
+                            }));
+                            assert!(on_anatomy, "Anatomy path missed its visible stroke at {size}px, {time}s, point {x}, {y}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn anatomy_paths_refresh_for_both_head_motion_and_larynx_motion() {
+    let mut head = Head::new(384);
+    head.draw(&pose(NEUTRAL), 0.0);
+    let original = head.anatomy_paths().to_vec();
+    head.draw(&pose(NEUTRAL), 2.0);
+    assert_ne!(head.anatomy_paths(), original);
+    head.draw(&pose(HumanArtic { larynx: 0.8, ..NEUTRAL }), 0.0);
+    assert_ne!(head.anatomy_paths(), original);
+    head.draw(&pose(NEUTRAL), 0.0);
+    assert_eq!(head.anatomy_paths(), original);
+}
+
+#[test]
+fn anatomy_paths_keep_the_throat_and_follow_the_eyes_through_blinks() {
+    let mut head = Head::new(384);
+    let mut eye_counts = Vec::new();
+    let mut throat_counts = Vec::new();
+    for time in [3.9, 4.01, 4.12] {
+        head.draw(&pose(NEUTRAL), time);
+        let eyes = head.anatomy_paths().iter().filter(|path| path.iter().all(|point| point[1] < 0.55)).count();
+        let throat = head.anatomy_paths().iter().filter(|path| path.iter().all(|point| point[1] > 0.55)).count();
+        assert!(eyes > 0);
+        assert!(throat > 0);
+        eye_counts.push(eyes);
+        throat_counts.push(throat);
+    }
+    assert!(eye_counts[1] < eye_counts[0]);
+    assert_eq!(eye_counts[0], eye_counts[2]);
+    assert!(throat_counts.iter().all(|count| *count == throat_counts[0]));
+}
+
+#[test]
 fn idle_animation_moves_the_skull_within_two_seconds() {
     let mut head = Head::new(384);
     let quiet = pose(HumanArtic { jaw: 0.0, lip_ap: 0.0, ..NEUTRAL });

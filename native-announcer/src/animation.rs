@@ -32,6 +32,10 @@ impl Animation {
         match self { Self::Video(video) => video.frame(), Self::Chimera(head) => head.frame() }
     }
 
+    pub fn anatomy_paths(&self) -> &[Vec<[f32; 2]>] {
+        match self { Self::Video(_) => &[], Self::Chimera(head) => head.anatomy_paths() }
+    }
+
     pub fn fps(&self) -> f64 {
         match self { Self::Video(video) => video.fps(), Self::Chimera(_) => 60.0 }
     }

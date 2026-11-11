@@ -3,6 +3,74 @@ use super::*;
 const CHIMERA_MESSAGE: &str = "Attention, human. The build is ready and the checks have passed. Please admire my moving mouth, glowing tongue, and deeply questionable voice. Mission complete.";
 
 #[test]
+fn anatomy_lightning_tracks_open_paths_without_bridging_their_ends() {
+    let mut coverage = PaintCoverage::new(vec![true; 120 * 120], PixelFormat::PremultipliedArgb);
+    coverage.wires = vec![vec![[20.0, 20.0], [20.0, 100.0], [100.0, 100.0]]];
+    let mut full = LightningPaint::new(120, 120, Settings::default().lightning);
+    coverage.draw_wires(&mut full, 1.0, 1, 1.0, 1.0, 1);
+    full.rasterize();
+    assert!(full.glow[60 * 120 + 20] > 0.3);
+    assert!(full.glow[100 * 120 + 60] > 0.3);
+    assert_eq!(full.glow[60 * 120 + 60], 0.0);
+    let mut partial = LightningPaint::new(120, 120, Settings::default().lightning);
+    coverage.draw_wires(&mut partial, 1.0, 1, 1.0, 0.25, 1);
+    partial.rasterize();
+    assert!(partial.glow[40 * 120 + 20] > 0.3);
+    assert_eq!(partial.glow[80 * 120 + 20], 0.0);
+    assert_eq!(partial.glow[100 * 120 + 60], 0.0);
+}
+
+#[test]
+fn anatomy_lightning_flashes_on_internal_wires_during_holding() {
+    let lightning = Settings::default().lightning;
+    let duration = Duration::from_secs(13);
+    let elapsed = (650..3000).map(Duration::from_millis).find(|elapsed| {
+        ambient_burst(*elapsed, duration, 177, lightning).is_some_and(|(_, intensity, _)| intensity > 0.8)
+    }).unwrap();
+    let activity = LightningActivity::Holding(elapsed, duration, 177);
+    let mut coverage = PaintCoverage::new(vec![true; 120 * 120], PixelFormat::PremultipliedArgb);
+    let mut original = vec![0xff101010; 120 * 120];
+    coverage.draw_activity(&mut original, 120, 120, 1.0, activity, lightning);
+    coverage.wires = [30.0, 60.0, 90.0].into_iter().map(|x| vec![[x, 30.0], [x, 90.0]]).collect();
+    let mut illuminated = vec![0xff101010; 120 * 120];
+    coverage.draw_activity(&mut illuminated, 120, 120, 1.0, activity, lightning);
+    for x in [30, 60, 90] { assert_ne!(illuminated[60 * 120 + x], original[60 * 120 + x]); }
+}
+
+#[test]
+fn chimera_lightning_reaches_internal_eye_and_throat_wires() {
+    let mut renderer = Renderer::new().unwrap();
+    renderer.set_style(AnnouncementStyle::Chimera);
+    renderer.text = CHIMERA_MESSAGE.into();
+    let head = crate::chimera::Head::new();
+    for scale in [1.0, 1.5] {
+        let width = (600.0 * scale) as usize;
+        let height = (432.0 * scale) as usize;
+        for closing in [false, true] {
+            let entrance = (!closing).then(|| Duration::from_millis(300));
+            renderer.lightning_activity = closing.then(|| LightningActivity::Closing(Duration::from_millis(100), 177));
+            let mut original = vec![0; width * height];
+            renderer.set_anatomy_paths(&[]);
+            renderer.draw(&mut original, width, height, scale, Some(head.frame()), 0.0, entrance);
+            let mut illuminated = vec![0; width * height];
+            renderer.set_anatomy_paths(head.anatomy_paths());
+            renderer.draw(&mut illuminated, width, height, scale, Some(head.frame()), 0.0, entrance);
+            for throat in [false, true] {
+                let changes = head.anatomy_paths().iter().flatten().filter(|point| (point[1] > 0.65) == throat).filter(|point| {
+                    let x = ((325.0 + point[0] * 336.0) * scale).round() as usize;
+                    let y = ((84.0 + point[1] * 336.0) * scale).round() as usize;
+                    illuminated[y * width + x] != original[y * width + x]
+                }).count();
+                assert!(changes > 5, "Missing anatomy lightning: throat {throat}, closing {closing}, scale {scale}, changed points {changes}");
+            }
+            assert!(illuminated.iter().all(|pixel| [0, 8, 16].into_iter().all(|shift| (pixel >> shift) & 255 <= pixel >> 24)));
+        }
+    }
+    renderer.set_anatomy_paths(&[]);
+    assert!(renderer.anatomy_paths.is_empty());
+}
+
+#[test]
 fn chimera_preserves_partial_alpha_through_text_head_and_lightning() {
     let mut renderer = Renderer::new().unwrap();
     renderer.set_style(AnnouncementStyle::Chimera);

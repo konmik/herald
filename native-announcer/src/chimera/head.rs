@@ -33,11 +33,12 @@ struct Line {
     width: f64,
     alpha: f64,
     hot: bool,
+    lightning: bool,
 }
 
 impl Line {
     fn new(points: Vec<Point>, color: Color, width: f64, alpha: f64) -> Self {
-        Self { points, color, width, alpha, hot: false }
+        Self { points, color, width, alpha, hot: false, lightning: false }
     }
 
     fn hot(mut self) -> Self {
@@ -148,6 +149,7 @@ pub(super) struct Head {
     jaw: Vec<Line>,
     shell: Vec<Vec<Point>>,
     moving: Vec<Line>,
+    anatomy_paths: Vec<Vec<[f32; 2]>>,
     last_artic: Option<HumanArtic>,
 }
 
@@ -162,7 +164,7 @@ impl Head {
         let shape = Shape::new(&outline, false);
         let shell = shell_lines(&shape, &anatomy);
         let (fixed, jaw) = rest_lines(&tract, &shape);
-        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 0])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), last_artic: None }
+        Self { image: RgbaImage::from_pixel(size.max(1), size.max(1), Rgba([0, 0, 0, 0])), tract, anatomy, shape, fixed, jaw, shell, moving: Vec::new(), anatomy_paths: Vec::new(), last_artic: None }
     }
 
     pub(super) fn draw(&mut self, pose: &super::Pose, elapsed: f64) {
@@ -175,12 +177,19 @@ impl Head {
         let level = if pose.level.is_finite() { f64::from(pose.level).clamp(0.0, 1.0) } else { 0.0 };
         let pitch = if level > 0.001 && pose.f0.is_finite() && pose.f0 > 0.0 { (pose.f0 / 110.0).log2().clamp(-1.0, 1.0) } else { 0.0 };
         let camera = Camera::new(self.image.width(), time, level, pitch);
+        let mut eyes = eye_lines(time, level, pitch);
+        for line in &mut eyes { line.lightning = true; }
         self.image.pixels_mut().for_each(|p| *p = Rgba([0, 0, 0, 0]));
-        for line in self.fixed.iter().chain(self.moving.iter()) {
+        self.anatomy_paths.clear();
+        for line in self.fixed.iter().chain(self.moving.iter()).chain(eyes.iter()) {
             draw_line(&mut self.image, line, &camera);
-        }
-        for line in eye_lines(time, level, pitch) {
-            draw_line(&mut self.image, &line, &camera);
+            if line.lightning && line.alpha > 0.0 {
+                let size = f64::from(self.image.width());
+                self.anatomy_paths.push(line.points.iter().map(|point| {
+                    let projected = camera.project(*point);
+                    [(projected[0] / size) as f32, (projected[1] / size) as f32]
+                }).collect());
+            }
         }
         for pixel in self.image.pixels_mut() {
             let alpha = u16::from(pixel.0[3]);
@@ -192,6 +201,10 @@ impl Head {
 
     pub(super) fn frame(&self) -> &RgbaImage {
         &self.image
+    }
+
+    pub(super) fn anatomy_paths(&self) -> &[Vec<[f32; 2]>] {
+        &self.anatomy_paths
     }
 }
 
@@ -535,7 +548,9 @@ fn moving_lines(tract: &HumanVocalTract, frame: &HumanFrame, artic: &HumanArtic,
     tongue(&mut lines, frame, artic);
     airway(&mut lines, frame);
     velum(&mut lines, frame);
+    let throat_start = lines.len();
     larynx(&mut lines, tract, frame, artic, shape.bottom);
+    for line in &mut lines[throat_start..] { line.lightning = true; }
     lines
 }
 

@@ -559,6 +559,7 @@ pub struct Renderer {
     template: Option<CardTemplate>,
     portrait_warp: Option<(usize, Vec<PortraitTexel>)>,
     chimera_template: Option<chimera::Frame>,
+    anatomy_paths: Vec<Vec<[f32; 2]>>,
 }
 
 /// Identifies one laid-out text block; its glyph rasters do not change between frames.
@@ -706,6 +707,7 @@ impl Renderer {
             template: None,
             portrait_warp: None,
             chimera_template: None,
+            anatomy_paths: Vec::new(),
         })
     }
 
@@ -737,6 +739,11 @@ impl Renderer {
     }
 
     pub fn set_lightning(&mut self, lightning: LightningSettings) { self.lightning = lightning; }
+
+    pub fn set_anatomy_paths(&mut self, paths: &[Vec<[f32; 2]>]) {
+        self.anatomy_paths.resize_with(paths.len(), Vec::new);
+        for (target, path) in self.anatomy_paths.iter_mut().zip(paths) { target.clone_from(path); }
+    }
 
     pub fn ambient_active(&self, elapsed: Duration, duration: Duration, seed: u32) -> bool { ambient_active(elapsed, duration, seed, self.lightning) }
 
@@ -1089,6 +1096,7 @@ struct PaintCoverage {
     format: PixelFormat,
     pixels: Vec<bool>,
     traced: std::cell::OnceCell<Contours>,
+    wires: Vec<Vec<[f32; 2]>>,
 }
 
 /// Paints one stroke into `glow`, which holds image rows `rows` of an image `width` by `height` pixels.
@@ -1227,6 +1235,28 @@ fn paint(buffer: &mut [u32], coverage: &mut Option<&mut PaintCoverage>, index: u
 }
 
 impl PaintCoverage {
+    fn draw_wires(&self, paint: &mut LightningPaint, scale: f32, seed: u32, intensity: f32, progress: f32, limit: usize) {
+        let count = limit.min(self.wires.len());
+        for offset in 0..count {
+            let index = (seed as usize + offset * self.wires.len() / count) % self.wires.len();
+            let path = &self.wires[index];
+            let length: f32 = path.windows(2).map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1])).sum();
+            let mut remaining = length * progress.clamp(0.0, 1.0);
+            let random = crate::state::noise_hash(seed ^ index as u32);
+            let taper = 0.45 + (random & 255) as f32 / 255.0 * 0.2;
+            for pair in path.windows(2) {
+                if remaining <= 0.0 { break; }
+                let dx = pair[1][0] - pair[0][0];
+                let dy = pair[1][1] - pair[0][1];
+                let distance = dx.hypot(dy);
+                if distance == 0.0 { continue; }
+                let fraction = (remaining / distance).min(1.0);
+                paint.stroke(pair[0], [pair[0][0] + dx * fraction, pair[0][1] + dy * fraction], scale, taper, intensity * 0.8);
+                remaining -= distance;
+            }
+        }
+    }
+
     fn draw_activity(&self, buffer: &mut [u32], width: usize, height: usize, scale: f32, activity: LightningActivity, lightning: LightningSettings) {
         match activity {
             LightningActivity::Holding(elapsed, duration, seed) => {
@@ -1234,6 +1264,7 @@ impl PaintCoverage {
                 let mut glow = LightningPaint::new(width, height, lightning);
                 let intensity = lightning.pulse_profile.holding(elapsed.as_secs_f32() * 1000.0 * lightning.speed, intensity);
                 draw_ambient_edges(self, &mut glow, scale, seed, intensity, buildup);
+                self.draw_wires(&mut glow, scale, seed, intensity, 1.0, 3);
                 glow.rasterize();
                 for (index, strength) in glow.glow.iter_mut().enumerate() {
                     if !self.pixels[index] { *strength = 0.0; }
@@ -1256,6 +1287,10 @@ impl PaintCoverage {
         let mut removal = (consumption > 0.0 && lightning.brightness != 1.0)
             .then(|| LightningPaint::new(width, height, LightningSettings { brightness: 1.0, ..lightning }));
         let intensity = lightning.pulse_profile.exit(elapsed);
+        self.draw_wires(&mut glow, scale, seed, 1.0, (progress / 0.16).min(1.0), self.wires.len());
+        if let Some(removal) = &mut removal {
+            self.draw_wires(removal, scale, seed, 1.0, (progress / 0.16).min(1.0), self.wires.len());
+        }
         for (index, contour) in self.contours(width, height).iter().enumerate() {
             for branch in 0..2 {
                 let random = crate::state::noise_hash(seed ^ (index * 17 + branch) as u32);
@@ -1309,7 +1344,7 @@ impl PaintCoverage {
         glow.composite(buffer, self.format);
     }
 
-    fn new(pixels: Vec<bool>, format: PixelFormat) -> Self { Self { format, pixels, traced: std::cell::OnceCell::new() } }
+    fn new(pixels: Vec<bool>, format: PixelFormat) -> Self { Self { format, pixels, traced: std::cell::OnceCell::new(), wires: Vec::new() } }
 
     /// The painted outlines, traced once per coverage; the renderer reuses them while the card geometry is unchanged.
     fn contours(&self, width: usize, height: usize) -> Contours {
@@ -1417,6 +1452,7 @@ impl PaintCoverage {
                 }
             }
         }
+        self.draw_wires(&mut paint, scale, 31973, intensity, ((milliseconds - 180.0) / 270.0).clamp(0.0, 1.0), self.wires.len());
         paint.composite(buffer, self.format);
     }
 }

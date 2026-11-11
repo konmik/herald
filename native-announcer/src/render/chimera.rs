@@ -146,6 +146,12 @@ impl Renderer {
                 }
             }
         });
+        if let (Some(coverage), Some(_)) = (&mut coverage, image) {
+            coverage.wires = self.anatomy_paths.iter().map(|path| path.iter().map(|point| [
+                (layout.portrait[0] + point[0] * layout.portrait[2]) * scale,
+                (layout.portrait[1] + point[1] * layout.portrait[3]) * scale,
+            ]).collect()).collect();
+        }
         if let Some(coverage) = coverage {
             self.draw_lightning(buffer, width, height, scale, strike, coverage, layout);
         }
