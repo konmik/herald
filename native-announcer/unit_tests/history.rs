@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn shown_ids_match_only_requested_notifications_and_ignore_incomplete_records() {
+    let data = std::env::temp_dir().join(format!("herald-shown-ids-{}-{}", std::process::id(), crate::state::timestamp()));
+    std::fs::create_dir_all(&data).unwrap();
+    let candidates = HashSet::from(["shown", "pending"]);
+    assert!(shown_ids(&data, &candidates).unwrap().is_empty());
+    std::fs::write(data.join("history.jsonl"), concat!(
+        "{\"id\":\"unrelated\",\"video\":\"herald.mp4\"}\n",
+        "{\"id\":\"shown\",\"characterId\":\"chimera\"}\n",
+        "{\"id\":\"shown\"}\n",
+        "{\"id\":\"pending"
+    )).unwrap();
+    assert_eq!(shown_ids(&data, &candidates).unwrap(), HashSet::from(["shown".to_owned()]));
+    assert!(shown_ids(&data, &HashSet::new()).unwrap().is_empty());
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
 fn procedural_history_has_character_identity_without_a_video() {
     let notification: Notification = serde_json::from_value(serde_json::json!({
         "id":"chimera-history", "sessionID":"test", "completed":10, "text":"Done.", "character":"codex"

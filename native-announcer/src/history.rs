@@ -1,7 +1,8 @@
 use crate::state::Notification;
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Serialize;
-use std::io::Write;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 #[derive(Serialize)]
@@ -20,6 +21,29 @@ struct ShownMessage<'a> {
     source: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     video: Option<&'a Path>,
+}
+
+pub fn shown_ids(data: &Path, candidates: &HashSet<&str>) -> Result<HashSet<String>, String> {
+    #[derive(Deserialize)]
+    struct ShownId {
+        id: String,
+    }
+
+    let mut shown = HashSet::new();
+    if candidates.is_empty() { return Ok(shown); }
+    let file = match std::fs::File::open(data.join("history.jsonl")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(shown),
+        Err(error) => return Err(error.to_string()),
+    };
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if let Ok(entry) = serde_json::from_str::<ShownId>(&line) {
+            if candidates.contains(entry.id.as_str()) { shown.insert(entry.id); }
+        }
+        if shown.len() == candidates.len() { break; }
+    }
+    Ok(shown)
 }
 
 pub fn record(

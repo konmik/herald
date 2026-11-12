@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -196,27 +196,24 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    pub fn new(data: PathBuf) -> Self {
+    pub fn new(data: PathBuf) -> Result<Self, String> {
         if let Err(error) = crate::private::directory(&data.join("inbox")) { log(&data, error); }
         let queue: VecDeque<Notification> = std::fs::read(data.join("queue.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Self {
+        let mut queue: VecDeque<_> = queue.into_iter().rev().take(128).collect::<VecDeque<_>>().into_iter().rev().collect();
+        let candidates = queue.iter().map(|notification| notification.id.as_str()).collect::<HashSet<_>>();
+        let shown = crate::history::shown_ids(&data, &candidates)?;
+        queue.retain(|notification| !shown.contains(&notification.id));
+        Ok(Self {
             data,
-            queue: queue
-                .into_iter()
-                .rev()
-                .take(128)
-                .collect::<VecDeque<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-            received: VecDeque::new(),
+            queue,
+            received: shown.into_iter().collect(),
             preparations: VecDeque::new(),
             discarded: VecDeque::new(),
             presence: HashMap::new(),
-        }
+        })
     }
 
     fn discard(&mut self, session_id: String, at: u64) {

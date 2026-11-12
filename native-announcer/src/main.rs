@@ -300,7 +300,7 @@ fn run() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     let mut settings_store = settings::Store::new(&data)?;
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone())?;
     let demo_mode = demo.is_some();
     if let Some(character) = demo {
         inbox.queue.push_front(Notification { id: format!("demo-{}", state::timestamp()), session_id: "demo".into(), presence_session_id: String::new(), completed: state::timestamp(), text: "The native voice adviser is ready. Announcements stay visible without taking focus.".into(), title: "Herald verification".into(), character, character_id: None, emotion: "neutral".into() });

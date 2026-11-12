@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn preparation_requires_presence_and_rejects_discarded_or_expired_requests() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":["session"],"at":now}));
     write_command(&data, "1", serde_json::json!({"type":"get-ready","id":"ready","sessionID":"session","completed":now}));
@@ -19,7 +19,7 @@ fn preparation_requires_presence_and_rejects_discarded_or_expired_requests() {
 #[test]
 fn playback_requires_a_live_owner_and_stops_when_the_last_client_closes() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     let notification: Notification = serde_json::from_value(serde_json::json!({
         "id":"child", "sessionID":"child", "presenceSessionID":"parent", "completed":now, "text":"Done."
@@ -40,7 +40,7 @@ fn playback_requires_a_live_owner_and_stops_when_the_last_client_closes() {
 #[test]
 fn closed_sessions_do_not_block_playback_for_open_sessions() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     for session in ["closed", "open"] {
         inbox.queue.push_back(serde_json::from_value(serde_json::json!({"id":session,"sessionID":session,"completed":now,"text":"Done."})).unwrap());
@@ -75,7 +75,7 @@ fn meeting_audio_requires_a_recent_successful_check() {
 #[test]
 fn late_heartbeats_cannot_reopen_a_closed_client() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     let notification: Notification = serde_json::from_value(serde_json::json!({"id":"notification","sessionID":"session","completed":now,"text":"Done."})).unwrap();
     write_command(&data, "0", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":[],"at":now,"sequence":2}));
@@ -196,7 +196,7 @@ fn notification_separator_sets_title_and_summary_for_both_hosts() {
             ("All checks are green.", "Session title", "All checks are green."),
         ] {
             let data = test_directory();
-            let mut inbox = Inbox::new(data.clone());
+            let mut inbox = Inbox::new(data.clone()).unwrap();
             write_command(&data, "0", serde_json::json!({
                 "type": "notify", "id": "result", "sessionID": session,
                 "completed": 10, "text": text, "title": "Session title"
@@ -213,7 +213,7 @@ fn notification_separator_sets_title_and_summary_for_both_hosts() {
 #[test]
 fn discard_preserves_current_playback_and_rejects_old_notifications() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let notification: Notification = serde_json::from_value(
         serde_json::json!({"id":"active","sessionID":"session","completed":10,"text":"Done."}),
     )
@@ -249,7 +249,7 @@ fn discard_preserves_current_playback_and_rejects_old_notifications() {
 #[test]
 fn viewing_a_session_does_not_suppress_its_notification() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     write_command(
         &data,
@@ -288,7 +288,7 @@ fn viewing_a_session_does_not_suppress_its_notification() {
 #[test]
 fn blurred_client_can_clear_presence_with_null_session() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let now = timestamp();
     write_command(
         &data,
@@ -313,13 +313,13 @@ fn blurred_client_can_clear_presence_with_null_session() {
 #[test]
 fn duplicates_are_ignored_and_queue_survives_restart() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let value = serde_json::json!({"type":"notify","id":"one","sessionID":"session","completed":10,"text":"Done.","title":"Persistent title"});
     write_command(&data, "0", value.clone());
     write_command(&data, "1", value);
     inbox.read(None);
     assert_eq!(inbox.queue.len(), 1);
-    let restored = Inbox::new(data.clone());
+    let restored = Inbox::new(data.clone()).unwrap();
     assert_eq!(restored.queue.front().unwrap().title, "Persistent title");
     std::fs::remove_dir_all(data).unwrap();
 }
@@ -327,7 +327,7 @@ fn duplicates_are_ignored_and_queue_survives_restart() {
 #[test]
 fn malformed_commands_are_quarantined() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     std::fs::write(data.join("inbox/broken.json"), "not json").unwrap();
     inbox.read(None);
     assert!(data.join("inbox/broken.invalid").exists());
@@ -338,7 +338,7 @@ fn malformed_commands_are_quarantined() {
 #[test]
 fn shown_notifications_are_not_replayed_after_restart() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     let shown = serde_json::json!({"type":"notify","id":"shown","sessionID":"first","completed":10,"text":"Already shown."});
     let pending = serde_json::json!({"type":"notify","id":"pending","sessionID":"second","completed":20,"text":"Not shown yet."});
     write_command(&data, "0", shown.clone());
@@ -347,7 +347,7 @@ fn shown_notifications_are_not_replayed_after_restart() {
     crate::history::record_with_identity(&data, inbox.queue.front().unwrap(), "chimera", None, chrono::Utc::now()).unwrap();
     use std::io::Write;
     std::fs::OpenOptions::new().append(true).open(data.join("history.jsonl")).unwrap().write_all(b"{\"id\":\"unfinished").unwrap();
-    let mut restored = Inbox::new(data.clone());
+    let mut restored = Inbox::new(data.clone()).unwrap();
     assert_eq!(restored.queue.len(), 1);
     assert_eq!(restored.queue.front().unwrap().id, "pending");
     write_command(&data, "2", shown);
@@ -362,7 +362,7 @@ fn shown_notifications_are_not_replayed_after_restart() {
 #[test]
 fn queue_and_message_sizes_are_bounded() {
     let data = test_directory();
-    let mut inbox = Inbox::new(data.clone());
+    let mut inbox = Inbox::new(data.clone()).unwrap();
     for index in 0..140 {
         write_command(
             &data,
@@ -377,5 +377,16 @@ fn queue_and_message_sizes_are_bounded() {
         .queue
         .iter()
         .all(|n| n.text.len() == 4096 && n.title.len() == 256));
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn restart_reports_unreadable_history_instead_of_replaying_saved_notifications() {
+    let data = test_directory();
+    let mut inbox = Inbox::new(data.clone()).unwrap();
+    write_command(&data, "0", serde_json::json!({"type":"notify","id":"shown","sessionID":"session","completed":10,"text":"Already shown."}));
+    inbox.read(None);
+    std::fs::create_dir(data.join("history.jsonl")).unwrap();
+    assert!(Inbox::new(data.clone()).is_err());
     std::fs::remove_dir_all(data).unwrap();
 }
