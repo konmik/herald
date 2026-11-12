@@ -64,6 +64,7 @@ Read [the verification skill](../.claude/skills/verify-herald/SKILL.md) before p
 | [verify-settings-status.ps1](verify-settings-status.ps1) | Legacy Win32 baseline status checks. |
 | [verify-characters.ps1](verify-characters.ps1) | Legacy Win32 character controls and playback checks. |
 | [verify-announcement-audio.py](verify-announcement-audio.py) | Capture output audio and check announcement/preview timing. |
+| [verify-announcement-restart.py](verify-announcement-restart.py) | Verify shown announcements do not replay after restart and unshown notifications survive, using isolated silent playback through the production bridge. |
 | [verify-entrance-lightning.py](verify-entrance-lightning.py) | Check bottom/right screen-edge strikes, video-first impact, outline propagation, sporadic holding arcs and the swallowing exit in real PNG scenes from `announce.ps1 -CaptureFrames`; pass the evidence `frames/` directory. |
 | [preview-lightning.ps1](preview-lightning.ps1) | Preview `-Style original`, `storm`, `electric` or `plasma` silently with the isolated debug announcer and captured frames. Leaves the installed effect and saved settings unchanged. |
 | [verify-linux-playback.py](verify-linux-playback.py) | Check Hyprland desktop transparency, sustained animation, focus and captured output audio with an isolated demo. |

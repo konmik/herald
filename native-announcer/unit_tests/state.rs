@@ -336,6 +336,30 @@ fn malformed_commands_are_quarantined() {
 }
 
 #[test]
+fn shown_notifications_are_not_replayed_after_restart() {
+    let data = test_directory();
+    let mut inbox = Inbox::new(data.clone());
+    let shown = serde_json::json!({"type":"notify","id":"shown","sessionID":"first","completed":10,"text":"Already shown."});
+    let pending = serde_json::json!({"type":"notify","id":"pending","sessionID":"second","completed":20,"text":"Not shown yet."});
+    write_command(&data, "0", shown.clone());
+    write_command(&data, "1", pending);
+    inbox.read(None);
+    crate::history::record_with_identity(&data, inbox.queue.front().unwrap(), "chimera", None, chrono::Utc::now()).unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new().append(true).open(data.join("history.jsonl")).unwrap().write_all(b"{\"id\":\"unfinished").unwrap();
+    let mut restored = Inbox::new(data.clone());
+    assert_eq!(restored.queue.len(), 1);
+    assert_eq!(restored.queue.front().unwrap().id, "pending");
+    write_command(&data, "2", shown);
+    let now = timestamp();
+    write_command(&data, "3", serde_json::json!({"type":"presence","clientID":"client","sessionIDs":["first","second"],"at":now}));
+    restored.read(None);
+    assert_eq!(restored.next(timestamp()).unwrap().id, "pending");
+    assert!(restored.next(timestamp()).is_none());
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
 fn queue_and_message_sizes_are_bounded() {
     let data = test_directory();
     let mut inbox = Inbox::new(data.clone());
