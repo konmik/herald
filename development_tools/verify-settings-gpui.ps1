@@ -1223,11 +1223,38 @@ function Verify-ChimeraDraft {
     Wait-TextMatch @('Voice preview stopped.') 'CHIMERA preview did not stop.' | Out-Null
     Invoke-Uia (Find-Semantic 'CHIMERA preview' -AutomationIds @('character-preview') -PatternKind 'Invoke') 'Play voice example'
     Wait-TextMatch @('Voice preview finished.') 'CHIMERA voice preview did not finish.' 45 | Out-Null
+    $previews = @(
+        @{ page = 'Characters'; id = 'character-preview'; name = 'Play voice example'; quietStatus = 'Voice preview is silent in quiet mode.'; zeroStatus = 'Voice preview is silent at 0% volume.' },
+        @{ page = 'Audio'; id = 'preview'; name = 'Play example'; quietStatus = 'Preview is silent in quiet mode.'; zeroStatus = 'Preview is silent at 0% volume.' }
+    )
+    Select-Page 'Quiet hours'
+    Set-UiaToggle (Get-Control 'quiet' 'Toggle') $true 'quiet mode'
+    foreach ($preview in $previews) {
+        Select-Page $preview.page
+        Invoke-Uia (Find-Semantic $preview.name -AutomationIds @($preview.id) -PatternKind 'Invoke') $preview.name
+        Wait-TextMatch @($preview.quietStatus) "$($preview.name) ignored explicit quiet mode." | Out-Null
+    }
+    Select-Page 'Quiet hours'
+    Set-UiaToggle (Get-Control 'quiet' 'Toggle') $false 'quiet mode'
+    Select-Page 'Audio'
+    Set-UiaRange (Get-Control 'volume' 'RangeValue') 0 'volume draft'
+    foreach ($preview in $previews) {
+        Select-Page $preview.page
+        Invoke-Uia (Find-Semantic $preview.name -AutomationIds @($preview.id) -PatternKind 'Invoke') $preview.name
+        Wait-TextMatch @($preview.zeroStatus) "$($preview.name) ignored zero volume." | Out-Null
+    }
+    Select-Page 'Audio'
+    Set-UiaRange (Get-Control 'volume' 'RangeValue') 100 'volume draft'
+    Invoke-Uia (Get-Control 'preview' 'Invoke') 'Play example during quiet hours'
+    Wait-TextMatch @('Playing static, then: This is an announcement') 'Audio preview did not start during scheduled quiet hours.' | Out-Null
+    Wait-TextMatch @('Preview finished.') 'Audio preview did not finish during scheduled quiet hours.' 45 | Out-Null
     if (-not (Bytes-Equal $before (Read-Bytes $script:settingsPath))) { throw 'CHIMERA preview saved the draft.' }
+    if (Test-Path -LiteralPath (Join-Path $script:scratch 'offline-voice-1.13.8')) { throw 'CHIMERA previews installed an offline voice.' }
     Assert-SpeechUnloaded
+    Select-Chimera
     Save-UiaSnapshot 'uia-chimera-preview' | Out-Null
     Capture-Window 'chimera-editor' | Out-Null
-    Write-Action 'chimera-preview' @{ started = $true; stopped = $true; completed = $true; draftBytesUnchanged = $true }
+    Write-Action 'chimera-preview' @{ started = $true; stopped = $true; completed = $true; audioCompleted = $true; draftBytesUnchanged = $true; quietScheduleBypassed = $true; explicitQuietModeRespected = $true; zeroVolumeRespected = $true; offlineVoiceInstalled = $false }
 }
 
 function Verify-ChimeraReopened {
@@ -1645,11 +1672,18 @@ try {
         voices = [ordered]@{ claude = 'Mark' }
         summaryPrompt = 'Fixture prompt.'
     }
-    if ($Feature -eq 'Chimera') { $fixture.volume = 35; $fixture.outputDevice = $null }
+    if ($Feature -eq 'Chimera') {
+        $fixture.volume = 100
+        $fixture.outputDevice = $null
+        $fixture.scheduleEnabled = $true
+        $fixture.quietStart = 0
+        $fixture.quietEnd = 1440
+        $fixture.selectedCharacter = 'chimera'
+    }
     $fixture | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
     Save-SettingsEvidence 'settings-before' | Out-Null
     $firstLaunchBytes = Read-Bytes $settingsPath
-    Write-Action 'fixture' @{ volume = $fixture.volume; scheduleEnabled = $false; missingOutput = ($null -ne $fixture.outputDevice); seededVoice = 'Mark'; legacyEnvironmentKey = 'ignored' }
+    Write-Action 'fixture' @{ volume = $fixture.volume; scheduleEnabled = $fixture.scheduleEnabled; missingOutput = ($null -ne $fixture.outputDevice); seededVoice = 'Mark'; legacyEnvironmentKey = 'ignored' }
 
     Launch-Settings 'first-launch'
     Assert-NoRuntimeErrors 'ready'

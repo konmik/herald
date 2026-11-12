@@ -5,13 +5,10 @@ const viewed = new Map<string, number>()
 const expansion = new Map<string, boolean>()
 const completed = new Set<string>()
 const started = new Map<string, number>()
-type BackgroundTasks = { native: Set<string>; stop: Set<string> }
-const background = new Map<string, BackgroundTasks>()
+const background = new Map<string, Set<string>>()
 const terminalTaskStatuses = new Set(['completed', 'failed', 'killed', 'stopped', 'cancelled'])
 const sessions = new Set<string>()
 let editTimer: Timer | undefined
-let sessionTitle = ''
-let transcriptPath = ''
 const clientID = crypto.randomUUID()
 type Presence = { sessionID: string; timer?: Timer }
 let presence: Presence | undefined
@@ -90,23 +87,22 @@ async function keyFor($: EngineInterface, agentId?: string) {
 function addBackgroundTask(key: string, taskID: string) {
   let tasks = background.get(key)
   if (!tasks) {
-    tasks = { native: new Set(), stop: new Set() }
+    tasks = new Set()
     background.set(key, tasks)
   }
-  tasks.native.add(taskID)
+  tasks.add(taskID)
 }
 
 function removeBackgroundTask(key: string, taskID: string) {
   const tasks = background.get(key)
   if (!tasks) return
-  tasks.native.delete(taskID)
-  tasks.stop.delete(taskID)
-  if (tasks.native.size === 0 && tasks.stop.size === 0) background.delete(key)
+  tasks.delete(taskID)
+  if (tasks.size === 0) background.delete(key)
 }
 
 function hasRegisteredBackgroundTasks(key: string) {
   const tasks = background.get(key)
-  return tasks != null && (tasks.native.size > 0 || tasks.stop.size > 0)
+  return tasks != null && tasks.size > 0
 }
 
 function terminalTaskID(text: string) {
@@ -188,7 +184,7 @@ async function announce($: EngineInterface, event: TurnCompleteInput, key: strin
   if (pending.get(key) !== token) return
   pending.delete(key)
   started.delete(key)
-  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: notificationPresenceSessionID, completed: at, text, title: sessionTitle, transcriptPath, character: 'claude', characterID: profile.characterID, emotion: 'neutral' })
+  await bridge($, { type: 'notify', id: key + ':' + event.turnId, sessionID: key, presenceSessionID: notificationPresenceSessionID, completed: at, text, character: 'claude', characterID: profile.characterID, emotion: 'neutral' })
 }
 
 export const register: Register = (on) => {
@@ -196,24 +192,11 @@ export const register: Register = (on) => {
     await bridge($, { type: 'boot' })
     await startPresence($)
     await $.command.register({ name: 'voice-dismiss', description: 'Dismiss queued voice messages for this session or a subagent', argumentHint: '[agent-id]', immediate: true })
-    return next(e)
-  })
-
-  on('classic.SessionStart', async ($, e, next) => {
-    sessionTitle = e.session_title ?? ''
-    transcriptPath = e.transcript_path ?? ''
-    await startPresence($)
     await discard($)
     const agents = await $.agent.list()
     for (const agent of agents) await discard($, agent.id)
     return next(e)
-  }).catch(async ($, e, next) => next(e))
-
-  on('classic.UserPromptSubmit', async ($, e, next) => {
-    sessionTitle = e.session_title ?? sessionTitle
-    transcriptPath = e.transcript_path ?? transcriptPath
-    return next(e)
-  }).catch(async ($, e, next) => next(e))
+  })
 
   on('prompt.submit', async ($, e, next) => {
     editTimer?.cancel()
@@ -227,6 +210,7 @@ export const register: Register = (on) => {
       const at = await $.clock.now()
       await resetTask($, key, at)
     }
+    await startPresence($)
     return next(e)
   })
 
@@ -239,14 +223,6 @@ export const register: Register = (on) => {
     }
     return next(e)
   })
-
-  on('classic.Stop', async ($, e, next) => {
-    if (e.agent_id != null) return next(e)
-    const key = await keyFor($)
-    const tasks = (e.background_tasks ?? []).filter((task) => task.type !== 'monitor' && ['running', 'pending'].includes(task.status)).map((task) => task.id)
-    background.set(key, { native: background.get(key)?.native ?? new Set(), stop: new Set(tasks) })
-    return next(e)
-  }).catch(async ($, e, next) => next(e))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (e.agentId != null) return next(e)

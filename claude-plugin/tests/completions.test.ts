@@ -280,29 +280,15 @@ test('resuming a session drops its main and child announcements', async ($, on) 
   const ids: string[] = []
   on('session.id', () => ({ value: 'resumed' }))
   on('agent.list', () => ({ value: [{ id: 'child', description: 'Review', type: 'general-purpose', status: 'completed' }] }))
-  on('classic.SessionStart', () => ({}))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
     if (command.type === 'discard' && command.sessionID) ids.push(command.sessionID)
     return { value: runResult(e.init?.stdin) }
   })
-  await $.classic.SessionStart({ source: 'resume' })
+  await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
   expect(ids).toEqual(['claude:resumed', 'claude:resumed:child'])
-})
-
-test('completion includes the session title from the current prompt', async ($, on) => {
-  const clock = mock.clock(on)
-  let command: unknown
-  on('session.id', () => ({ value: 'title-test' }))
-  on('classic.UserPromptSubmit', () => ({}))
-  on('turn.complete', () => ({ text: '' }))
-  on('agent.list', () => ({ value: [] }))
-  on('model.fork', () => ({ value: { isAnswered: true, text: 'The tests passed.', usage } }))
-  on('process.run', (_, e) => { command = bridgeCommand(e.init?.stdin); return { value: runResult(e.init?.stdin) } })
-  await $.classic.UserPromptSubmit({ prompt: 'Test it.', session_title: 'Native announcer' })
-  await $.turn.complete({ turnId: 'titled', answer: 'Passed.', durationMs: 70000, isAborted: false, reason: 'answer', usage })
-  await clock.settle()
-  expect(command).toMatchObject({ type: 'notify', title: 'Native announcer' })
 })
 
 test('session presence is renewed and removed on exit', async ($, on) => {
@@ -328,18 +314,18 @@ test('session presence is renewed and removed on exit', async ($, on) => {
   expect(commands).toHaveLength(count)
 })
 
-test('both startup events share one session presence timer', async ($, on) => {
+test('startup and the first prompt share one session presence timer', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
   const commands: BridgeCommand[] = []
   on('session.id', () => ({ value: 'startup' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('classic.SessionStart', () => ({}))
-  on('agent.list', () => ({ value: [] }))
+  on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('agent.list', () => ({ value: [] }))
   on('process.run', (_, e) => { commands.push(bridgeCommand(e.init?.stdin)); return { value: runResult(e.init?.stdin) } })
   await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
   await clock.settle()
-  await $.classic.SessionStart({ source: 'startup' })
+  await $.prompt.submit({ text: 'Start.', wait: false, origin: { kind: 'composer' } })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'presence')).toHaveLength(1)
   await clock.advance(2000)
@@ -352,17 +338,19 @@ test('clearing a conversation renews presence for the replacement session', asyn
   const commands: Array<{ type: string; sessionIDs?: string[] }> = []
   on('session.id', () => ({ value: sessionID }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
-  on('classic.SessionStart', () => ({}))
+  on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('agent.list', () => ({ value: [] }))
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
     if (command.type !== 'read-announcement-profile') commands.push(command)
     return { value: runResult(e.init?.stdin) }
   })
-  await $.classic.SessionStart({ source: 'startup' })
+  await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
   await $.session.end({ reason: 'clear', sessionId: sessionID, resume: { id: sessionID } })
   sessionID = 'after-clear'
-  await $.classic.SessionStart({ source: 'clear' })
+  await $.prompt.submit({ text: 'Continue.', wait: false, origin: { kind: 'composer' } })
   await clock.advance(2000)
   expect(commands.filter((command) => command.type === 'presence').map((command) => command.sessionIDs)).toEqual([
     ['claude:before-clear'], [], ['claude:after-clear'], ['claude:after-clear'],
@@ -380,7 +368,9 @@ for (const replaced of [false, true]) {
     const inFlight = new Promise<void>((resolve) => { started = resolve })
     const stopped = new Promise<void>((resolve) => { release = resolve })
     on('session.id', () => ({ value: sessionID }))
-    on('classic.SessionStart', () => ({}))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('command.register', (_, e) => ({ value: { command: e.name } }))
+    on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
     on('agent.list', () => ({ value: [] }))
     on('ui.log', (_, e) => { logs.push(e.text); return { value: undefined } })
     on('process.run', async (_, e) => {
@@ -395,14 +385,14 @@ for (const replaced of [false, true]) {
       }
       return { value: runResult(e.init?.stdin) }
     })
-    await $.classic.SessionStart({ source: 'startup' })
+    await $.session.start({ cwd: '/test', surface: 'terminal', isInteractive: true })
     const tick = clock.advance(2000)
     await inFlight
     let replacement: Promise<object> | undefined
     try {
       if (replaced) {
         sessionID = 'replacement'
-        replacement = $.classic.SessionStart({ source: 'resume' })
+        replacement = $.prompt.submit({ text: 'Continue.', wait: false, origin: { kind: 'composer' } })
         await clock.settle()
       }
     } finally {
@@ -767,22 +757,21 @@ test('background shell work defers announcement and counts the whole task', asyn
   on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: [] }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: backgroundResult('shell') }))
   on('model.fork', () => ({ value: { isAnswered: true, text: 'The background work finished.', usage } }))
   on('process.run', (_, e) => { const command = bridgeCommand(e.init?.stdin); if (command.type !== 'read-announcement-profile') commands.push(command); return { value: runResult(e.init?.stdin) } })
   await $.prompt.submit({ text: 'Run it.', wait: false, origin: { kind: 'composer' } })
   await $.turn.start({ turnId: 'launch', text: 'Run it.' })
   await clock.advance(70000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'shell', type: 'shell', status: 'running', description: 'Build' }] })
+  await $.tool.call({ tool: 'Bash', command: 'build', run_in_background: true })
   await $.turn.complete({ turnId: 'launch', answer: 'Still running.', durationMs: 70000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toEqual([])
   await clock.advance(30000)
-  await $.prompt.submit({ text: taskNotification, wait: false, origin: { kind: 'task-notification' } })
-  await $.turn.start({ turnId: 'result', text: taskNotification })
+  await $.prompt.submit({ text: taskNotificationFor('shell'), wait: false, origin: { kind: 'task-notification' } })
+  await $.turn.start({ turnId: 'result', text: taskNotificationFor('shell') })
   await clock.advance(1000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
   await $.turn.complete({ turnId: 'result', answer: 'Finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
@@ -984,7 +973,7 @@ test('restarting a native task keeps the replacement until its own terminal noti
   expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
 })
 
-test('a terminal notice clears one cached Stop task while a sibling still defers', async ($, on) => {
+test('a terminal notice clears one native task while a sibling still defers', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
   const commands: Array<{ type: string }> = []
   let forks = 0
@@ -992,8 +981,8 @@ test('a terminal notice clears one cached Stop task while a sibling still defers
   on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: [] }))
+  on('tool.call', { tool: 'Bash' }, (_, e) => ({ result: backgroundResult(e.command) }))
   on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'Both tasks finished.', usage } } })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
@@ -1003,10 +992,8 @@ test('a terminal notice clears one cached Stop task while a sibling still defers
   await $.prompt.submit({ text: 'Start.', wait: false, origin: { kind: 'composer' } })
   await $.turn.start({ turnId: 'siblings-launch', text: 'Start.' })
   await clock.advance(70000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [
-    { id: 'first', type: 'shell', status: 'running', description: 'First task' },
-    { id: 'second', type: 'shell', status: 'pending', description: 'Second task' },
-  ] })
+  await $.tool.call({ tool: 'Bash', command: 'first', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'second', run_in_background: true })
   await $.turn.complete({ turnId: 'siblings-launch', answer: 'Running.', durationMs: 70000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(forks).toBe(0)
@@ -1036,8 +1023,8 @@ test('known terminal task statuses clear their matching native IDs', async ($, o
   on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: [] }))
+  on('tool.call', { tool: 'Bash' }, (_, e) => ({ result: backgroundResult(e.command) }))
   on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'All tasks finished.', usage } } })
   on('process.run', (_, e) => {
     const command = bridgeCommand(e.init?.stdin)
@@ -1047,7 +1034,7 @@ test('known terminal task statuses clear their matching native IDs', async ($, o
   await $.prompt.submit({ text: 'Start.', wait: false, origin: { kind: 'composer' } })
   await $.turn.start({ turnId: 'statuses-launch', text: 'Start.' })
   await clock.advance(70000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: statuses.map((status) => ({ id: status, type: 'shell', status: 'running', description: status })) })
+  for (const status of statuses) await $.tool.call({ tool: 'Bash', command: status, run_in_background: true })
   await $.turn.complete({ turnId: 'statuses-launch', answer: 'Running.', durationMs: 70000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(forks).toBe(0)
@@ -1063,7 +1050,7 @@ test('known terminal task statuses clear their matching native IDs', async ($, o
   expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
 })
 
-test('an empty Stop snapshot does not erase a native job result that has not notified yet', async ($, on) => {
+test('a native job remains pending until its terminal notice', async ($, on) => {
   const clock = mock.clock(on, { now: 100000 })
   const commands: Array<{ type: string }> = []
   let forks = 0
@@ -1071,7 +1058,6 @@ test('an empty Stop snapshot does not erase a native job result that has not not
   on('prompt.submit', (_, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: [] }))
   on('tool.call', { tool: 'Bash' }, () => ({ result: backgroundResult('late-job') }))
   on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'The late job finished.', usage } } })
@@ -1083,7 +1069,6 @@ test('an empty Stop snapshot does not erase a native job result that has not not
   await $.prompt.submit({ text: 'Start.', wait: false, origin: { kind: 'composer' } })
   await $.turn.start({ turnId: 'stop-empty-launch', text: 'Start.' })
   await $.tool.call({ tool: 'Bash', command: 'sleep', run_in_background: true })
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
   await clock.advance(70000)
   await $.turn.complete({ turnId: 'stop-empty-launch', answer: 'Running.', durationMs: 70000, isAborted: false, reason: 'answer' })
   await clock.settle()
@@ -1095,28 +1080,6 @@ test('an empty Stop snapshot does not erase a native job result that has not not
   await $.turn.complete({ turnId: 'stop-empty-final', answer: 'The late job finished.', durationMs: 1000, isAborted: false, reason: 'answer' })
   await clock.settle()
   expect(forks).toBe(1)
-})
-
-test('monitor Stop tasks do not defer the main announcement', async ($, on) => {
-  const clock = mock.clock(on, { now: 100000 })
-  const commands: Array<{ type: string }> = []
-  on('session.id', () => ({ value: 'monitor-stop' }))
-  on('turn.start', (_, e) => ({ turnId: e.turnId }))
-  on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
-  on('agent.list', () => ({ value: [] }))
-  on('model.fork', () => ({ value: { isAnswered: true, text: 'Done.', usage } }))
-  on('process.run', (_, e) => {
-    const command = bridgeCommand(e.init?.stdin)
-    if (command.type !== 'read-announcement-profile') commands.push(command)
-    return { value: runResult(e.init?.stdin) }
-  })
-  await $.turn.start({ turnId: 'monitor', text: 'Start.' })
-  await clock.advance(70000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'monitor', type: 'monitor', status: 'running', description: 'Watch' }] })
-  await $.turn.complete({ turnId: 'monitor', answer: 'Done.', durationMs: 70000, isAborted: false, reason: 'answer' })
-  await clock.settle()
-  expect(commands.filter((command) => command.type === 'notify')).toHaveLength(1)
 })
 
 test('the main task waits for every background agent and the final reply', async ($, on) => {

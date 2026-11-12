@@ -26,7 +26,6 @@ use crate::lightning::{PARAMETERS, PRESETS};
 use crate::platform::Preview;
 use crate::settings::{format_time, FontPreference, Settings, DEFAULT_SUMMARY_PROMPT, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use appearance::{Appearance, AppearancePreference};
-use chrono::Timelike;
 use draft::{capture_draft_video, capture_draft_voice, character_video, new_character_id, voice_id_text, SettingsDraft};
 #[cfg(target_os = "windows")]
 use draft::video_picker_path;
@@ -771,9 +770,8 @@ impl SettingsView {
             cx.notify();
             return;
         }
-        let now = chrono::Local::now();
-        if settings.quiet_at(now.hour() * 60 + now.minute()) {
-            self.status = "Preview is silent during quiet hours.".into();
+        if settings.quiet_mode {
+            self.status = "Preview is silent in quiet mode.".into();
             cx.notify();
             return;
         }
@@ -804,9 +802,8 @@ impl SettingsView {
             cx.notify();
             return;
         }
-        let now = chrono::Local::now();
-        if settings.quiet_at(now.hour() * 60 + now.minute()) {
-            self.status = "Preview is silent during quiet hours.".into();
+        if settings.quiet_mode {
+            self.status = "Voice preview is silent in quiet mode.".into();
             cx.notify();
             return;
         }
